@@ -69,6 +69,17 @@ fn starts_on_foot_headless() {
 }
 
 #[test]
+fn starts_in_a_car_headless() {
+    // The same flat world, but the start puts a sedan under the player: the
+    // car physics runs, the HUD draws and the loop stays panic-free.
+    let mut c = bin();
+    c.args(["--headless", "--flat", "--start", "car", "--hold", "2", "--mute", "--weather", "clear"]);
+    let (ok, text) = run_with_limit(c, Duration::from_secs(120));
+    assert!(ok, "headless car run failed: {text}");
+    assert!(!text.to_lowercase().contains("panicked"), "no panic: {text}");
+}
+
+#[test]
 fn bad_start_mode_is_rejected() {
     let mut c = bin();
     c.args(["--start", "swim"]);

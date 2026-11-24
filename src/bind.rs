@@ -216,8 +216,8 @@ pub const FOOT_ACTIONS: &[Action] = &[
     act("first_person", KeyCode::KeyV),
 ];
 
-/// In a car: the groundwork for phase 3's drivable vehicles. The same keys as
-/// walking and flying, but a different action in this context.
+/// In a car: throttle, brake, steering, the handbrake and getting out. Camera,
+/// HUD, minimap, pause and the rest are global and work here too.
 pub const CAR_ACTIONS: &[Action] = &[
     act("car_throttle", KeyCode::KeyW),
     act("car_brake", KeyCode::KeyS),
@@ -225,6 +225,7 @@ pub const CAR_ACTIONS: &[Action] = &[
     act("car_steer_right", KeyCode::KeyD),
     act("car_handbrake", KeyCode::Space),
     act("car_enter_exit", KeyCode::KeyE),
+    act("car_horn", KeyCode::KeyB),
 ];
 
 /// Actions available in every context (camera, HUD, pause, screenshots…).

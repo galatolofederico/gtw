@@ -84,6 +84,7 @@ mod skyglow;
 mod snow;
 mod snowmap;
 mod snowtrack;
+mod vehicle;
 mod world;
 mod yasim;
 
@@ -91,8 +92,7 @@ mod yasim;
 enum Mode {
     Menu,
     Walk,
-    /// Behind the wheel (phase 3 fills in the vehicle; for now the player is
-    /// still on foot if no car was taken).
+    /// Behind the wheel of the player's car.
     Drive,
     Fly,
 }
@@ -131,12 +131,13 @@ impl StartMode {
     }
 }
 
-/// What the world and camera centre on: the body on the ground, the aircraft
-/// in flight.
-fn focus_for(mode: Mode, character: DVec3, plane: DVec3) -> DVec3 {
+/// What the world and camera centre on: the body on the ground, the car, or
+/// the aircraft in flight.
+fn focus_for(mode: Mode, character: DVec3, car: Option<DVec3>, plane: DVec3) -> DVec3 {
     match mode {
         Mode::Fly => plane,
-        Mode::Walk | Mode::Drive | Mode::Menu => character,
+        Mode::Drive => car.unwrap_or(character),
+        Mode::Walk | Mode::Menu => character,
     }
 }
 
@@ -146,15 +147,62 @@ fn plane_drawn(mode: Mode, plane_visible: bool) -> bool {
     mode == Mode::Fly && plane_visible
 }
 
-/// Whether the player's body is drawn: on the ground, unless the eyes are in it.
+/// Whether the player's body is drawn: on foot, unless the eyes are in it.
+/// Behind the wheel the car is the body, so the avatar stays in it.
 fn avatar_drawn(mode: Mode, first_person: bool) -> bool {
-    mode.ground() && !first_person
+    mode == Mode::Walk && !first_person
+}
+
+/// Whether the player's car is drawn: on foot or driving, but not in a menu or
+/// flying.
+fn car_drawn(mode: Mode) -> bool {
+    mode.ground()
 }
 
 /// The health bar's fill (0..1) and the number beside it.
 fn health_bar(health: f32) -> (f32, String) {
     let h = if health.is_finite() { health.clamp(0.0, character::MAX_HEALTH) } else { 0.0 };
     (h / character::MAX_HEALTH, format!("{:.0}", h))
+}
+
+/// The car HUD's speed, in km/h, as a whole number.
+fn drive_speed_text(speed_mps: f64) -> String {
+    let v = if speed_mps.is_finite() { speed_mps.abs() * 3.6 } else { 0.0 };
+    format!("{v:.0}")
+}
+
+/// The car HUD's gear: R, N or the forward gear.
+fn drive_gear_text(gear: i8) -> String {
+    match gear {
+        g if g < 0 => "R".into(),
+        0 => "N".into(),
+        g => g.to_string(),
+    }
+}
+
+/// Which car camera the view flag selects.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum CarView {
+    Chase,
+    Hood,
+}
+
+fn car_view(first_person: bool) -> CarView {
+    if first_person {
+        CarView::Hood
+    } else {
+        CarView::Chase
+    }
+}
+
+/// The minimap shows on the ground whenever the HUD and the minimap are on.
+fn ground_minimap_shown(mode: Mode, minimap: bool) -> bool {
+    mode.ground() && minimap
+}
+
+/// Shortest signed angle from `a` to `b`.
+fn angle_diff(a: f64, b: f64) -> f64 {
+    (b - a + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
 }
 
 /// What the gamepad's buttons work at the moment, besides flying.
@@ -188,11 +236,11 @@ enum PauseAct {
 use crash::Crash;
 use damage::Tear;
 use fablegame::mcp;
-use glam::{DMat4, DQuat, DVec2, DVec3, Mat4, Vec2, Vec3};
+use glam::{DMat4, DQuat, DVec2, DVec3, Mat3, Mat4, Vec2, Vec3};
 use i18n::{t, tr_en};
 use padui::Hint;
 use plane::{Controls, Plane};
-use render::{DrawObj, Frame, Globals, PSim, Renderer};
+use render::{DrawObj, Frame, Globals, Inst, PSim, Renderer};
 use world::WorldQuery;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -1493,6 +1541,11 @@ struct Game {
     /// the character on foot, and whether the aircraft is out in the world
     character: character::Character,
     plane_visible: bool,
+    /// the car being driven, and the last one left behind (re-enterable)
+    vehicle: Option<vehicle::Vehicle>,
+    last_car: Option<vehicle::Vehicle>,
+    /// the eight player car models' wheel positions and sizes
+    car_geom: Vec<cars::CarGeom>,
     /// a menu start asked for on foot rather than in the air
     start_on_foot: bool,
     /// the bindings context the settings screen is editing
@@ -1505,6 +1558,8 @@ struct Game {
     /// the gamepad's on-foot buttons: sprint held, jump pressed this frame
     pad_ground_sprint: bool,
     pad_jump: bool,
+    /// the gamepad's car handbrake held
+    pad_car_handbrake: bool,
     /// write the resume snapshot in the background (phase 5)
     autosave: bool,
     menu: menu::Menu,
@@ -1819,6 +1874,15 @@ impl Game {
         debug_assert_eq!(solids.len() as u32, birds::BASE + 30);
         solids.extend(avatar::meshes().iter().cloned());
         debug_assert_eq!(solids.len() as u32, avatar::BASE + avatar::PARTS as u32);
+        // The player cars: each model's body then its wheel, for their own
+        // moving wheels and damage deformation.
+        let player_models = cars::player_models();
+        let car_geom: Vec<cars::CarGeom> = player_models.iter().map(|m| m.geom()).collect();
+        for m in player_models {
+            solids.push(m.body);
+            solids.push(m.wheel);
+        }
+        debug_assert_eq!(solids.len() as u32, cars::PLAYER_BASE + 2 * cars::N_MODELS as u32);
         r.set_inst_meshes(&solids);
         r.set_scenery(scenery::packs());
         let mut menu = menu::Menu::new(lat, lon, args.hour);
@@ -1962,6 +2026,8 @@ impl Game {
             let p = if mode.ground() { character::safe_point(&world, p).unwrap_or(p) } else { p };
             character::Character::spawn(p, args.heading.to_radians())
         };
+        // A car start puts a sedan at the same safe point.
+        let start_vehicle = (mode == Mode::Drive).then(|| vehicle::Vehicle::spawn(0, [0.58, 0.06, 0.04], character.pos, character.yaw));
         let mut g = Self {
             gkey: src.google.key(), gkey_show: false, gm_logo: None, stills: std::collections::HashMap::new(), window, r, world, src, spec, model, piece_mesh, group_mesh, piece_cut, piece_inner, group_pivots, hangar: Vec::new(), building: Vec::new(), crashed: false, crash: None, crash_real: 0.0, egui_ctx, egui_state, keys: HashSet::new(), drag: false, lean_drag: None, last_cursor: None,
             minimap: minimap::Minimap::new(&prefs),
@@ -1974,6 +2040,9 @@ impl Game {
             g_slow: 1.0, last_bump: 0.0, was_ground: false, prev_vs: 0.0, prev_gear: plane.gear, prev_flaps: plane.flaps, quit: false,
             mode,
             plane_visible: mode == Mode::Fly,
+            vehicle: start_vehicle,
+            last_car: None,
+            car_geom,
             start_on_foot: false,
             bind_ctx: bind::Context::Flight,
             start_mode: want,
@@ -1981,6 +2050,7 @@ impl Game {
             avatar_style: prefs.avatar_style,
             pad_ground_sprint: false,
             pad_jump: false,
+            pad_car_handbrake: false,
             autosave: prefs.autosave,
             character,
             menu, menu_go: args.menu_go, heading: args.heading.to_radians(), destr: destruct::Destruction::new(secs.to_bits()),
@@ -2082,7 +2152,7 @@ impl Game {
     /// What the world streams around, the weather is fetched for, the minimap
     /// follows and the save writes: the character, the car, or the aircraft.
     fn focus_pos(&self) -> DVec3 {
-        focus_for(self.mode, self.character.pos, self.plane.pos)
+        focus_for(self.mode, self.character.pos, self.vehicle.as_ref().map(|v| v.pos), self.plane.pos)
     }
 
     /// The focus's facing as a bearing (radians from north, clockwise).
@@ -2093,6 +2163,7 @@ impl Game {
                 let f = self.plane.forward();
                 f.dot(e).atan2(f.dot(n))
             }
+            Mode::Drive => self.vehicle.as_ref().map_or(self.character.yaw, |v| v.yaw),
             _ => self.character.yaw,
         }
     }
@@ -2157,16 +2228,80 @@ impl Game {
     }
 
     /// On foot, C (and V) switches between the shoulder camera and the eyes.
+    /// In a car, between the chase camera and the bonnet.
     fn toggle_ground_view(&mut self) {
         self.ground_first_person = !self.ground_first_person;
-        self.status = if self.ground_first_person { t!("ground.first_person") } else { t!("ground.third_person") }.into();
+        let key = if self.mode == Mode::Drive {
+            if self.ground_first_person { "ground.hood_view" } else { "ground.chase_view" }
+        } else if self.ground_first_person {
+            "ground.first_person"
+        } else {
+            "ground.third_person"
+        };
+        self.status = i18n::tr(key).into();
         self.status_until = self.real + 2.0;
     }
 
-    /// Interact with what is close on foot. Cars (phase 3) and aircraft
-    /// (phase 5) add their own; v1 has nothing to take yet.
+    /// Interact with what is close: get into a car, or out of one. Aircraft
+    /// come in phase 5.
     fn interact(&mut self) {
-        self.status = t!("ground.nothing_to_interact_with").into();
+        match self.mode {
+            Mode::Drive => self.exit_car(),
+            Mode::Walk => {
+                // The car left behind first, then a parked one at the kerb.
+                if let Some(v) = self.last_car.as_ref().filter(|v| (v.pos - self.character.pos).length() < 4.0) {
+                    let v = v.clone();
+                    self.enter_car(v);
+                    return;
+                }
+                if let Some(car) = self.world.take_parked_car(self.character.pos, 3.2) {
+                    let model = car.model.min(cars::N_MODELS as u8 - 1);
+                    self.enter_car(vehicle::Vehicle::spawn(model, car.colour, car.pos, car.yaw));
+                    return;
+                }
+                self.status = t!("ground.nothing_to_interact_with").into();
+                self.status_until = self.real + 2.0;
+            }
+            _ => {}
+        }
+    }
+
+    /// Get into `v`, which becomes the active car.
+    fn enter_car(&mut self, v: vehicle::Vehicle) {
+        self.cam_yaw = v.yaw;
+        self.cam_pitch = 0.0;
+        self.cam_pos = v.pos;
+        self.character.pos = v.pos;
+        self.character.yaw = v.yaw;
+        self.character.vel = DVec3::ZERO;
+        self.character.grounded = true;
+        self.mode = Mode::Drive;
+        self.vehicle = Some(v);
+        self.last_car = None;
+        self.status = t!("ground.in_the_car").into();
+        self.status_until = self.real + 2.0;
+    }
+
+    /// Get out of the car, on the clear side of it, and leave it behind.
+    fn exit_car(&mut self) {
+        let Some(mut v) = self.vehicle.take() else {
+            self.mode = Mode::Walk;
+            return;
+        };
+        let spot = vehicle::exit_spot(&v, &self.world);
+        v.stop();
+        let yaw = v.yaw;
+        self.last_car = Some(v);
+        self.character.pos = spot;
+        self.character.vel = DVec3::ZERO;
+        self.character.grounded = false;
+        self.character.yaw = yaw;
+        self.character.last_safe = spot;
+        self.mode = Mode::Walk;
+        self.cam_yaw = yaw;
+        self.cam_pitch = 0.0;
+        self.cam_pos = self.character.eye();
+        self.status = t!("ground.left_the_car").into();
         self.status_until = self.real + 2.0;
     }
 
@@ -2538,6 +2673,8 @@ impl Game {
         }
         self.character = character::Character::spawn(safe, self.heading);
         self.mode = if self.start_mode == StartMode::Car { Mode::Drive } else { Mode::Walk };
+        self.vehicle = (self.mode == Mode::Drive).then(|| vehicle::Vehicle::spawn(0, [0.58, 0.06, 0.04], safe, self.heading));
+        self.last_car = None;
         self.plane_visible = false;
         self.crashed = false;
         self.cam_yaw = self.heading;
@@ -3308,10 +3445,14 @@ impl Game {
     }
 
     /// On foot: what the keyboard and pad ask the character to do.
-    fn foot_key_down(&self, id: &str) -> bool {
-        bind::action_in(bind::Context::Foot, id)
-            .and_then(|a| self.binds.key_of(bind::Context::Foot, a))
+    fn ground_key_down(&self, ctx: bind::Context, id: &str) -> bool {
+        bind::action_in(ctx, id)
+            .and_then(|a| self.binds.key_of(ctx, a))
             .is_some_and(|key| self.keys.contains(&key) || self.hot_keys.contains(&key))
+    }
+
+    fn foot_key_down(&self, id: &str) -> bool {
+        self.ground_key_down(bind::Context::Foot, id)
     }
 
     fn foot_controls(&self) -> character::CharacterControls {
@@ -3329,6 +3470,16 @@ impl Game {
         }
     }
 
+    /// Behind the wheel: what the keyboard and pad ask the car to do.
+    fn car_controls(&self) -> vehicle::VehicleControls {
+        let k = |id: &str| self.ground_key_down(bind::Context::Car, id);
+        let pads = self.pad.pitch;
+        let throttle = (k("car_throttle") as u8 as f64 + (-pads).max(0.0)).min(1.0);
+        let brake = (k("car_brake") as u8 as f64 + pads.max(0.0)).min(1.0);
+        let steer = (k("car_steer_right") as i32 - k("car_steer_left") as i32) as f64 + self.pad.roll;
+        vehicle::VehicleControls { throttle, brake, steer: steer.clamp(-1.0, 1.0), handbrake: k("car_handbrake") || self.pad_car_handbrake }
+    }
+
     /// The weather's effect on the surfaces under the player on foot.
     fn ground_weather(&self) -> surface::SurfaceWeather {
         let wet = self.wx.rain.clamp(0.0, 1.0);
@@ -3339,7 +3490,7 @@ impl Game {
     }
 
     /// Advance the character on foot and show what happened.
-    fn step_ground(&mut self, dt: f64) {
+    fn step_walk(&mut self, dt: f64) {
         let c = self.foot_controls();
         let wx = self.ground_weather();
         // (The camera's bearing points the way forward on the ground.)
@@ -3352,6 +3503,59 @@ impl Game {
         } else if s.damage > 0.0 && s.landed.is_some() {
             self.status = t!("ground.hard_landing", s.damage).into();
             self.status_until = self.real + 2.5;
+        }
+    }
+
+    /// Advance the car, keep the character with it, and show what happened.
+    fn step_drive(&mut self, dt: f64, femit: &mut Vec<(DVec3, render::Particle)>) {
+        let c = self.car_controls();
+        let wx = self.ground_weather();
+        let Some(v) = self.vehicle.as_mut() else {
+            self.mode = Mode::Walk;
+            return;
+        };
+        let (was_water, was_wrecked) = (v.water, v.damage.wrecked());
+        let s = v.step(dt, &c, &self.world, &wx);
+        let (pos, yaw, speed, dmg, wrecked, water, health, smoking) = (s.pos, s.yaw, s.speed, s.damage, s.wrecked, s.water, v.damage.health, v.damage.smoking());
+        self.character.pos = pos;
+        self.character.yaw = yaw;
+        self.character.vel = DVec3::ZERO;
+        self.character.grounded = true;
+        self.character.last_safe = pos;
+        if dmg > 1.5 {
+            self.status = t!("ground.crash_damage", dmg).into();
+            self.status_until = self.real + 2.0;
+        } else if water && !was_water {
+            self.status = t!("ground.water_stall").into();
+            self.status_until = self.real + 4.0;
+        } else if wrecked && !was_wrecked {
+            self.status = t!("ground.car_wrecked").into();
+            self.status_until = self.real + 4.0;
+        }
+        // A hurt engine smokes from under the bonnet.
+        if dt > 0.0 && !self.paused && (smoking || wrecked) && (speed.abs() > 0.5 || wrecked) {
+            let up = pos.normalize();
+            let (e, n, _) = geo::enu(pos);
+            let fwd = e * yaw.sin() + n * yaw.cos();
+            let at = pos + up * 0.95 + fwd * 1.5;
+            self.anchor_fx(at);
+            self.smoke_acc += dt as f32 * 5.0;
+            let black = health < vehicle::SMOKE_HEALTH * 0.5;
+            while self.smoke_acc >= 1.0 {
+                self.smoke_acc -= 1.0;
+                let r = &mut self.rng;
+                let vel = up.as_vec3() * r.range(1.0, 2.5) + fwd.as_vec3() * r.range(-1.0, 2.0) + r.dir() * 0.8;
+                femit.push((at, render::Particle { vel: vel.into(), life: r.range(1.0, 2.5), size0: r.range(0.2, 0.4), size1: r.range(1.5, 3.5), temp: 0.05, kind: if black { crash::GAS } else { crash::MIST }, drag: 1.2, buoy: 0.8, seed: r.f(), alpha: r.range(0.2, 0.4), ..Default::default() }));
+            }
+        }
+    }
+
+    /// Advance whatever the player is in on the ground: the car or the feet.
+    fn step_ground(&mut self, dt: f64, femit: &mut Vec<(DVec3, render::Particle)>) {
+        if self.mode == Mode::Drive {
+            self.step_drive(dt, femit);
+        } else {
+            self.step_walk(dt);
         }
     }
 
@@ -3663,20 +3867,39 @@ impl Game {
             self.cam_yaw = (self.cam_yaw + look_x * rate).rem_euclid(std::f64::consts::TAU);
             self.cam_pitch = (self.cam_pitch + look_y * rate * 0.8).clamp(-1.35, 1.35);
             // The pad's on-foot buttons (padmap::FOOT_LAYOUT): RB sprints, A
-            // jumps, X interacts and R3 swaps the camera.
+            // jumps, X interacts and R3 swaps the camera. In a car (padmap::
+            // CAR_LAYOUT) the left stick drives, RB is the handbrake, X gets
+            // out, R3 swaps the view and L3 sounds the horn.
             use padmap::PadBtn;
-            self.pad_ground_sprint = down.contains(&PadBtn::RB);
-            if pressed.contains(&PadBtn::A.gilrs()) {
-                self.pad_jump = true;
-            }
-            if pressed.contains(&PadBtn::X.gilrs()) {
-                self.interact();
-            }
-            if pressed.contains(&PadBtn::R3.gilrs()) {
-                self.toggle_ground_view();
+            if self.mode == Mode::Drive {
+                self.pad_car_handbrake = down.contains(&PadBtn::RB);
+                self.pad_ground_sprint = false;
+                if pressed.contains(&PadBtn::X.gilrs()) {
+                    self.interact();
+                }
+                if pressed.contains(&PadBtn::R3.gilrs()) {
+                    self.toggle_ground_view();
+                }
+                if pressed.contains(&PadBtn::L3.gilrs()) {
+                    self.status = t!("ground.horn").into();
+                    self.status_until = self.real + 1.0;
+                }
+            } else {
+                self.pad_car_handbrake = false;
+                self.pad_ground_sprint = down.contains(&PadBtn::RB);
+                if pressed.contains(&PadBtn::A.gilrs()) {
+                    self.pad_jump = true;
+                }
+                if pressed.contains(&PadBtn::X.gilrs()) {
+                    self.interact();
+                }
+                if pressed.contains(&PadBtn::R3.gilrs()) {
+                    self.toggle_ground_view();
+                }
             }
         } else if self.mode.ground() {
             self.pad_ground_sprint = false;
+            self.pad_car_handbrake = false;
         }
         if flying && nav != Nav::Panel && self.cam_mode != settings::TAIL_VIEW {
             // Right stick: look around, as fast as a quick head turn at full deflection.
@@ -4716,12 +4939,27 @@ impl Game {
             KeyCode::Escape => self.set_pause_menu(true),
             KeyCode::KeyR if self.mode.ground() => {
                 let at = self.character.last_safe;
-                self.character.respawn_near(&self.world, at);
-                self.status = t!("ground.respawned").into();
+                match self.mode {
+                    Mode::Drive => {
+                        if let Some(v) = self.vehicle.as_mut() {
+                            v.pos = character::safe_point(&self.world, at).unwrap_or(at);
+                            v.stop();
+                        }
+                        self.status = t!("ground.back_on_the_road").into();
+                    }
+                    _ => {
+                        self.character.respawn_near(&self.world, at);
+                        self.status = t!("ground.respawned").into();
+                    }
+                }
                 self.status_until = self.real + 2.0;
             }
             KeyCode::KeyR if self.arcade || self.crashed => self.respawn_here(),
             KeyCode::KeyR => self.arcade_only(t!("game.respawning_in_flight")),
+            KeyCode::KeyB if self.mode == Mode::Drive => {
+                self.status = t!("ground.horn").into();
+                self.status_until = self.real + 1.0;
+            }
             KeyCode::KeyC if self.mode.ground() => self.toggle_ground_view(),
             KeyCode::KeyC => self.next_view(),
             KeyCode::F6 if self.mode == Mode::Fly && !self.crashed => self.toggle_tail_view(),
@@ -5957,7 +6195,7 @@ impl Game {
                 (_, Some(f)) => f,
             };
             glass_rain = self.wx.rain * (1.0 - snow::snow_share(h, fz) as f32);
-            let airspeed = if self.mode == Mode::Fly { self.plane.ias() } else { self.character.speed() };
+            let airspeed = if self.mode == Mode::Fly { self.plane.ias() } else if self.mode == Mode::Drive { self.vehicle.as_ref().map_or(0.0, |v| v.speed()) } else { self.character.speed() };
             self.glass.step(dt, glass_rain, airspeed * 1.94384);
         }
 
@@ -6170,7 +6408,7 @@ impl Game {
         }
         crate::gputime::cpu("sim.flight_physics+weapons");
         if !self.crashed && !in_menu && self.mode.ground() {
-            self.step_ground(dt);
+            self.step_ground(dt, &mut femit);
         }
         if dt > 0.0 && !self.kills.is_empty() {
             self.step_kills(dt, &mut femit);
@@ -6402,6 +6640,57 @@ impl Game {
             }
             self.menu_time_seen = (self.menu.hour, self.doy);
             self.cam_pos = cam;
+        } else if self.mode == Mode::Drive {
+            // Behind the car, or over the bonnet in the near view. The mouse
+            // looks around, and the view eases back behind the car when the
+            // mouse is still.
+            let (car_pos, car_yaw) = self.vehicle.as_ref().map_or((self.character.pos, self.character.yaw), |v| (v.pos, v.yaw));
+            let dt = dt_real;
+            let look_x = (self.foot_key_down("look_right") as i32 - self.foot_key_down("look_left") as i32) as f64;
+            let look_y = (self.foot_key_down("look_down") as i32 - self.foot_key_down("look_up") as i32) as f64;
+            self.cam_yaw = (self.cam_yaw + look_x * 1.6 * dt).rem_euclid(std::f64::consts::TAU);
+            self.cam_pitch = (self.cam_pitch + look_y * 1.1 * dt).clamp(-0.9, 0.8);
+            if look_x == 0.0 && look_y == 0.0 && !self.drag {
+                self.cam_yaw -= angle_diff(self.cam_yaw, car_yaw) * (dt * 2.5).min(1.0);
+                self.cam_pitch *= 1.0 - (dt * 1.5).min(1.0);
+            }
+            let up = car_pos.normalize();
+            let (east, north, _) = geo::enu(car_pos);
+            let bearing = self.cam_yaw;
+            let ahead = east * bearing.sin() + north * bearing.cos();
+            let target = car_pos + up * 1.1;
+            match car_view(self.ground_first_person) {
+                CarView::Hood => {
+                    // At the windscreen, just above the bonnet.
+                    let pitch = self.cam_pitch;
+                    cam = car_pos + up * (1.35 + pitch * 0.1) + ahead * 0.15;
+                    dir = (ahead * pitch.cos() + up * pitch.sin()).normalize_or_zero();
+                    upv = up;
+                }
+                CarView::Chase => {
+                    // Behind and above, pulled in when a wall or the ground is
+                    // in the way.
+                    let mut chosen = None;
+                    for d in [7.5, 6.2, 5.0, 3.8, 2.6, 1.5] {
+                        let p = target - ahead * d + up * (1.2 + 0.55 * (d / 7.5));
+                        let (la, lo, alt) = geo::pos_to_lla(p);
+                        if self.world.ground(la, lo).is_some_and(|g| alt < g.h + 0.5) {
+                            continue;
+                        }
+                        if self.world.building_push_sphere(p, 0.4).is_some() {
+                            continue;
+                        }
+                        chosen = Some(p);
+                        break;
+                    }
+                    cam = chosen.unwrap_or(target - ahead * 1.5 + up * 1.4);
+                    dir = (target - cam).normalize_or_zero();
+                    upv = up;
+                }
+            }
+            self.cam_pos = cam;
+            self.cam_dir = ahead;
+            self.cam_look = target;
         } else if self.mode.ground() {
             // On foot: over the shoulder, or from the eyes in first person.
             let c = &self.character;
@@ -7096,6 +7385,14 @@ impl Game {
             let sun_up = geo::enu(cam).2.dot(self.sun_dir());
             self.world.car_instances(cam, cars::activity(local as f32), sun_up, &mut insts, &mut air_lights);
             self.n_cars = insts.len();
+            // The player's car: the one being driven, or the one left behind.
+            if car_drawn(self.mode) {
+                if let Some(v) = self.vehicle.as_ref().or(self.last_car.as_ref()) {
+                    if let Some(g) = self.car_geom.get(v.model as usize) {
+                        car_instances(cam, v, g, &mut insts);
+                    }
+                }
+            }
             // The player on foot: the rigid avatar, unless the eyes are in it.
             if avatar_drawn(self.mode, self.ground_first_person) {
                 let speed = self.character.speed();
@@ -7823,8 +8120,9 @@ impl Game {
     /// The bottom-right credits: Google's logo (its official outlined
     /// artwork, unaltered, 22 px with its outline, clear space round it) while
     /// their imagery or 3D tiles are on screen, then the data credits.
-    /// The ground HUD: health, and which camera the player is in. Flight
-    /// instruments stay out of the way on foot.
+    /// The ground HUD: health (and, in a car, speed, gear and the car's own
+    /// damage), the camera, and what E would do. Flight instruments stay out
+    /// of the way on the ground.
     fn ground_hud(&self, ctx: &egui::Context) {
         use egui::{Align2, Color32, RichText};
         let (fill, value) = health_bar(self.character.health);
@@ -7848,6 +8146,60 @@ impl Game {
                 ui.label(RichText::new(view).font(menu::caption()).color(menu::DIM));
             });
         });
+        if self.mode == Mode::Drive {
+            let (speed, gear, health) = self.vehicle.as_ref().map_or((0.0, 1, vehicle::MAX_HEALTH), |v| (v.speed(), v.gear, v.damage.health));
+            let (car_fill, car_value) = health_bar(health);
+            egui::Area::new(egui::Id::unique("car hud")).anchor(Align2::LEFT_BOTTOM, [24.0, -126.0]).interactable(false).show(ctx, |ui| {
+                egui::Frame::new().fill(Color32::from_black_alpha(150)).corner_radius(menu::R_WIDGET).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+                    ui.set_width(240.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(drive_speed_text(speed)).font(menu::bold(34.0)).color(Color32::WHITE));
+                        ui.label(RichText::new(t!("ground.kmh")).font(menu::caption()).color(menu::DIM));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(drive_gear_text(gear)).font(menu::bold(22.0)).color(menu::ACCENT));
+                            ui.label(RichText::new(t!("ground.gear")).font(menu::caption()).color(menu::DIM));
+                        });
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(t!("ground.car_health")).font(menu::caption()).color(menu::DIM));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(car_value).font(menu::semibold(12.0)).color(if car_fill < 0.3 { menu::BAD } else { Color32::WHITE }));
+                        });
+                    });
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(216.0, 6.0), egui::Sense::hover());
+                    let p = ui.painter();
+                    p.rect_filled(r, 3.0, Color32::from_gray(50));
+                    let mut bar = r;
+                    bar.set_width(r.width() * car_fill);
+                    p.rect_filled(bar, 3.0, if car_fill < 0.3 { menu::BAD } else { menu::ACCENT });
+                });
+            });
+        }
+        // What E does from here.
+        let prompt = match self.mode {
+            Mode::Drive => Some(t!("ground.leave_car")),
+            Mode::Walk => {
+                let in_reach = self.last_car.as_ref().is_some_and(|v| (v.pos - self.character.pos).length() < 4.0);
+                if in_reach {
+                    Some(t!("ground.re_enter_car"))
+                } else if self.world.nearest_parked_car(self.character.pos, 3.2).is_some() {
+                    Some(t!("ground.take_car"))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(what) = prompt {
+            egui::Area::new(egui::Id::unique("ground prompt")).anchor(Align2::CENTER_BOTTOM, [0.0, -100.0]).interactable(false).show(ctx, |ui| {
+                egui::Frame::new().fill(Color32::from_black_alpha(140)).corner_radius(menu::R_WIDGET).inner_margin(egui::Margin::symmetric(10, 5)).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        menu::key_cap(ui, "E");
+                        ui.label(RichText::new(what).font(menu::label()).color(menu::TEXT));
+                    });
+                });
+            });
+        }
     }
 
     fn credits(&mut self, ctx: &egui::Context) {
@@ -8722,7 +9074,12 @@ impl Game {
             }
             self.minimap.trail.push(lat.to_degrees(), lon.to_degrees());
             self.minimap.tuned = minimap_tuned(&self.radios);
-            if !self.pause_open && !self.show_help && !self.goto_open && (self.minimap.full || (self.hud_on() && self.minimap.visible)) {
+            let map_on = if self.mode.ground() {
+                ground_minimap_shown(self.mode, self.hud_on() && self.minimap.visible)
+            } else {
+                self.hud_on() && self.minimap.visible
+            };
+            if !self.pause_open && !self.show_help && !self.goto_open && (self.minimap.full || map_on) {
                 {
                     let horizontal = f.dot(e).hypot(f.dot(n));
                     self.minimap.show(ctx, &self.src, lat, lon, (horizontal > 1e-5).then_some(hdg.to_radians()), self.info_open, landing_guide.as_ref(), &self.world);
@@ -9604,6 +9961,42 @@ fn pose_rows(m: &Mat4) -> [[f32; 4]; 3] {
     [m.row(0).to_array(), m.row(1).to_array(), m.row(2).to_array()]
 }
 
+/// Instance rows for the instanced-solid shader (as `avatar::instances`).
+fn inst_rows(m: Mat4) -> [[f32; 4]; 3] {
+    let c = m.to_cols_array_2d();
+    [[c[0][0], c[1][0], c[2][0], c[3][0]], [c[0][1], c[1][1], c[2][1], c[3][1]], [c[0][2], c[1][2], c[2][2], c[3][2]]]
+}
+
+/// The player car's body and four wheels, seen from `cam`. The body carries
+/// the damage amount in `ext.w` (negative), which `inst.wgsl` uses to crumple
+/// the panels; the wheels steer and spin.
+fn car_instances(cam: DVec3, v: &vehicle::Vehicle, geom: &cars::CarGeom, out: &mut Vec<(u32, Inst)>) {
+    if !cam.is_finite() || !v.pos.is_finite() {
+        return;
+    }
+    let up = v.pos.normalize();
+    let (e, n, _) = geo::enu(v.pos);
+    let (sin, cos) = v.yaw.sin_cos();
+    let fwd = e * sin + n * cos;
+    let right = fwd.cross(up).normalize_or_zero();
+    if right.length_squared() < 0.5 {
+        return;
+    }
+    let basis = Mat3::from_cols(right.as_vec3(), up.as_vec3(), (-fwd).as_vec3());
+    let rot = basis * Mat3::from_rotation_x(v.pitch) * Mat3::from_rotation_z(v.roll);
+    let o = (v.pos - cam).as_vec3();
+    let body = Mat4::from_cols(rot.x_axis.extend(0.0), rot.y_axis.extend(0.0), rot.z_axis.extend(0.0), o.extend(1.0));
+    out.push((cars::player_body_mesh(v.model), Inst { m: inst_rows(body), tint: [v.colour[0], v.colour[1], v.colour[2], 0.0], ext: [0.0, 0.0, 0.0, -v.damage.crumple] }));
+    for (i, w) in geom.wheels.iter().enumerate() {
+        let local = Vec3::from_array(*w);
+        let steer = if i < 2 { -v.steer as f32 * 0.42 } else { 0.0 };
+        let wheel_rot = rot * Mat3::from_rotation_y(steer) * Mat3::from_rotation_x(-v.wheel_spin as f32);
+        let wp = rot * local;
+        let m = Mat4::from_cols(wheel_rot.x_axis.extend(0.0), wheel_rot.y_axis.extend(0.0), wheel_rot.z_axis.extend(0.0), (o + wp).extend(1.0));
+        out.push((cars::player_wheel_mesh(v.model), Inst { m: inst_rows(m), tint: [v.colour[0], v.colour[1], v.colour[2], 0.0], ext: [0.0, 0.0, 0.0, 0.0] }));
+    }
+}
+
 #[cfg(test)]
 mod cli_tests {
     use super::*;
@@ -9666,10 +10059,12 @@ mod cli_tests {
     #[test]
     fn focus_and_aircraft_visibility_follow_the_mode() {
         let character = geo::lla_to_pos(0.5, 0.1, 12.0);
+        let car = geo::lla_to_pos(0.5, 0.1, 0.5);
         let plane = geo::lla_to_pos(1.0, 0.2, 800.0);
-        assert_eq!(focus_for(Mode::Walk, character, plane), character);
-        assert_eq!(focus_for(Mode::Drive, character, plane), character);
-        assert_eq!(focus_for(Mode::Fly, character, plane), plane);
+        assert_eq!(focus_for(Mode::Walk, character, Some(car), plane), character);
+        assert_eq!(focus_for(Mode::Drive, character, Some(car), plane), car);
+        assert_eq!(focus_for(Mode::Drive, character, None, plane), character);
+        assert_eq!(focus_for(Mode::Fly, character, Some(car), plane), plane);
         // The aircraft is drawn only in flight, and only once it is out.
         assert!(!plane_drawn(Mode::Walk, false));
         assert!(!plane_drawn(Mode::Walk, true));
@@ -9677,15 +10072,64 @@ mod cli_tests {
         assert!(plane_drawn(Mode::Fly, true));
         assert!(!plane_drawn(Mode::Fly, false));
         assert!(!plane_drawn(Mode::Menu, true));
-        // The avatar shows on the ground, and is hidden in first person.
+        // The avatar shows on foot only: behind the wheel it would be in the car.
         assert!(avatar_drawn(Mode::Walk, false));
-        assert!(avatar_drawn(Mode::Drive, false));
+        assert!(!avatar_drawn(Mode::Drive, false));
         assert!(!avatar_drawn(Mode::Walk, true));
         assert!(!avatar_drawn(Mode::Fly, false));
         assert!(!avatar_drawn(Mode::Menu, false));
+        // The car is drawn on the ground, not in the menu or in flight.
+        assert!(car_drawn(Mode::Walk));
+        assert!(car_drawn(Mode::Drive));
+        assert!(!car_drawn(Mode::Fly));
+        assert!(!car_drawn(Mode::Menu));
         // The mode also picks the input context.
         assert_eq!(Mode::Walk.ground(), true);
         assert_eq!(Mode::Fly.ground(), false);
+    }
+
+    #[test]
+    fn player_car_instances_are_finite_and_carry_damage() {
+        let pos = geo::lla_to_pos(0.5, 0.1, 0.0);
+        let mut v = vehicle::Vehicle::spawn(0, [0.5, 0.1, 0.1], pos, 0.7);
+        v.wheel_spin = 1.2;
+        v.steer = 0.5;
+        v.damage.crumple = 0.4;
+        v.roll = 0.05;
+        v.pitch = -0.03;
+        let g = cars::player_geom(0);
+        let mut out = Vec::new();
+        car_instances(pos + DVec3::new(0.0, 0.0, 20.0), &v, &g, &mut out);
+        assert_eq!(out.len(), 5, "the body and four wheels");
+        assert_eq!(out[0].0, cars::player_body_mesh(0));
+        assert!((out[0].1.ext[3] + 0.4).abs() < 1e-6, "the body carries the crumple");
+        assert!(out[1..].iter().all(|(id, i)| *id == cars::player_wheel_mesh(0) && i.ext[3] == 0.0));
+        assert!(out.iter().all(|(_, i)| i.m.iter().flatten().all(|f| f.is_finite())));
+    }
+
+    #[test]
+    fn driving_hud_and_camera_formatting() {
+        // Speeds are km/h, whole numbers, direction ignored.
+        assert_eq!(drive_speed_text(0.0), "0");
+        assert_eq!(drive_speed_text(10.0), "36");
+        assert_eq!(drive_speed_text(-10.0), "36");
+        assert_eq!(drive_speed_text(f64::NAN), "0");
+        // Gears: reverse, neutral, then the forward gear.
+        assert_eq!(drive_gear_text(-1), "R");
+        assert_eq!(drive_gear_text(0), "N");
+        assert_eq!(drive_gear_text(1), "1");
+        assert_eq!(drive_gear_text(5), "5");
+        // The camera: chase unless the near view is on.
+        assert_eq!(car_view(false), CarView::Chase);
+        assert_eq!(car_view(true), CarView::Hood);
+        // The minimap is for Walk and Drive only.
+        assert!(ground_minimap_shown(Mode::Walk, true));
+        assert!(ground_minimap_shown(Mode::Drive, true));
+        assert!(!ground_minimap_shown(Mode::Walk, false));
+        assert!(!ground_minimap_shown(Mode::Fly, true));
+        assert!(!ground_minimap_shown(Mode::Menu, true));
+        // Looking round wraps the short way.
+        assert!((angle_diff(0.1, 6.2) + 0.183).abs() < 0.01);
     }
 
     #[test]

@@ -205,6 +205,24 @@ pub fn foot_rows() -> Vec<(String, &'static str)> {
     rows
 }
 
+/// The pad in a car: the left stick drives, the right stick steers, and a
+/// button for the handbrake, getting out, the camera and the horn. Shown in
+/// Settings › Controls › In a car; the flying and on-foot layouts are unchanged.
+pub const CAR_LAYOUT: &[(&str, Chord)] = {
+    use PadBtn::*;
+    &[("car_handbrake", b(RB)), ("car_enter_exit", b(X)), ("camera", b(R3)), ("car_horn", b(L3))]
+};
+
+/// What the pad does in a car, as the controls list shows it: (input, does).
+pub fn car_rows() -> Vec<(String, &'static str)> {
+    use crate::i18n::t;
+    let mut rows = vec![("LS".to_string(), t!("gamepad.throttle_and_brake")), ("RS".to_string(), t!("gamepad.steer"))];
+    for &(id, c) in CAR_LAYOUT {
+        rows.push((c.spec(), label(id)));
+    }
+    rows
+}
+
 /// Keys left off the pad: the stick and pedals are axes on it, and Menu pauses.
 const NOT_ON_PAD: [&str; 7] = ["pitch_down", "pitch_up", "roll_left", "roll_right", "rudder_left", "rudder_right", "pause_menu"];
 
@@ -904,6 +922,22 @@ mod tests {
         let rows = foot_rows();
         assert_eq!(rows[0], ("LS".to_string(), "move"));
         assert!(rows.iter().any(|(k, what)| k == "A" && *what == label("jump")));
+    }
+
+    #[test]
+    fn the_car_layout_has_its_own_buttons() {
+        let mut seen = Vec::new();
+        for &(id, c) in CAR_LAYOUT {
+            assert!(!seen.contains(&c), "{id} shares {c:?}");
+            assert_ne!(c, PAUSE);
+            seen.push(c);
+            assert!(crate::bind::CAR_ACTIONS.iter().any(|a| a.id == id) || crate::bind::is_global(id), "{id} is a car or global action");
+            assert_ne!(label(id), "?", "{id} has a label");
+        }
+        let rows = car_rows();
+        assert_eq!(rows[0].0, "LS");
+        assert_eq!(rows[1].0, "RS");
+        assert!(rows.iter().any(|(k, what)| k == "RB" && *what == label("car_handbrake")));
     }
 
     #[test]

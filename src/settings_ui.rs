@@ -499,6 +499,16 @@ impl Game {
                         ui.end_row();
                     }
                 });
+            } else if self.bind_ctx == bind::Context::Car {
+                ui.add_space(6.0);
+                // The pad's own in-car layout.
+                bind_grid(ui, "pad_car", |ui| {
+                    for (k, w) in padmap::car_rows() {
+                        ui.label(RichText::new(k).font(menu::bold(12.0)).color(ACCENT));
+                        ui.label(RichText::new(w).font(menu::caption()).color(TEXT));
+                        ui.end_row();
+                    }
+                });
             }
         });
         card(ui, t!("settings.connected_devices"), |ui| self.binds_devices(ui));
