@@ -253,9 +253,11 @@ fn wheel_mesh(s: &Spec) -> (Vec<MeshVertex>, Vec<u32>) {
     const N: usize = 14;
     let hw = 0.1125;
     let hub = s.wheel_r * 0.62;
+    // The origin is the axle: the wheel is spun about it, so its rim is
+    // centred here rather than a wheel radius above it.
     let pt = |k: usize, x: f32, r: f32| {
         let a = k as f32 / N as f32 * std::f32::consts::TAU;
-        Vec3::new(x, s.wheel_r + a.sin() * r, a.cos() * r)
+        Vec3::new(x, a.sin() * r, a.cos() * r)
     };
     for k in 0..N {
         let (a, b) = (k, (k + 1) % N);
@@ -266,7 +268,7 @@ fn wheel_mesh(s: &Spec) -> (Vec<MeshVertex>, Vec<u32>) {
             let x = side * hw;
             let wall = [pt(a, x, s.wheel_r), pt(b, x, s.wheel_r), pt(b, x, hub), pt(a, x, hub)];
             m.poly(&if side > 0.0 { wall } else { [wall[1], wall[0], wall[3], wall[2]] }, tyre);
-            let centre = Vec3::new(x - side * 0.015, s.wheel_r, 0.0);
+            let centre = Vec3::new(x - side * 0.015, 0.0, 0.0);
             let disc = [centre, pt(a, x - side * 0.015, hub), pt(b, x - side * 0.015, hub)];
             m.poly(&if side > 0.0 { disc } else { [disc[0], disc[2], disc[1]] }, hub_col);
         }
@@ -749,6 +751,22 @@ mod tests {
         assert_eq!(player_wheel_mesh(0), PLAYER_BASE + 1);
         assert_eq!(player_body_mesh(7), PLAYER_BASE + 14);
         assert_eq!(player_wheel_mesh(7), PLAYER_BASE + 15);
+    }
+
+    #[test]
+    fn player_wheel_meshes_are_centred_on_the_axle() {
+        // A wheel is spun about its instance origin. Its mesh must therefore be
+        // centred there, not a wheel radius above it, or it orbits its axle.
+        for (i, m) in player_models().iter().enumerate() {
+            let n = m.wheel.0.len() as f32;
+            let cy = m.wheel.0.iter().map(|v| v.pos[1]).sum::<f32>() / n;
+            let cz = m.wheel.0.iter().map(|v| v.pos[2]).sum::<f32>() / n;
+            assert!(cy.abs() < 0.01, "model {i} wheel is {cy:.3} m above its axle");
+            assert!(cz.abs() < 0.01, "model {i} wheel is {cz:.3} m along its axle");
+            let ground = m.wheels.iter().map(|w| w[1]).fold(f32::INFINITY, f32::min);
+            let low = m.wheel.0.iter().map(|v| v.pos[1]).fold(f32::INFINITY, f32::min);
+            assert!((ground + low).abs() < 0.05, "model {i} wheel sits on the ground");
+        }
     }
 
     #[test]
