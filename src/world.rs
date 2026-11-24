@@ -68,6 +68,10 @@ struct BTile {
 }
 /// How far from the camera a floodlight still lights the ground (m).
 const FLOOD_REACH: f64 = 3000.0;
+/// Every moving car this close to the camera is drawn, whatever the time of
+/// day. All traffic is solid to the player, so a car it can hit must never be
+/// invisible: the activity share thins out only the far ones.
+const CAR_NEAR_DRAW: f64 = 300.0;
 /// A mast's floodlights: about 1e5 cd on the beam's axis (Globals units, as
 /// the landing lights: cd / 1e4 / pi, times 60), and the beam's half-angle.
 const FLOOD_I: f32 = 1.0e5 / 1.0e4 / std::f32::consts::PI * 60.0;
@@ -922,6 +926,11 @@ impl World {
         if !p.is_finite() || !(radius > 0.0) {
             return;
         }
+        // With the cars setting off none are drawn: none may be solid either,
+        // or the player would be stopped by traffic it cannot see.
+        if self.cars.0 <= 0.0 {
+            return;
+        }
         let (lat, lon, _) = geo::pos_to_lla(p);
         let c = TileId::at(lat, lon, DATA_ZOOM);
         let size = 1i64 << DATA_ZOOM;
@@ -1403,6 +1412,11 @@ impl World {
     /// Instances for every visible moving and parked car; and, at night
     /// (`sun`: sine of the sun's elevation at the camera), the lights of the
     /// moving ones that the 3D tiles hide (`photo_car_light`).
+    ///
+    /// This is also the traffic the physics treats as solid (see
+    /// [`World::traffic_bodies_near`]): the time-of-day share may thin out
+    /// only cars far from the camera, never one close enough to reach the
+    /// player, and Cars: Off draws and collides with none.
     pub fn car_instances(&self, cam: DVec3, activity: f32, sun: f64, out: &mut Vec<(u32, Inst)>, lights: &mut Vec<crate::airfield::Light>) {
         let fr = self.frustum.as_ref();
         let push = |pos: DVec3, fwd: glam::Vec3, up: glam::Vec3, model: u8, col: [f32; 3], out: &mut Vec<(u32, Inst)>| {
@@ -1430,12 +1444,20 @@ impl World {
             let mut streets = None;
             let up = b.center.normalize().as_vec3();
             for (i, c) in b.cars.iter().enumerate() {
-                if c.rank > activity || b.net.paths[c.path as usize].hidden {
+                if b.net.paths[c.path as usize].hidden {
                     continue;
                 }
                 let (p, dir) = cars::pose(&b.net, c, up);
                 let pos = b.center + (p + c.shift).as_dvec3();
-                if (pos - cam).length_squared() < car_far * car_far {
+                let d2 = (pos - cam).length_squared();
+                // A car close enough to reach the player is always drawn: the
+                // physics treats every car as solid, and a car that yields or
+                // blocks must be visible. The time-of-day share only thins the
+                // far traffic out of the view.
+                if c.rank > activity && d2 > CAR_NEAR_DRAW * CAR_NEAR_DRAW {
+                    continue;
+                }
+                if d2 < car_far * car_far {
                     let fwd = if c.dir == glam::Vec3::ZERO { dir } else { c.dir };
                     push(pos, fwd, up, c.model, c.col, out);
                     if let Some(photo) = lit {
@@ -3121,6 +3143,43 @@ mod tests {
         out.clear();
         w.traffic_bodies_near(p + east() * 400.0, 10.0, &mut out);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_close_moving_car_is_drawn_even_when_the_traffic_share_is_low() {
+        // Late at night only a share of the moving cars is drawn by rank, but
+        // every one of them is solid and yields to the player. A car close
+        // enough to reach the player must therefore stay visible, or it is an
+        // invisible obstacle: the user drives up to a car that is not drawn
+        // and is stopped by it.
+        let mut w = traffic_world(5.0);
+        let id = w.test_traffic.expect("test tile");
+        let Some(BSlot::Ready(b)) = w.builds.get_mut(&id) else { panic!("test tile ready") };
+        b.cars[0].rank = 0.99;
+        w.draw_b.push(id);
+        // Keep the far-draw limit out of the test's way.
+        w.cars = (1.0, 10_000.0, 10_000.0);
+        let mut out = Vec::new();
+        let mut lights = Vec::new();
+        w.car_instances(origin(), 0.1, 1.0, &mut out, &mut lights);
+        assert_eq!(out.len(), 1, "the car next to the player is drawn");
+        out.clear();
+        w.car_instances(origin() + east() * 800.0, 0.1, 1.0, &mut out, &mut lights);
+        assert!(out.is_empty(), "an 800 m car is still thinned out by rank");
+    }
+
+    #[test]
+    fn cars_that_are_not_drawn_are_not_solid() {
+        // The cars setting can be Off: car_instances draws nothing at all.
+        // traffic_bodies_near must agree, or an invisible traffic wall stops
+        // the player.
+        let mut w = traffic_world(5.0);
+        let mut out = Vec::new();
+        w.traffic_bodies_near(origin(), 20.0, &mut out);
+        assert_eq!(out.len(), 1, "traffic is solid with the cars setting on");
+        w.cars.0 = 0.0;
+        w.traffic_bodies_near(origin(), 20.0, &mut out);
+        assert!(out.is_empty(), "with the cars setting off, traffic is not solid");
     }
 
     #[test]
