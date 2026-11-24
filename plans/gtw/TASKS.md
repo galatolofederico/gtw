@@ -296,36 +296,36 @@ cargo run --release -- --help
 
 ### Implementation
 
-- [ ] 6.1 Add `audio::Emitter`, `EmitterKind`, `WorldAudio`, and `Audio::set_world` with camera-relative gain and pan.
-- [ ] 6.2 Add a player-car voice with engine RPM/load, tyre rolling, braking, handbrake, and crash layers.
-- [ ] 6.3 Add nearby-traffic voices using the nearest six cars, with distance gain, pan, and speed-based pitch.
-- [ ] 6.4 Add footstep events from `Character` stride phase, with surface-dependent timbre and volume.
-- [ ] 6.5 Add crash, scrape, splash, and horn events to the existing event queue.
-- [ ] 6.6 Mix the aircraft, player car, traffic, and footsteps in `Audio` without disturbing the existing aircraft synthesis when flying.
-- [ ] 6.7 Add damage smoke, low-health engine sound, headlights at night, and brake lights for the player car.
-- [ ] 6.8 Add interaction prompts for cars, aircraft, and the airport menu; style them consistently with the existing HUD.
-- [ ] 6.9 Add the health bar and damage feedback to the ground HUD; keep the minimap visible in Walk and Drive.
-- [ ] 6.10 Add locale strings for all new prompts and HUD labels.
+- [x] 6.1 Add `audio::Emitter`, `EmitterKind`, `WorldAudio`, and `Audio::set_world` with camera-relative gain and pan.
+- [x] 6.2 Add a player-car voice with engine RPM/load, tyre rolling, braking, handbrake, and crash layers.
+- [x] 6.3 Add nearby-traffic voices using the nearest six cars, with distance gain, pan, and speed-based pitch.
+- [x] 6.4 Add footstep events from `Character` stride phase, with surface-dependent timbre and volume.
+- [x] 6.5 Add crash, scrape, splash, and horn events to the existing event queue.
+- [x] 6.6 Mix the aircraft, player car, traffic, and footsteps in `Audio` without disturbing the existing aircraft synthesis when flying.
+- [x] 6.7 Add damage smoke, low-health engine sound, headlights at night, and brake lights for the player car.
+- [x] 6.8 Add interaction prompts for cars, aircraft, and the airport menu; style them consistently with the existing HUD.
+- [x] 6.9 Add the health bar and damage feedback to the ground HUD; keep the minimap visible in Walk and Drive.
+- [x] 6.10 Add locale strings for all new prompts and HUD labels.
 
 ### Tests
 
-- [ ] 6.11 Unit-test emitter gain and pan for left, right, ahead, behind, and zero-distance cases in `src/audio.rs`.
-- [ ] 6.12 Unit-test nearest-emitter selection and the six-voice cap.
-- [ ] 6.13 Unit-test footstep event timing and surface-class timbre selection in `src/character.rs`.
-- [ ] 6.14 Unit-test that flight audio parameters are unchanged when `Mode::Fly` and muted when `Mode::Menu`.
-- [ ] 6.15 Unit-test HUD state formatting for speed, gear, health, and damage in `src/main.rs` or a pure helper.
-- [ ] 6.16 Run the headless audio-off smoke run with `--mute` to confirm no device dependency.
+- [x] 6.11 Unit-test emitter gain and pan for left, right, ahead, behind, and zero-distance cases in `src/audio.rs`.
+- [x] 6.12 Unit-test nearest-emitter selection and the six-voice cap.
+- [x] 6.13 Unit-test footstep event timing and surface-class timbre selection in `src/character.rs`.
+- [x] 6.14 Unit-test that flight audio parameters are unchanged when `Mode::Fly` and muted when `Mode::Menu`.
+- [x] 6.15 Unit-test HUD state formatting for speed, gear, health, and damage in `src/main.rs` or a pure helper.
+- [x] 6.16 Run the headless audio-off smoke run with `--mute` to confirm no device dependency.
 
 ### Verification
 
-- [ ] Run `cargo check --all-targets`; it exits 0.
-- [ ] Run `cargo test`; it exits 0 and all audio and HUD tests pass.
-- [ ] Run `cargo test --test shaders`; it exits 0.
+- [x] Run `cargo check --all-targets`; it exits 0.
+- [x] Run `cargo test`; it exits 0 and all audio and HUD tests pass.
+- [x] Run `cargo test --test shaders`; it exits 0.
 - [ ] Run `cargo run --release -- --place "Buenos Aires" --start car`; listen with headphones: engine, tyres by surface, nearby traffic, crashes, and horn.
 - [ ] Run `cargo run --release -- --place "Buenos Aires" --start foot`; listen to footsteps on asphalt, grass, gravel, sand, and snow.
-- [ ] Run `cargo run --release -- --mute --headless --flat --start car --hold 5`; it exits 0.
-- [ ] Run `cargo build --release --locked`; it exits 0.
-- [ ] Confirm no new skipped, quarantined, or failing tests.
+- [x] Run `cargo run --release -- --mute --headless --flat --start car --hold 5`; it exits 0.
+- [x] Run `cargo build --release --locked`; it exits 0.
+- [x] Confirm no new skipped, quarantined, or failing tests.
 
 **Done when:** The ground experience has positional engine, traffic, tyre, crash, and footstep audio, and the HUD shows health, speed, gear, damage, and interactions without leaking flight-only UI.
 
