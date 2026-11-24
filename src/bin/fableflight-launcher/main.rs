@@ -44,7 +44,7 @@ const BENCH_SECS: u32 = 15;
 const BENCH_SETTLE: f64 = 16.0;
 /// The graphics test's flight: a Cessna over San Francisco's south side
 /// heading north-north-east, so the city, the bay, trees and clouds are all in view.
-const BENCH_FLIGHT: [&str; 18] = ["--no-menu", "--mute", "--no-mcp", "--aircraft", "c172", "--lat", "37.735", "--lon", "-122.43", "--alt", "650", "--heading", "20", "--time", "15", "--clouds", "0.35", "--no-vsync"];
+const BENCH_FLIGHT: [&str; 21] = ["--no-menu", "--start", "plane", "--no-save", "--mute", "--no-mcp", "--aircraft", "c172", "--lat", "37.735", "--lon", "-122.43", "--alt", "650", "--heading", "20", "--time", "15", "--clouds", "0.35", "--no-vsync"];
 
 fn main() -> eframe::Result {
     // FABLE_LAUNCHER_SHOT=out.png: a picture of a page drawn off screen (shot.rs)
