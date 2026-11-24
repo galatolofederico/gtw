@@ -1,0 +1,42 @@
+# FableFlight multiplayer relay. On the server:
+#   docker compose up -d
+# Players set "Server" to this machine's name in the game (Settings, Multiplayer).
+# Open 7480/udp in the firewall. The status page listens on 127.0.0.1:7481 only:
+# publish it through your reverse proxy (see README).
+services:
+  relay:
+    image: ghcr.io/danux-be/fableflight-relay:latest
+    build:
+      context: ..
+      dockerfile: relay/Dockerfile
+    container_name: fableflight-relay
+    restart: unless-stopped
+    environment:
+      FFMP_PORT: "7480"
+      FFMP_HTTP_PORT: "7481"
+      FFMP_MAX_PLAYERS: "64"
+      FFMP_RANGE_KM: "150"
+      # This relay's name, as the network and the status page show it.
+      FFMP_NAME: "my relay"
+      # Where players reach this relay, as the game's server list shows it.
+      FFMP_PUBLIC: ""
+      # Federation: the network's shared secret (16+ characters, the same on
+      # every relay). This relay makes itself known to every main relay (the
+      # built-in list: fableflight.danux.be, fableflight.rolandiscool.com) and
+      # finds all the others; it stays in the network while any one is up.
+      # Leave FFMP_HUB empty for that list (a main relay skips itself), or set
+      # other main relays (host[:port], comma-separated), or "none".
+      FFMP_PEER_SECRET: ""
+      FFMP_HUB: ""
+      # Other relays to reach directly, if any (host[:port], comma-separated).
+      FFMP_PEERS: ""
+    ports:
+      - "7480:7480/udp"
+      - "127.0.0.1:7481:7481/tcp"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options: { max-size: "1m", max-file: "3" }

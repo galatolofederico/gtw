@@ -1,0 +1,8 @@
+/target
+/relay/target
+
+# EBAW glTF export (06_export.py): rebuilt on demand, too big for the repository
+assets/blender/ebaw/export/
+assets/blender/ebaw/data/
+assets/blender/ebaw/__pycache__/
+assets/blender/ebaw/*.blend1

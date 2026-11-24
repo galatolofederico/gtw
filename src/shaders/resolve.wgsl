@@ -1,0 +1,14 @@
+// Collapses the multisampled depth buffer to one sample per pixel (nearest
+// surface) for the passes that read depth as a texture.
+@group(0) @binding(0) var t_d: texture_depth_multisampled_2d;
+
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4f(p * 2.0 - 1.0, 0.0, 1.0);
+}
+@fragment fn fs(@builtin(position) p: vec4f) -> @builtin(frag_depth) f32 {
+  let c = vec2i(p.xy);
+  var d = 0.0;
+  for (var i = 0u; i < textureNumSamples(t_d); i++) { d = max(d, textureLoad(t_d, c, i32(i))); }
+  return d;
+}

@@ -1,0 +1,6 @@
+# Only the multiplayer relay is built with Docker (relay/Dockerfile).
+*
+!relay/Cargo.toml
+!relay/Cargo.lock
+!relay/src
+!src/mp_proto.rs

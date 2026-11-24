@@ -1,0 +1,15 @@
+[package]
+name = "fableflight-relay"
+version = "0.5.0"
+edition = "2021"
+license = "MIT"
+description = "Multiplayer relay for FableFlight: passes each player's position to the players near them"
+# (Not part of the game's build: its own crate, built on its own or in Docker.)
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
