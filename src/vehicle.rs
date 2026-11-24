@@ -31,12 +31,18 @@ const MAX_DT: f64 = 0.25;
 const MAX_MOVE: f64 = 4.0;
 /// Full vehicle health.
 pub const MAX_HEALTH: f32 = 100.0;
-/// Below this health the engine smokes.
+/// Below this health the engine smokes. Kept for when car health returns.
+#[allow(dead_code)]
 pub const SMOKE_HEALTH: f32 = 40.0;
 /// An impact slower than this does no damage (m/s).
 pub const SAFE_IMPACT: f64 = 2.0;
 /// Health lost per m/s of impact past [`SAFE_IMPACT`].
 pub const IMPACT_DAMAGE: f32 = 2.2;
+/// Whether the player's car can be hurt, smoke or be wrecked. Off for now:
+/// collisions still shove it and the traffic, but never damage it.
+pub const CAR_HEALTH_ENABLED: bool = false;
+/// How much of the closing speed two cars give back when they part (0..1).
+const RESTITUTION: f64 = 0.15;
 /// The steepest slope the tyres hold (degrees); beyond it the body slides.
 pub const SLOPE_LIMIT: f64 = 45.0;
 /// Top gear.
@@ -174,6 +180,7 @@ impl VehicleDamage {
         self.health <= 0.0
     }
 
+    #[allow(dead_code)]
     pub fn smoking(&self) -> bool {
         self.health > 0.0 && self.health < SMOKE_HEALTH
     }
@@ -202,6 +209,10 @@ pub struct TrafficHit {
     /// Closing speed along the contact normal (m/s).
     pub speed: f64,
     pub damage: f32,
+    /// Velocity change given to the traffic car, in the planet frame (m/s).
+    pub velocity: DVec3,
+    /// How far the traffic car is shoved clear of the overlap (m).
+    pub shove: DVec3,
 }
 
 /// What one step did.
@@ -554,9 +565,11 @@ impl Vehicle {
                     self.vel -= self.up() * self.vel.dot(self.up());
                     self.grounded = true;
                     if impact > SAFE_IMPACT && self.spawn_grace <= 0.0 {
-                        let dmg = ((impact - SAFE_IMPACT) * IMPACT_DAMAGE as f64).min(60.0) as f32;
-                        self.damage.hurt(dmg, 0.0);
-                        out.damage += dmg;
+                        let dmg = if CAR_HEALTH_ENABLED { ((impact - SAFE_IMPACT) * IMPACT_DAMAGE as f64).min(60.0) as f32 } else { 0.0 };
+                        if CAR_HEALTH_ENABLED {
+                            self.damage.hurt(dmg, 0.0);
+                            out.damage += dmg;
+                        }
                         out.impacts.push(Impact { point: self.pos, normal: self.up(), speed: impact, damage: dmg });
                     }
                 }
@@ -581,10 +594,12 @@ impl Vehicle {
                     // Slide along the wall, losing the closing speed.
                     self.vel += n * into;
                     if into > SAFE_IMPACT {
-                        let dmg = ((into - SAFE_IMPACT) * IMPACT_DAMAGE as f64).min(40.0) as f32;
+                        let dmg = if CAR_HEALTH_ENABLED { ((into - SAFE_IMPACT) * IMPACT_DAMAGE as f64).min(40.0) as f32 } else { 0.0 };
                         let side = if n.dot(self.right()) >= 0.0 { 1.0 } else { -1.0 };
-                        self.damage.hurt(dmg, side);
-                        out.damage += dmg;
+                        if CAR_HEALTH_ENABLED {
+                            self.damage.hurt(dmg, side);
+                            out.damage += dmg;
+                        }
                         out.impacts.push(Impact { point: centre + push, normal: n, speed: into, damage: dmg });
                     } else {
                         self.vel *= 0.5;
@@ -614,7 +629,8 @@ impl Vehicle {
     }
 
     /// Separate the body from every traffic box it overlaps, and turn the
-    /// closing speed into an impulse, damage and a [`TrafficHit`].
+    /// closing speed into a momentum exchange, damage and a [`TrafficHit`].
+    /// Light cars are shoved aside; a bus or lorry mostly stops the player.
     fn collide_traffic(&mut self, traffic: &[TrafficBody], out: &mut VehicleStep) {
         if traffic.is_empty() {
             return;
@@ -623,6 +639,7 @@ impl Vehicle {
         let centre = self.pos + up * 0.7;
         let half = self.half();
         let reach = half[0].hypot(half[1]);
+        let inv_self = 1.0 / self.tuning.mass.max(1.0);
         for body in traffic {
             if !body.pos.is_finite() || !body.yaw.is_finite() {
                 continue;
@@ -642,24 +659,34 @@ impl Vehicle {
             if closing <= 0.0 {
                 continue;
             }
-            // Stop closing, and shove back at a little less than the closing
-            // speed, so a shunt pushes the player along rather than through.
-            self.vel += n * (closing * 0.85);
+            // Momentum exchange, shared by mass. The contact normal points
+            // from the traffic car to us, so the player takes the impulse
+            // along `n` and the other car the opposite way.
+            let inv_other = 1.0 / tuning(body.model).mass.max(1.0);
+            let inv_total = inv_self + inv_other;
+            let impulse = (1.0 + RESTITUTION) * closing / inv_total;
+            self.vel += n * (impulse * inv_self);
+            let other_velocity = -n * (impulse * inv_other);
+            // The overlap itself is shared the same way, so a light car is
+            // pushed clear while a heavy one leaves the player to move.
+            let shove = -n * ((overlap.min(1.5) + 0.01) * inv_other / inv_total);
             if closing <= SAFE_IMPACT {
+                // A gentle shunt still nudges the other car, but is not a crash.
                 self.vel *= 0.75;
-                continue;
             }
-            if self.traffic_cool > 0.0 || self.spawn_grace > 0.0 {
+            if closing < 0.1 || self.traffic_cool > 0.0 || self.spawn_grace > 0.0 {
                 continue;
             }
             self.traffic_cool = 0.35;
-            let dmg = ((closing - SAFE_IMPACT) * IMPACT_DAMAGE as f64).min(40.0) as f32;
+            let dmg = if CAR_HEALTH_ENABLED && closing > SAFE_IMPACT { ((closing - SAFE_IMPACT) * IMPACT_DAMAGE as f64).min(40.0) as f32 } else { 0.0 };
             let side = if n.dot(self.right()) >= 0.0 { 1.0 } else { -1.0 };
-            self.damage.hurt(dmg, side);
-            out.damage += dmg;
+            if CAR_HEALTH_ENABLED {
+                self.damage.hurt(dmg, side);
+                out.damage += dmg;
+            }
             let point = t_centre - n * overlap * 0.5;
             out.impacts.push(Impact { point, normal: n, speed: closing, damage: dmg });
-            out.traffic_hits.push(TrafficHit { body: *body, point, speed: closing, damage: dmg });
+            out.traffic_hits.push(TrafficHit { body: *body, point, speed: closing, damage: dmg, velocity: other_velocity, shove });
         }
     }
 
@@ -1024,8 +1051,10 @@ mod tests {
             }
         }
         let landed = landed.expect("it lands");
-        assert!(landed.damage > 0.0, "a six-metre drop hurts");
-        assert!(air.damage.health < MAX_HEALTH);
+        assert!(!landed.impacts.is_empty(), "the drop is reported");
+        // Car health is off for now: the impact does not hurt or wreck the car.
+        assert_eq!(landed.damage, 0.0);
+        assert_eq!(air.damage.health, MAX_HEALTH);
 
         // Water: the engine drowns, drag brings it to a stop and throttle
         // cannot pull it out.
@@ -1038,7 +1067,7 @@ mod tests {
     }
 
     #[test]
-    fn walls_push_the_car_out_and_hurt_it() {
+    fn walls_push_the_car_out() {
         let w = WallWorld;
         let mut v = Vehicle::spawn(0, [0.5; 3], origin(), std::f64::consts::FRAC_PI_2);
         v.grounded = true;
@@ -1054,13 +1083,10 @@ mod tests {
         let (east, _, _) = geo::enu(origin());
         let x = (v.pos - origin()).dot(east);
         assert!(x < 4.0, "did not go through the wall: {x:.2} m");
-        assert!(damage > 0.0, "the impact hurts");
         assert!(impacts > 0, "an impact is reported");
-        assert!(v.damage.health < MAX_HEALTH);
-        // Coming to rest against it, damage stops climbing.
-        let health = v.damage.health;
-        drive(&mut v, &w, VehicleControls::default(), 1.0);
-        assert_eq!(v.damage.health, health);
+        // Car health is off for now: a wall stops the car but does not hurt it.
+        assert_eq!(damage, 0.0);
+        assert_eq!(v.damage.health, MAX_HEALTH);
     }
 
     #[test]
@@ -1132,7 +1158,7 @@ mod tests {
     }
 
     #[test]
-    fn traffic_is_solid_and_hurts_both_cars() {
+    fn traffic_is_solid_and_both_cars_get_the_impulse() {
         let w = FlatWorld(Surface::Asphalt);
         let wx = SurfaceWeather::default();
         let (east, _, _) = geo::enu(origin());
@@ -1148,30 +1174,39 @@ mod tests {
             velocity,
         };
 
-        // Driving into a stopped car: the body is kept out of its box, both
-        // cars take the blow, and the impact is reported as a traffic hit.
+        // Driving into a stopped car: the body is kept out of its box, and the
+        // hit gives the stopped car a velocity and a shove of its own.
         let (mut v, _) = car(0, Surface::Asphalt);
         let ahead = body(origin() + east * 9.0, DVec3::ZERO);
         let c = VehicleControls { throttle: 1.0, ..Default::default() };
-        let (mut hits, mut damage) = (0, 0.0);
+        let mut hits = 0;
+        let mut shove = DVec3::ZERO;
+        let mut push = DVec3::ZERO;
         for _ in 0..300 {
             let s = v.step(1.0 / 120.0, &c, &w, &wx, &[ahead]);
             hits += s.traffic_hits.len();
-            damage += s.damage;
+            for h in &s.traffic_hits {
+                shove += h.velocity;
+                push += h.shove;
+            }
             assert!(s.traffic_hits.iter().all(|h| h.body.index == 0 && h.speed > 0.0));
         }
         assert!(hits > 0, "the traffic hit is reported");
-        assert!(damage > 0.0 && v.damage.health < MAX_HEALTH, "the player's car is hurt: {damage:.1}");
+        assert!(shove.dot(east) > 0.5, "the other car is knocked east: {shove:?}");
+        assert!(push.dot(east) > 0.0, "and shoved clear of the contact: {push:?}");
         let along = (v.pos - origin()).dot(east);
         assert!(along < 6.5, "kept out of the traffic box: centre {along:.2} m along");
+        // Car health is off for now: the player's car is not hurt.
+        assert_eq!(v.damage.health, MAX_HEALTH);
 
         // A car running into the player's stationary car: the player is pushed
-        // clear and hurt, without the box ever overlapping.
+        // clear, and the hit slows the other car rather than passing through.
         let (mut still, _) = car(0, Surface::Asphalt);
         let shunt = body(origin() + east * 4.0, -east * 8.0);
         let s = still.step(1.0 / 120.0, &VehicleControls::default(), &w, &wx, &[shunt]);
         assert!(!s.traffic_hits.is_empty(), "a shunting car is reported");
-        assert!(still.damage.health < MAX_HEALTH, "and hurts");
+        assert!(s.traffic_hits.iter().all(|h| h.velocity.dot(east) >= 0.0), "the shunt pushes it back");
+        assert_eq!(still.damage.health, MAX_HEALTH);
         assert!((still.pos - origin()).dot(east) < -0.2, "pushed back clear: {:.2}", (still.pos - origin()).dot(east));
 
         // Nothing within reach: no hits, no damage.
@@ -1180,6 +1215,34 @@ mod tests {
         let s = clear.step(1.0 / 120.0, &VehicleControls::default(), &w, &wx, &[far]);
         assert!(s.traffic_hits.is_empty() && s.damage == 0.0);
         assert_eq!(clear.damage.health, MAX_HEALTH);
+    }
+
+    #[test]
+    fn collisions_transfer_momentum_by_mass() {
+        let w = FlatWorld(Surface::Asphalt);
+        let wx = SurfaceWeather::default();
+        let (east, _, _) = geo::enu(origin());
+        let body = |model: u8, pos: DVec3| crate::world::TrafficBody {
+            kind: crate::world::TrafficKind::Moving,
+            tile: crate::geo::TileId::new(14, 0, 0),
+            index: 0,
+            model,
+            colour: [0.4, 0.4, 0.4],
+            pos,
+            yaw: std::f64::consts::FRAC_PI_2,
+            half: cars::player_geom(0).half,
+            velocity: DVec3::ZERO,
+        };
+        let hit = |model: u8| {
+            let (mut v, _) = car(0, Surface::Asphalt);
+            v.vel = v.forward() * 12.0;
+            let s = v.step(1.0 / 120.0, &VehicleControls::default(), &w, &wx, &[body(model, origin() + east * 4.0)]);
+            s.traffic_hits.first().expect("the cars touch").velocity.length()
+        };
+        let compact = hit(1);
+        let bus = hit(6);
+        assert!(compact > 4.0, "the compact is thrown clear: {compact:.1} m/s");
+        assert!(bus < compact * 0.35, "the bus barely moves: {bus:.1} vs {compact:.1} m/s");
     }
 
     #[test]

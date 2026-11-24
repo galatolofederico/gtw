@@ -166,7 +166,7 @@ pub enum TrafficKind {
 
 /// One car as the player's physics sees it: an oriented box in the planet frame.
 /// The `tile` and `index` identify the source car, so a hit can be applied back
-/// to its lane state (`World::hurt_traffic`).
+/// to its lane state (`World::hit_traffic`).
 #[derive(Copy, Clone, Debug)]
 #[allow(dead_code)]
 pub struct TrafficBody {
@@ -212,7 +212,7 @@ impl PlayerPresence {
 fn nearest_parked(center: DVec3, parked: &[Parked], p: DVec3, radius: f64) -> Option<usize> {
     let mut best: Option<(f64, usize)> = None;
     for (i, pk) in parked.iter().enumerate() {
-        let d = (center + pk.pos.as_dvec3() - p).length();
+        let d = (center + (pk.pos + pk.shift).as_dvec3() - p).length();
         if d <= radius && best.is_none_or(|(bd, _)| d < bd) {
             best = Some((d, i));
         }
@@ -787,7 +787,7 @@ impl World {
                 let Some(BSlot::Ready(b)) = self.builds.get(&id) else { continue };
                 let Some(i) = nearest_parked(b.center, &b.parked, p, radius) else { continue };
                 let pk = &b.parked[i];
-                let pos = b.center + pk.pos.as_dvec3();
+                let pos = b.center + (pk.pos + pk.shift).as_dvec3();
                 let d = (pos - p).length();
                 if best.is_none_or(|(bd, _)| d < bd) {
                     best = Some((d, ParkedCar { model: pk.model, colour: pk.col, pos, yaw: bearing_of(pos, pk.fwd) }));
@@ -814,10 +814,10 @@ impl World {
                 let Some(BSlot::Ready(b)) = self.builds.get(&id) else { continue };
                 let Some(i) = nearest_parked(b.center, &b.parked, p, radius) else { continue };
                 let pk = &b.parked[i];
-                let pos = b.center + pk.pos.as_dvec3();
+                let pos = b.center + (pk.pos + pk.shift).as_dvec3();
                 let d = (pos - p).length();
                 if best.as_ref().is_none_or(|(bd, _, _, _)| d < *bd) {
-                    best = Some((d, id, i, TakenCar { model: pk.model, colour: pk.col, pos, yaw: bearing_of(pos, pk.fwd), velocity: DVec3::ZERO }));
+                    best = Some((d, id, i, TakenCar { model: pk.model, colour: pk.col, pos, yaw: bearing_of(pos, pk.fwd), velocity: pk.bump.as_dvec3() }));
                 }
             }
         }
@@ -880,7 +880,8 @@ impl World {
                     if d > radius || best.as_ref().is_some_and(|(bd, _, _, _)| *bd <= d) {
                         continue;
                     }
-                    best = Some((d, id, i, TakenCar { model: car.model, colour: car.col, pos, yaw: bearing_of(pos, dir), velocity: dir.as_dvec3() * car.v as f64 }));
+                    let velocity = dir.as_dvec3() * car.v as f64 + car.bump.as_dvec3();
+                    best = Some((d, id, i, TakenCar { model: car.model, colour: car.col, pos, yaw: bearing_of(pos, dir), velocity }));
                 }
             }
         }
@@ -919,15 +920,16 @@ impl World {
                     if (pos - p).length() > radius + half[1] {
                         continue;
                     }
-                    out.push(TrafficBody { kind: TrafficKind::Moving, tile: id, index: i, model: car.model, colour: car.col, pos, yaw: bearing_of(pos, dir), half, velocity: dir.as_dvec3() * car.v as f64 });
+                    let velocity = dir.as_dvec3() * car.v as f64 + car.bump.as_dvec3();
+                    out.push(TrafficBody { kind: TrafficKind::Moving, tile: id, index: i, model: car.model, colour: car.col, pos, yaw: bearing_of(pos, dir), half, velocity });
                 }
                 for (i, pk) in b.parked.iter().enumerate() {
-                    let pos = b.center + pk.pos.as_dvec3();
+                    let pos = b.center + (pk.pos + pk.shift).as_dvec3();
                     let half = cars::player_geom(pk.model).half;
                     if (pos - p).length() > radius + half[1] {
                         continue;
                     }
-                    out.push(TrafficBody { kind: TrafficKind::Parked, tile: id, index: i, model: pk.model, colour: pk.col, pos, yaw: bearing_of(pos, pk.fwd), half, velocity: DVec3::ZERO });
+                    out.push(TrafficBody { kind: TrafficKind::Parked, tile: id, index: i, model: pk.model, colour: pk.col, pos, yaw: bearing_of(pos, pk.fwd), half, velocity: pk.bump.as_dvec3() });
                 }
             }
         }
@@ -938,16 +940,42 @@ impl World {
         self.test_traffic = None;
     }
 
-    /// A player car hit a moving car: slow it, damage it and hold it stopped for
-    /// a moment. Parked props are solid but not damaged.
-    pub fn hurt_traffic(&mut self, body: &TrafficBody, impact: f64) {
-        let Some(car) = self.traffic_car_mut(body) else { return };
-        if !(impact > 0.0) || !impact.is_finite() {
+    /// A player car hit another car: give it the impulse the player's physics
+    /// worked out, so the other car is shoved away too. Moving cars settle back
+    /// onto their lane; a parked car stays where the hit left it.
+    pub fn hit_traffic(&mut self, body: &TrafficBody, impact: f64, shove: DVec3, velocity: DVec3) {
+        if !(impact > 0.0) || !impact.is_finite() || !shove.is_finite() || !velocity.is_finite() {
             return;
         }
-        car.hurt = (car.hurt + (impact * 0.08) as f32).clamp(0.0, 1.0);
-        car.v *= (1.0 - (impact * 0.06).clamp(0.2, 0.7)) as f32;
-        car.yield_t = car.yield_t.max(1.5);
+        let Some(BSlot::Ready(b)) = self.builds.get_mut(&body.tile) else { return };
+        match body.kind {
+            TrafficKind::Moving => {
+                let Some(car) = b.cars.get_mut(body.index) else { return };
+                if car.model != body.model {
+                    return;
+                }
+                car.shift += shove.as_vec3();
+                car.bump += velocity.as_vec3();
+                // A hit from behind speeds it up; a head-on hit slows it. The
+                // sideways part of the impulse lives in `shift`/`bump`.
+                let (e, n, _) = geo::enu(body.pos);
+                let fwd = e * body.yaw.sin() + n * body.yaw.cos();
+                let along = velocity.dot(fwd) as f32;
+                if along.is_finite() {
+                    let path_top = b.net.paths.get(car.path as usize).map_or(0.0, |p| p.speed);
+                    car.v = (car.v + along).clamp(0.0, (path_top.max(car.v) * 1.6).max(1.0));
+                }
+                car.hurt = (car.hurt + (impact * 0.04) as f32).clamp(0.0, 1.0);
+            }
+            TrafficKind::Parked => {
+                let Some(pk) = b.parked.get_mut(body.index) else { return };
+                if pk.model != body.model {
+                    return;
+                }
+                pk.shift += shove.as_vec3();
+                pk.bump += velocity.as_vec3();
+            }
+        }
     }
 
     /// Traffic braked because it hit the player on foot: hold it stopped for a
@@ -1295,17 +1323,25 @@ impl World {
         let mut exits: Vec<(TileId, cars::Exit, glam::Vec3)> = Vec::new();
         for (id, slot) in self.builds.iter_mut() {
             let BSlot::Ready(b) = slot else { continue };
-            if b.cars.is_empty() || (b.center - focus).length() > 2600.0 + b.radius {
+            if (b.center - focus).length() > 2600.0 + b.radius {
                 continue;
             }
             let up = b.center.normalize().as_vec3();
-            let near = player.filter(|p| (p.pos - b.center).length() <= p.radius() + b.radius + 30.0).map(|p| ((p.pos - b.center).as_vec3(), p.radius() as f32));
-            let mut cs = std::mem::take(&mut b.cars);
-            for e in cars::step(&b.net, &mut cs, dt, up, tick, near) {
-                let was = cars::pose(&b.net, &e.car, up).0;
-                exits.push((*id, e, was));
+            if !b.cars.is_empty() {
+                let near = player.filter(|p| (p.pos - b.center).length() <= p.radius() + b.radius + 30.0).map(|p| ((p.pos - b.center).as_vec3(), p.radius() as f32));
+                let mut cs = std::mem::take(&mut b.cars);
+                for e in cars::step(&b.net, &mut cs, dt, up, tick, near) {
+                    let was = cars::pose(&b.net, &e.car, up).0;
+                    exits.push((*id, e, was));
+                }
+                b.cars = cs;
             }
-            b.cars = cs;
+            // Parked cars that have been hit roll clear.
+            if b.parked.iter().any(|p| p.bump != Vec3::ZERO) {
+                for pk in &mut b.parked {
+                    cars::shove_step(&mut pk.shift, &mut pk.bump, dt);
+                }
+            }
         }
         let size = 1i64 << DATA_ZOOM;
         for (from, e, was) in exits {
@@ -1382,7 +1418,7 @@ impl World {
             }
             if d < parked_far {
                 for p in &b.parked {
-                    let pos = b.center + p.pos.as_dvec3();
+                    let pos = b.center + (p.pos + p.shift).as_dvec3();
                     if (pos - cam).length_squared() < parked_far * parked_far {
                         push(pos, p.fwd, p.up, p.model, p.col, out);
                     }
@@ -2611,7 +2647,7 @@ mod tests {
     fn parked_cars_are_selected_removed_and_faced() {
         let center = geo::lla_to_pos(0.0, 0.0, 0.0);
         let (e, n, up) = geo::enu(center);
-        let mk = |at: DVec3, model| Parked { pos: (at - center).as_vec3(), fwd: n.as_vec3(), up: up.as_vec3(), model, col: [0.5; 3] };
+        let mk = |at: DVec3, model| Parked { pos: (at - center).as_vec3(), fwd: n.as_vec3(), up: up.as_vec3(), model, col: [0.5; 3], shift: Vec3::ZERO, bump: Vec3::ZERO };
         let mut list = vec![mk(center + e * 2.0, 0), mk(center + e * 5.0, 3), mk(center + n * 1.0, 5)];
         let p = center + e * 1.8;
         let i = nearest_parked(center, &list, p, 3.0).expect("one is in reach");
@@ -2763,7 +2799,7 @@ mod tests {
             Some(BSlot::Ready(b)) => b.center,
             _ => panic!("test tile ready"),
         };
-        let mk = |at: DVec3, model| Parked { pos: (at - center).as_vec3(), fwd: n.as_vec3(), up: up.as_vec3(), model, col: [0.5; 3] };
+        let mk = |at: DVec3, model| Parked { pos: (at - center).as_vec3(), fwd: n.as_vec3(), up: up.as_vec3(), model, col: [0.5; 3], shift: Vec3::ZERO, bump: Vec3::ZERO };
         if let Some(BSlot::Ready(b)) = w.builds.get_mut(&id) {
             b.parked = vec![mk(p + e * 1.0, 0), mk(p + e * 3.0, 3), mk(p - e * 2.0, 5)];
         }
@@ -2800,6 +2836,42 @@ mod tests {
         let near = w.nearest_traffic_car(p, 3.2).expect("in talk reach");
         assert!((near.pos - p).length() < 3.2, "distance {:.2}", (near.pos - p).length());
         assert!(w.nearest_traffic_car(p, 5.0).is_some());
+    }
+
+    #[test]
+    fn a_hit_shoves_the_other_car_and_its_parked_neighbour() {
+        let mut w = traffic_world(6.0);
+        place_car(&mut w, 0.0);
+        let mut out = Vec::new();
+        w.traffic_bodies_near(origin(), 20.0, &mut out);
+        let moving = *out.iter().find(|b| b.kind == TrafficKind::Moving).expect("one moving car");
+        let before = test_car(&w).shift;
+        w.hit_traffic(&moving, 8.0, east() * 0.4, east() * 3.0);
+        let car = test_car(&w);
+        assert!((car.shift - before).dot(east().as_vec3()) > 0.3, "the moving car is shoved: {:?}", car.shift);
+        assert!(car.bump.dot(east().as_vec3()) > 2.0, "and carries the impulse: {:?}", car.bump);
+        // The shove is integrated by the traffic step, not just drawn once.
+        let shoved = car.shift;
+        run_traffic(&mut w, 0.2, None);
+        assert!(test_car(&w).shift.dot(east().as_vec3()) > shoved.dot(east().as_vec3()) + 0.05, "it moves on");
+
+        // A parked car rolls with the hit too.
+        let id = w.test_traffic.unwrap();
+        let center = match w.builds.get(&id) {
+            Some(BSlot::Ready(b)) => b.center,
+            _ => panic!("test tile ready"),
+        };
+        let (e, n, up) = geo::enu(origin());
+        if let Some(BSlot::Ready(b)) = w.builds.get_mut(&id) {
+            b.parked.push(Parked { pos: (origin() + e * 2.0 - center).as_vec3(), fwd: n.as_vec3(), up: up.as_vec3(), model: 0, col: [0.5; 3], shift: Vec3::ZERO, bump: Vec3::ZERO });
+        }
+        out.clear();
+        w.traffic_bodies_near(origin(), 20.0, &mut out);
+        let parked = *out.iter().find(|b| b.kind == TrafficKind::Parked).expect("one parked car");
+        w.hit_traffic(&parked, 5.0, east() * 0.25, east() * 2.0);
+        let Some(BSlot::Ready(b)) = w.builds.get(&id) else { panic!("test tile ready") };
+        assert!(b.parked[0].shift.dot(east().as_vec3()) > 0.2, "a parked car is shoved: {:?}", b.parked[0].shift);
+        assert!(b.parked[0].bump.dot(east().as_vec3()) > 1.0, "and carries the impulse: {:?}", b.parked[0].bump);
     }
 
     #[test]

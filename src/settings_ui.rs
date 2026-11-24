@@ -353,7 +353,7 @@ impl Game {
             row(ui, t!("settings.flight_path_marker"), t!("settings.a_ring_on_the_hud"), |ui| {
                 ui.add_enabled_ui(self.show_hud, |ui| menu::switch(ui, &mut self.path_marker));
             });
-            row(ui, t!("settings.minimap"), t!("settings.key_left_of_1_in"), |ui| {
+            row(ui, t!("settings.flight_minimap"), t!("settings.key_left_of_1_in"), |ui| {
                 menu::switch(ui, &mut self.minimap.visible);
             });
             row(ui, t!("settings.minimap_size"), t!("settings.it_fits_the_window_and"), |ui| {

@@ -77,6 +77,10 @@ pub struct Parked {
     pub up: Vec3,
     pub model: u8,
     pub col: [f32; 3],
+    /// Offset from where it was parked and the speed of a collision shove
+    /// (tile frame): a solid hit rolls a parked car away from the impact.
+    pub shift: Vec3,
+    pub bump: Vec3,
 }
 
 pub struct BuildingData {

@@ -192,12 +192,6 @@ fn audio_levels(mode: Mode, crashed: bool, in_menu: bool, dt: f64, sound_on: boo
     (if live { 1.0 } else { 0.0 }, if sound_on { volume } else { 0.0 })
 }
 
-/// The car HUD's body damage, as a percentage.
-fn drive_damage_text(crumple: f32) -> String {
-    let c = if crumple.is_finite() { crumple.clamp(0.0, 1.0) } else { 0.0 };
-    format!("{:.0}%", c * 100.0)
-}
-
 /// The car HUD's speed, in km/h, as a whole number.
 fn drive_speed_text(speed_mps: f64) -> String {
     let v = if speed_mps.is_finite() { speed_mps.abs() * 3.6 } else { 0.0 };
@@ -241,9 +235,10 @@ fn car_view(first_person: bool) -> CarView {
     }
 }
 
-/// The minimap shows on the ground whenever the HUD and the minimap are on.
-fn ground_minimap_shown(mode: Mode, minimap: bool) -> bool {
-    mode.ground() && minimap
+/// The minimap is part of the ground HUD: it shows in Walk and Drive whenever
+/// the HUD is on. (The map key still hides it in flight.)
+fn ground_minimap_shown(mode: Mode, hud: bool) -> bool {
+    mode.ground() && hud
 }
 
 /// Shortest signed angle from `a` to `b`.
@@ -2635,6 +2630,9 @@ impl Game {
         let p = DVec3::from_array(c.pos);
         let p = save::safe_position(&self.world, p).unwrap_or(p);
         let mut v = vehicle::Vehicle::spawn(c.model.min(cars::N_MODELS as u8 - 1), c.colour, p, c.yaw);
+        if !vehicle::CAR_HEALTH_ENABLED {
+            return v;
+        }
         let health = if c.health.is_finite() { c.health.clamp(0.0, vehicle::MAX_HEALTH) } else { vehicle::MAX_HEALTH };
         let frac = health / vehicle::MAX_HEALTH;
         v.damage.health = health;
@@ -3980,7 +3978,7 @@ impl Game {
     }
 
     /// Advance the car, keep the character with it, and show what happened.
-    fn step_drive(&mut self, dt: f64, femit: &mut Vec<(DVec3, render::Particle)>) {
+    fn step_drive(&mut self, dt: f64) {
         let c = self.car_controls();
         let wx = self.ground_weather();
         let Some(v) = self.vehicle.as_mut() else {
@@ -3989,24 +3987,27 @@ impl Game {
         };
         let mut traffic = Vec::new();
         self.world.traffic_bodies_near(v.pos, 24.0, &mut traffic);
-        let (was_water, was_wrecked) = (v.water, v.damage.wrecked());
+        let was_water = v.water;
         let s = v.step(dt, &c, &self.world, &wx, &traffic);
-        let (pos, yaw, speed, dmg, wrecked, water, health, smoking) = (s.pos, s.yaw, s.speed, s.damage, s.wrecked, s.water, v.damage.health, v.damage.smoking());
-        // A hit on a traffic car slows and damages it too, and feeds the HUD
-        // and the screen flash; the sound queue comes in a later phase.
+        let (pos, yaw, speed, water) = (s.pos, s.yaw, s.speed, s.water);
+        // A hit on a traffic car shoves it with the impulse the player's physics
+        // worked out, so the other car moves too.
         for hit in &s.traffic_hits {
-            self.world.hurt_traffic(&hit.body, hit.speed);
+            self.world.hit_traffic(&hit.body, hit.speed, hit.shove, hit.velocity);
         }
+        let impact = s.impacts.iter().map(|i| i.speed).fold(0.0, f64::max);
         let skid = c.handbrake && speed.abs() > 4.0 && self.real - self.last_skid > 0.55;
         if skid {
             self.last_skid = self.real;
         }
         if let Some(a) = &self.audio {
             for hit in &s.traffic_hits {
-                a.event(audio::Event::Crash((hit.speed / 9.0).clamp(0.3, 2.0) as f32));
+                if hit.speed > vehicle::SAFE_IMPACT {
+                    a.event(audio::Event::Crash((hit.speed / 9.0).clamp(0.3, 2.0) as f32));
+                }
             }
-            if dmg > 1.5 && s.traffic_hits.is_empty() {
-                a.event(audio::Event::Crash((dmg / 8.0).clamp(0.4, 2.0)));
+            if s.traffic_hits.is_empty() && impact > vehicle::SAFE_IMPACT {
+                a.event(audio::Event::Crash((impact / 12.0).clamp(0.4, 2.0) as f32));
             }
             if water && !was_water {
                 a.event(audio::Event::Splash(1.2));
@@ -4020,44 +4021,25 @@ impl Game {
         self.character.vel = DVec3::ZERO;
         self.character.grounded = true;
         self.character.last_safe = pos;
-        if let Some(hit) = s.traffic_hits.iter().max_by(|a, b| a.speed.total_cmp(&b.speed)) {
-            self.flash.push((t!("ground.traffic_hit", hit.damage), self.real));
-            self.status = t!("ground.traffic_hit", hit.damage).into();
+        if s.traffic_hits.iter().any(|h| h.speed > vehicle::SAFE_IMPACT) {
+            self.flash.push((t!("ground.traffic_collision").to_string(), self.real));
+            self.status = t!("ground.traffic_collision").into();
             self.status_until = self.real + 2.0;
-        } else if dmg > 1.5 {
-            self.flash.push((t!("ground.crash_damage", dmg), self.real));
-            self.status = t!("ground.crash_damage", dmg).into();
+        } else if impact > vehicle::SAFE_IMPACT {
+            self.flash.push((t!("ground.collision").to_string(), self.real));
+            self.status = t!("ground.collision").into();
             self.status_until = self.real + 2.0;
         } else if water && !was_water {
             self.status = t!("ground.water_stall").into();
             self.status_until = self.real + 4.0;
-        } else if wrecked && !was_wrecked {
-            self.status = t!("ground.car_wrecked").into();
-            self.status_until = self.real + 4.0;
-        }
-        // A hurt engine smokes from under the bonnet.
-        if dt > 0.0 && !self.paused && (smoking || wrecked) && (speed.abs() > 0.5 || wrecked) {
-            let up = pos.normalize();
-            let (e, n, _) = geo::enu(pos);
-            let fwd = e * yaw.sin() + n * yaw.cos();
-            let at = pos + up * 0.95 + fwd * 1.5;
-            self.anchor_fx(at);
-            self.smoke_acc += dt as f32 * 5.0;
-            let black = health < vehicle::SMOKE_HEALTH * 0.5;
-            while self.smoke_acc >= 1.0 {
-                self.smoke_acc -= 1.0;
-                let r = &mut self.rng;
-                let vel = up.as_vec3() * r.range(1.0, 2.5) + fwd.as_vec3() * r.range(-1.0, 2.0) + r.dir() * 0.8;
-                femit.push((at, render::Particle { vel: vel.into(), life: r.range(1.0, 2.5), size0: r.range(0.2, 0.4), size1: r.range(1.5, 3.5), temp: 0.05, kind: if black { crash::GAS } else { crash::MIST }, drag: 1.2, buoy: 0.8, seed: r.f(), alpha: r.range(0.2, 0.4), ..Default::default() }));
-            }
         }
     }
 
     /// Advance whatever the player is in on the ground: the car or the feet.
-    fn step_ground(&mut self, dt: f64, femit: &mut Vec<(DVec3, render::Particle)>) {
+    fn step_ground(&mut self, dt: f64) {
         self.step_carjack_script();
         if self.mode == Mode::Drive {
-            self.step_drive(dt, femit);
+            self.step_drive(dt);
         } else {
             self.step_walk(dt);
         }
@@ -6950,7 +6932,7 @@ impl Game {
         }
         crate::gputime::cpu("sim.flight_physics+weapons");
         if !self.crashed && !in_menu && self.mode.ground() {
-            self.step_ground(dt, &mut femit);
+            self.step_ground(dt);
         }
         if dt > 0.0 && !self.kills.is_empty() {
             self.step_kills(dt, &mut femit);
@@ -8660,16 +8642,13 @@ impl Game {
         } + &live
     }
 
-    /// The bottom-right credits: Google's logo (its official outlined
-    /// artwork, unaltered, 22 px with its outline, clear space round it) while
-    /// their imagery or 3D tiles are on screen, then the data credits.
-    /// The ground HUD: health (and, in a car, speed, gear and the car's own
-    /// damage), the camera, and what E would do. Flight instruments stay out
-    /// of the way on the ground.
+    /// The ground HUD: the player's health, and in a car its speed and gear,
+    /// the camera, and what E would do. Flight instruments stay out of the way
+    /// on the ground, and the minimap has the lower left.
     fn ground_hud(&self, ctx: &egui::Context) {
         use egui::{Align2, Color32, RichText};
         let (fill, value) = health_bar(self.character.health);
-        egui::Area::new(egui::Id::unique("ground hud")).anchor(Align2::LEFT_BOTTOM, [24.0, -24.0]).interactable(false).show(ctx, |ui| {
+        egui::Area::new(egui::Id::unique("ground hud")).anchor(Align2::RIGHT_BOTTOM, [-24.0, -40.0]).interactable(false).show(ctx, |ui| {
             egui::Frame::new().fill(Color32::from_black_alpha(150)).corner_radius(menu::R_WIDGET).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
                 ui.set_width(240.0);
                 ui.horizontal(|ui| {
@@ -8685,14 +8664,19 @@ impl Game {
                 bar.set_width(r.width() * fill);
                 p.rect_filled(bar, 3.0, if fill < 0.3 { menu::BAD } else { menu::ACCENT });
                 ui.add_space(3.0);
-                let view = if self.ground_first_person { t!("ground.first_person") } else { t!("ground.third_person") };
+                let view = if self.mode == Mode::Drive {
+                    if self.ground_first_person { t!("ground.hood_view") } else { t!("ground.chase_view") }
+                } else if self.ground_first_person {
+                    t!("ground.first_person")
+                } else {
+                    t!("ground.third_person")
+                };
                 ui.label(RichText::new(view).font(menu::caption()).color(menu::DIM));
             });
         });
         if self.mode == Mode::Drive {
-            let (speed, gear, health, damage) = self.vehicle.as_ref().map_or((0.0, 1, vehicle::MAX_HEALTH, 0.0), |v| (v.speed(), v.gear, v.damage.health, v.damage.crumple));
-            let (car_fill, car_value) = health_bar(health);
-            egui::Area::new(egui::Id::unique("car hud")).anchor(Align2::LEFT_BOTTOM, [24.0, -126.0]).interactable(false).show(ctx, |ui| {
+            let (speed, gear) = self.vehicle.as_ref().map_or((0.0, 1), |v| (v.speed(), v.gear));
+            egui::Area::new(egui::Id::unique("car hud")).anchor(Align2::RIGHT_BOTTOM, [-24.0, -132.0]).interactable(false).show(ctx, |ui| {
                 egui::Frame::new().fill(Color32::from_black_alpha(150)).corner_radius(menu::R_WIDGET).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
                     ui.set_width(240.0);
                     ui.horizontal(|ui| {
@@ -8701,24 +8685,6 @@ impl Game {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(RichText::new(drive_gear_text(gear)).font(menu::bold(22.0)).color(menu::ACCENT));
                             ui.label(RichText::new(t!("ground.gear")).font(menu::caption()).color(menu::DIM));
-                        });
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(t!("ground.car_health")).font(menu::caption()).color(menu::DIM));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new(car_value).font(menu::semibold(12.0)).color(if car_fill < 0.3 { menu::BAD } else { Color32::WHITE }));
-                        });
-                    });
-                    let (r, _) = ui.allocate_exact_size(egui::vec2(216.0, 6.0), egui::Sense::hover());
-                    let p = ui.painter();
-                    p.rect_filled(r, 3.0, Color32::from_gray(50));
-                    let mut bar = r;
-                    bar.set_width(r.width() * car_fill);
-                    p.rect_filled(bar, 3.0, if car_fill < 0.3 { menu::BAD } else { menu::ACCENT });
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(t!("ground.damage")).font(menu::caption()).color(menu::DIM));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new(drive_damage_text(damage)).font(menu::semibold(12.0)).color(if damage > 0.6 { menu::BAD } else { Color32::WHITE }));
                         });
                     });
                 });
@@ -8760,6 +8726,9 @@ impl Game {
         }
     }
 
+    /// The bottom-right credits: Google's logo (its official outlined
+    /// artwork, unaltered, 22 px with its outline, clear space round it) while
+    /// their imagery or 3D tiles are on screen, then the data credits.
     fn credits(&mut self, ctx: &egui::Context) {
         use egui::{Align2, Color32, RichText};
         // (Aircraft-picker stills show the aircraft alone.)
@@ -9633,7 +9602,7 @@ impl Game {
             self.minimap.trail.push(lat.to_degrees(), lon.to_degrees());
             self.minimap.tuned = minimap_tuned(&self.radios);
             let map_on = if self.mode.ground() {
-                ground_minimap_shown(self.mode, self.hud_on() && self.minimap.visible)
+                ground_minimap_shown(self.mode, self.hud_on())
             } else {
                 self.hud_on() && self.minimap.visible
             };
@@ -10688,12 +10657,7 @@ mod cli_tests {
         // The camera: chase unless the near view is on.
         assert_eq!(car_view(false), CarView::Chase);
         assert_eq!(car_view(true), CarView::Hood);
-        // Body damage reads as a percentage, clamped.
-        assert_eq!(drive_damage_text(0.0), "0%");
-        assert_eq!(drive_damage_text(0.256), "26%");
-        assert_eq!(drive_damage_text(1.5), "100%");
-        assert_eq!(drive_damage_text(f32::NAN), "0%");
-        // The minimap is for Walk and Drive only.
+        // The minimap is part of the ground HUD: Walk and Drive, with the HUD on.
         assert!(ground_minimap_shown(Mode::Walk, true));
         assert!(ground_minimap_shown(Mode::Drive, true));
         assert!(!ground_minimap_shown(Mode::Walk, false));

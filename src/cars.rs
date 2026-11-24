@@ -421,7 +421,12 @@ pub struct Car {
     pub rank: f32,
     /// smoothed heading and the fading offset left over from the last turn
     pub dir: Vec3,
+    /// Offset from its lane (tile frame, m): the leftovers of a turn and of a
+    /// collision shove.
     pub shift: Vec3,
+    /// Velocity given to the car by a collision (tile frame, m/s); it moves
+    /// `shift` and is scrubbed off by the tyres.
+    pub bump: Vec3,
     gap: f32,
     /// Seconds left braking to a stop for a player nearby (see `step`).
     pub yield_t: f32,
@@ -446,7 +451,25 @@ const YIELD_BRAKE: f32 = 12.0;
 /// A car at a known distance along a path, for a synthetic tile (the
 /// `--carjack` smoke run): a real car in every other respect.
 pub fn placed(path: u32, s: f32, v: f32, model: u8, col: [f32; 3]) -> Car {
-    Car { path, s, fwd: true, lane: 0, v, vmul: 1.0, model, col, rank: 0.0, dir: Vec3::ZERO, shift: Vec3::ZERO, gap: 1e9, yield_t: 0.0, hurt: 0.0, street: std::cell::Cell::new((0.0, u32::MAX)) }
+    Car { path, s, fwd: true, lane: 0, v, vmul: 1.0, model, col, rank: 0.0, dir: Vec3::ZERO, shift: Vec3::ZERO, bump: Vec3::ZERO, gap: 1e9, yield_t: 0.0, hurt: 0.0, street: std::cell::Cell::new((0.0, u32::MAX)) }
+}
+
+/// Carry a collision shove: the offset moves at the bump velocity, and tyre
+/// scrub slows it down and keeps it from sliding off into the next street.
+pub fn shove_step(shift: &mut Vec3, bump: &mut Vec3, dt: f32) {
+    if !bump.is_finite() || !shift.is_finite() || !(dt > 0.0) {
+        *bump = Vec3::ZERO;
+        return;
+    }
+    *shift += *bump * dt;
+    *bump *= (-dt * 5.0).exp();
+    if bump.length_squared() < 1e-4 {
+        *bump = Vec3::ZERO;
+    }
+    if shift.length() > 10.0 {
+        *shift = shift.normalize_or_zero() * 10.0;
+        *bump *= 0.5;
+    }
 }
 
 fn density(class: u8) -> f32 {
@@ -485,6 +508,7 @@ fn place(net: &RoadNet, c: &mut Car, seed: u32) -> bool {
             c.lane = ((hash(seed, 4) * p.lanes as f32) as u8).min(p.lanes - 1);
             c.v = p.speed * c.vmul;
             c.shift = Vec3::ZERO;
+            c.bump = Vec3::ZERO;
             c.dir = Vec3::ZERO;
             c.yield_t = 0.0;
             c.hurt = 0.0;
@@ -501,7 +525,7 @@ pub fn spawn(net: &RoadNet, tile_seed: u32) -> Vec<Car> {
     let mut cars = Vec::with_capacity(n);
     for k in 0..n as u32 {
         let seed = tile_seed ^ k.wrapping_mul(2654435761);
-        let mut c = Car { path: 0, s: 0.0, fwd: true, lane: 0, v: 0.0, vmul: 0.82 + 0.36 * hash(seed, 5), model: 0, col: [0.5; 3], rank: hash(seed, 6), dir: Vec3::ZERO, shift: Vec3::ZERO, gap: 1e9, yield_t: 0.0, hurt: 0.0, street: std::cell::Cell::new((0.0, u32::MAX)) };
+        let mut c = Car { path: 0, s: 0.0, fwd: true, lane: 0, v: 0.0, vmul: 0.82 + 0.36 * hash(seed, 5), model: 0, col: [0.5; 3], rank: hash(seed, 6), dir: Vec3::ZERO, shift: Vec3::ZERO, bump: Vec3::ZERO, gap: 1e9, yield_t: 0.0, hurt: 0.0, street: std::cell::Cell::new((0.0, u32::MAX)) };
         if place(net, &mut c, seed) {
             c.model = car_model(hash(seed, 7), net.paths[c.path as usize].class <= 2);
             c.col = livery(c.model, hash(seed, 8));
@@ -667,6 +691,7 @@ pub fn step(net: &RoadNet, cars: &mut Vec<Car>, dt: f32, up: Vec3, tick: u32, pl
         let before = c.s;
         c.s += c.v * dt * if c.fwd { 1.0 } else { -1.0 };
         c.shift *= (-dt * 2.2).exp();
+        shove_step(&mut c.shift, &mut c.bump, dt);
         let mut next: Option<(u32, f32, bool)> = None;
         let mut gone = false;
         if c.s >= p.len || c.s <= 0.0 {
@@ -803,6 +828,7 @@ mod tests {
                 rank: 0.0,
                 dir: Vec3::ZERO,
                 shift: Vec3::ZERO,
+                bump: Vec3::ZERO,
                 gap: 0.0,
                 yield_t: 0.0,
                 hurt: 0.0,

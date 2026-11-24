@@ -50,7 +50,7 @@ cargo build --release --locked
 ## Features
 
 - **Ground play:** start on foot anywhere; walk, run, sprint, jump, step up kerbs, and climb or slide on slopes. Six surface classes (asphalt, concrete, gravel, grass, sand, snow/ice) change grip, speed, and footstep audio, and weather modifies them.
-- **Cars:** take any of the eight existing road vehicles while parked or moving, drive them with single-body arcade physics, drift with the handbrake, take collision damage, and get out again.
+- **Cars:** take any of the eight existing road vehicles while parked or moving, drive them with single-body arcade physics, drift with the handbrake, shove other cars aside in solid two-way collisions, and get out again.
 - **Flight:** the upstream aircraft, cockpits, systems, and flight model: Cessna 172RG, Robin DR400, Beechcraft A36 Bonanza, Boeing 747, Gulfstream G650, F/A-18, F-4, F-22, Concorde, SR-71, Starship, and downloadable [FlightGear aircraft](https://wiki.flightgear.org/FGAddon).
 - **World:** real elevation, OpenStreetMap roads and buildings, ESA WorldCover land cover, satellite imagery, real METAR weather, seasonal and live snow, a satellite/road minimap, live ADS-B traffic, and flight multiplayer.
 - **Controls:** remappable keyboard, joystick, throttle, pedals, and gamepad, with separate on-foot, car, and flight contexts in **Settings → Controls**.
@@ -127,7 +127,7 @@ All bindings can be customized in **Settings → Controls**, which has separate 
 | Action | Default Key |
 | --- | --- |
 | Camera (chase / cockpit) | `C` |
-| HUD / Minimap toggle | `H` / `` ` `` |
+| HUD toggle (the minimap follows it on the ground) / Minimap in flight | `H` / `` ` `` |
 | Full map | `J` |
 | Go to place / Respawn / Pause | `G` / `R` / `P` |
 | Flight panel / Pause menu | `Tab` / `Esc` |

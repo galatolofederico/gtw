@@ -1127,7 +1127,7 @@ pub fn park_cars(cx: &Ctx, net: &RoadNet, hoods: &Hoods, built: &[u8]) -> Vec<Pa
                 if h < fill && clear && !crossing && out.len() < 2600 {
                     let model = car_model(hash(seed, j * 4 + 1), false).min(5);
                     let facing = if (*side > 0.0) == net.left && !p.oneway { -t } else { t };
-                    out.push(Parked { pos: pos - up0 * 0.02, fwd: facing, up: up0, model, col: paint(hash(seed, j * 4 + 2)) });
+                    out.push(Parked { pos: pos - up0 * 0.02, fwd: facing, up: up0, model, col: paint(hash(seed, j * 4 + 2)), shift: Vec3::ZERO, bump: Vec3::ZERO });
                 }
                 s += 5.6 + hash(seed, j * 4 + 3) * 2.5;
             }
