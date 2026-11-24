@@ -64,6 +64,7 @@ fn help_lists_the_ground_flags() {
     assert!(ok, "--help failed: {text}");
     assert!(text.contains("--start foot|car|plane"), "usage names --start: {text}");
     assert!(text.contains("--flat"), "usage names --flat: {text}");
+    assert!(text.contains("--no-save"), "usage names --no-save: {text}");
 }
 
 #[test]
@@ -72,7 +73,7 @@ fn starts_on_foot_headless() {
     // Flat ground and no network: the character starts at the default place,
     // settles on the ground and the loop runs for the hold's seconds.
     let mut c = bin();
-    c.args(["--headless", "--flat", "--start", "foot", "--hold", "2", "--mute", "--weather", "clear", "--graphics", "very-low", "--render-scale", "0.35"]);
+    c.args(["--headless", "--flat", "--start", "foot", "--hold", "2", "--no-save", "--mute", "--weather", "clear", "--graphics", "very-low", "--render-scale", "0.35"]);
     let (ok, text) = run_with_limit(c, Duration::from_secs(120));
     assert!(ok, "headless foot run failed: {text}");
     assert!(!text.to_lowercase().contains("panicked"), "no panic: {text}");
@@ -84,7 +85,7 @@ fn starts_in_a_car_headless() {
     // The same flat world, but the start puts a sedan under the player: the
     // car physics runs, the HUD draws and the loop stays panic-free.
     let mut c = bin();
-    c.args(["--headless", "--flat", "--start", "car", "--hold", "2", "--mute", "--weather", "clear", "--graphics", "very-low", "--render-scale", "0.35"]);
+    c.args(["--headless", "--flat", "--start", "car", "--hold", "2", "--no-save", "--mute", "--weather", "clear", "--graphics", "very-low", "--render-scale", "0.35"]);
     let (ok, text) = run_with_limit(c, Duration::from_secs(120));
     assert!(ok, "headless car run failed: {text}");
     assert!(!text.to_lowercase().contains("panicked"), "no panic: {text}");
@@ -97,11 +98,25 @@ fn takes_a_traffic_car_and_exits_headless() {
     // The scripted run flags it down, takes it at a standstill, drives a moment
     // and gets out again.
     let mut c = bin();
-    c.args(["--headless", "--flat", "--start", "foot", "--carjack", "--hold", "3", "--mute", "--weather", "clear", "--graphics", "very-low", "--render-scale", "0.35"]);
+    c.args(["--headless", "--flat", "--start", "foot", "--carjack", "--hold", "3", "--no-save", "--mute", "--weather", "clear", "--graphics", "very-low", "--render-scale", "0.35"]);
     let (ok, text) = run_with_limit(c, Duration::from_secs(120));
     assert!(ok, "headless traffic carjack run failed: {text}");
     assert!(text.contains("carjack: took a traffic car"), "it takes the traffic car: {text}");
     assert!(text.contains("carjack: left the traffic car"), "it gets out again: {text}");
+    assert!(!text.to_lowercase().contains("panicked"), "no panic: {text}");
+}
+
+#[test]
+fn starts_a_plane_at_an_airport_headless() {
+    let _gpu = gpu_lock();
+    // --start plane --airport takes the normal airport path. Offline and
+    // with no save, so the run needs no network and never touches the
+    // developer's resume file; if the airport layout cannot be built it
+    // falls back to an overhead start, which still runs the loop.
+    let mut c = bin();
+    c.args(["--headless", "--flat", "--start", "plane", "--airport", "EZE", "--offline", "--no-save", "--hold", "2", "--mute", "--weather", "clear", "--graphics", "very-low", "--render-scale", "0.35"]);
+    let (ok, text) = run_with_limit(c, Duration::from_secs(120));
+    assert!(ok, "headless plane-start run failed: {text}");
     assert!(!text.to_lowercase().contains("panicked"), "no panic: {text}");
 }
 
