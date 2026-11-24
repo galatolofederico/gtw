@@ -104,6 +104,9 @@ impl Mode {
     }
 }
 
+/// How close a car must be on foot to flag it down or get into it (m).
+const TALK_RADIUS: f64 = 3.2;
+
 /// `--start foot|car|plane`: what the game starts in.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum StartMode {
@@ -553,9 +556,11 @@ struct Args {
     start: Option<StartMode>,
     /// --flat: flat ground everywhere for deterministic headless runs
     flat: bool,
+    /// --carjack: take a traffic car and get out again, for the smoke run
+    carjack: bool,
 }
 
-const CLI_USAGE: &str = "fablegame [--version] [--menu | --no-menu] [--start foot|car|plane] [--flat] [--menu-screen main|fly|aircraft|settings] [--menu-view LAT,LON,ALT_M] [--hangar mine|download[:FOLDER]] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--speed KT] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--rain 0..1] [--rain-at KM,BEARING] [--wet 0..1] [--birds off|low|medium|high] [--flock gull|crow|starling|buzzard|goose,KM[,BEARING[,AGL_M]]] [--snow auto|off|always] [--weather [clear|fair|hazy|overcast|windy|storm]] [--storm-at KM,BEARING[,RADIUS_KM][,shower|thunder|severe|supercell]] [--squall-at KM,BEARING[,LENGTH_KM]] [--strike cg|ic,KM,BEARING@SECONDS] [--flight-menu SECONDS] [--pause-menu flight|places|radio|weather|game|settings[:SECTION]|controls|failures[@SECONDS]] [--settings general|graphics|sound|camera|controls|map] [--airport CODE [--runway 28L] [--approach]] [--aircraft KEY] [--max-zoom 8..19] [--cockpit | --tail-view] [--fov DEG] [--no-vsync] [--no-taa] [--graphics very-low|low|medium|high|ultra] [--storm-quality low|medium|high|ultra] [--contrails | --no-contrails] [--dynamic FPS] [--render-scale 0.35..2] [--upscaler bilinear|fsr1|fsr3|fsr4] [--fsr4-install] [--headless] [--minimap plan|satellite] [--minimap-up north|heading] [--full-map] [--fps-log] [--bench SECONDS] [--mute] [--lang CODE] [--fuel 0..1] [--cold] [--arcade] [--mcp | --no-mcp] [--mcp-port PORT] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--no-scenery] [--surface-probe LAT,LON] [--livery N] [--still] [--boost-at SECONDS] [--stage-at SECONDS] [--engines GROUP] [--ship] [--damage ...]";
+const CLI_USAGE: &str = "fablegame [--version] [--menu | --no-menu] [--start foot|car|plane] [--flat] [--carjack] [--menu-screen main|fly|aircraft|settings] [--menu-view LAT,LON,ALT_M] [--hangar mine|download[:FOLDER]] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--speed KT] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--rain 0..1] [--rain-at KM,BEARING] [--wet 0..1] [--birds off|low|medium|high] [--flock gull|crow|starling|buzzard|goose,KM[,BEARING[,AGL_M]]] [--snow auto|off|always] [--weather [clear|fair|hazy|overcast|windy|storm]] [--storm-at KM,BEARING[,RADIUS_KM][,shower|thunder|severe|supercell]] [--squall-at KM,BEARING[,LENGTH_KM]] [--strike cg|ic,KM,BEARING@SECONDS] [--flight-menu SECONDS] [--pause-menu flight|places|radio|weather|game|settings[:SECTION]|controls|failures[@SECONDS]] [--settings general|graphics|sound|camera|controls|map] [--airport CODE [--runway 28L] [--approach]] [--aircraft KEY] [--max-zoom 8..19] [--cockpit | --tail-view] [--fov DEG] [--no-vsync] [--no-taa] [--graphics very-low|low|medium|high|ultra] [--storm-quality low|medium|high|ultra] [--contrails | --no-contrails] [--dynamic FPS] [--render-scale 0.35..2] [--upscaler bilinear|fsr1|fsr3|fsr4] [--fsr4-install] [--headless] [--minimap plan|satellite] [--minimap-up north|heading] [--full-map] [--fps-log] [--bench SECONDS] [--mute] [--lang CODE] [--fuel 0..1] [--cold] [--arcade] [--mcp | --no-mcp] [--mcp-port PORT] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--no-scenery] [--surface-probe LAT,LON] [--livery N] [--still] [--boost-at SECONDS] [--stage-at SECONDS] [--engines GROUP] [--ship] [--damage ...]";
 
 fn parse_args() -> Args {
     let v: Vec<String> = std::env::args().skip(1).collect();
@@ -667,6 +672,7 @@ fn parse_args_from(v: &[String]) -> Result<Args, String> {
         mcp_port: mcp::rpc::DEFAULT_PORT,
         start: None,
         flat: false,
+        carjack: false,
     };
     let mut i = 0;
     let req = |flag: &str, i: usize| -> Result<&str, String> {
@@ -761,6 +767,10 @@ fn parse_args_from(v: &[String]) -> Result<Args, String> {
             }
             "--flat" => {
                 a.flat = true;
+                used = 1;
+            }
+            "--carjack" => {
+                a.carjack = true;
                 used = 1;
             }
             "--cockpit" | "--tail-view" => {
@@ -1544,6 +1554,9 @@ struct Game {
     /// the car being driven, and the last one left behind (re-enterable)
     vehicle: Option<vehicle::Vehicle>,
     last_car: Option<vehicle::Vehicle>,
+    /// `--carjack`: the scripted take-and-exit the headless smoke run drives
+    carjack: bool,
+    carjack_step: u8,
     /// the eight player car models' wheel positions and sizes
     car_geom: Vec<cars::CarGeom>,
     /// a menu start asked for on foot rather than in the air
@@ -2042,6 +2055,8 @@ impl Game {
             plane_visible: mode == Mode::Fly,
             vehicle: start_vehicle,
             last_car: None,
+            carjack: args.carjack,
+            carjack_step: 0,
             car_geom,
             start_on_foot: false,
             bind_ctx: bind::Context::Flight,
@@ -2173,6 +2188,19 @@ impl Game {
         plane_drawn(self.mode, self.plane_visible)
     }
 
+    /// Where the player is, for traffic that brakes for them: on foot or in a
+    /// car, but not in the menu, in flight or in a crash.
+    fn traffic_presence(&self, in_menu: bool) -> Option<world::PlayerPresence> {
+        if in_menu || self.crashed {
+            return None;
+        }
+        match self.mode {
+            Mode::Walk => Some(world::PlayerPresence { pos: self.character.pos, driving: false }),
+            Mode::Drive => self.vehicle.as_ref().map(|v| world::PlayerPresence { pos: v.pos, driving: true }),
+            _ => None,
+        }
+    }
+
     /// puts the last flight's start and aircraft back on the globe.
     fn restore_last_start(&mut self) {
         let Some(l) = self.last_start.clone() else { return };
@@ -2248,19 +2276,70 @@ impl Game {
         match self.mode {
             Mode::Drive => self.exit_car(),
             Mode::Walk => {
-                // The car left behind first, then a parked one at the kerb.
+                // The car left behind first, then a moving car being flagged
+                // down, then a parked one at the kerb.
                 if let Some(v) = self.last_car.as_ref().filter(|v| (v.pos - self.character.pos).length() < 4.0) {
                     let v = v.clone();
-                    self.enter_car(v);
-                    return;
+                    return self.enter_car(v);
                 }
-                if let Some(car) = self.world.take_parked_car(self.character.pos, 3.2) {
+                if let Some(car) = self.world.take_traffic_car(self.character.pos, TALK_RADIUS) {
                     let model = car.model.min(cars::N_MODELS as u8 - 1);
-                    self.enter_car(vehicle::Vehicle::spawn(model, car.colour, car.pos, car.yaw));
-                    return;
+                    let mut v = vehicle::Vehicle::spawn(model, car.colour, car.pos, car.yaw);
+                    // The car keeps the speed it was doing: a rolling start.
+                    v.vel = car.velocity;
+                    return self.enter_car(v);
                 }
-                self.status = t!("ground.nothing_to_interact_with").into();
+                if let Some(car) = self.world.take_parked_car(self.character.pos, TALK_RADIUS) {
+                    let model = car.model.min(cars::N_MODELS as u8 - 1);
+                    return self.enter_car(vehicle::Vehicle::spawn(model, car.colour, car.pos, car.yaw));
+                }
+                if !self.traffic_in_reach(TALK_RADIUS) {
+                    self.status = t!("ground.nothing_to_interact_with").into();
+                } else {
+                    // Seen, but its tile is still loading: refuse rather than lose it.
+                    self.status = t!("ground.car_not_ready").into();
+                }
                 self.status_until = self.real + 2.0;
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether a moving car is close enough to flag down.
+    fn traffic_in_reach(&self, radius: f64) -> bool {
+        self.world.nearest_traffic_car(self.character.pos, radius).is_some()
+    }
+
+    /// `--carjack`: the scripted take-and-exit the headless smoke run drives.
+    /// The car is put beside the player once the streamed ground has settled,
+    /// so the run does not depend on the height the world happens to have under
+    /// the start point.
+    fn step_carjack_script(&mut self) {
+        if !self.carjack {
+            return;
+        }
+        match self.carjack_step {
+            0 if self.real > 0.4 && self.mode == Mode::Walk => {
+                self.carjack_step = 1;
+                let pos = self.character.pos;
+                let yaw = self.focus_yaw();
+                self.world.spawn_test_traffic(pos, yaw, 2.5);
+                self.interact();
+                self.world.clear_test_traffic();
+                if self.mode == Mode::Drive {
+                    println!("carjack: took a traffic car");
+                } else {
+                    println!("carjack: nothing in reach");
+                }
+            }
+            1 if self.real > 1.4 && self.mode == Mode::Drive => {
+                self.carjack_step = 2;
+                self.interact();
+                if self.mode == Mode::Walk {
+                    println!("carjack: left the traffic car");
+                } else {
+                    println!("carjack: still driving");
+                }
             }
             _ => {}
         }
@@ -3497,6 +3576,18 @@ impl Game {
         let c = character::CharacterControls { heading: Some(self.cam_yaw), ..c };
         let s = self.character.step(dt, &c, &self.world, &wx);
         self.pad_jump = false;
+        // Traffic is solid: a car that runs into the body knocks it away, hurts
+        // it, and brakes for a few seconds afterwards.
+        let mut traffic = Vec::new();
+        self.world.traffic_bodies_near(self.character.pos, 4.0, &mut traffic);
+        let hit = self.character.hit_traffic(&traffic);
+        if let Some(hit) = hit {
+            self.world.brake_traffic(&hit.body);
+            // Drained here by the HUD and the screen flash; audio follows later.
+            self.flash.push((t!("ground.hit_by_car", hit.damage), self.real));
+            self.status = t!("ground.hit_by_car", hit.damage).into();
+            self.status_until = self.real + 2.5;
+        }
         if s.died {
             self.status = t!("ground.you_died_respawning").into();
             self.status_until = self.real + 5.0;
@@ -3514,15 +3605,26 @@ impl Game {
             self.mode = Mode::Walk;
             return;
         };
+        let mut traffic = Vec::new();
+        self.world.traffic_bodies_near(v.pos, 24.0, &mut traffic);
         let (was_water, was_wrecked) = (v.water, v.damage.wrecked());
-        let s = v.step(dt, &c, &self.world, &wx);
+        let s = v.step(dt, &c, &self.world, &wx, &traffic);
         let (pos, yaw, speed, dmg, wrecked, water, health, smoking) = (s.pos, s.yaw, s.speed, s.damage, s.wrecked, s.water, v.damage.health, v.damage.smoking());
+        // A hit on a traffic car slows and damages it too, and feeds the HUD
+        // and the screen flash; the sound queue comes in a later phase.
+        for hit in &s.traffic_hits {
+            self.world.hurt_traffic(&hit.body, hit.speed);
+        }
         self.character.pos = pos;
         self.character.yaw = yaw;
         self.character.vel = DVec3::ZERO;
         self.character.grounded = true;
         self.character.last_safe = pos;
-        if dmg > 1.5 {
+        if let Some(hit) = s.traffic_hits.iter().max_by(|a, b| a.speed.total_cmp(&b.speed)) {
+            self.flash.push((t!("ground.traffic_hit", hit.damage), self.real));
+            self.status = t!("ground.traffic_hit", hit.damage).into();
+            self.status_until = self.real + 2.0;
+        } else if dmg > 1.5 {
             self.status = t!("ground.crash_damage", dmg).into();
             self.status_until = self.real + 2.0;
         } else if water && !was_water {
@@ -3552,6 +3654,7 @@ impl Game {
 
     /// Advance whatever the player is in on the ground: the car or the feet.
     fn step_ground(&mut self, dt: f64, femit: &mut Vec<(DVec3, render::Particle)>) {
+        self.step_carjack_script();
         if self.mode == Mode::Drive {
             self.step_drive(dt, femit);
         } else {
@@ -6963,7 +7066,7 @@ impl Game {
         }
         crate::gputime::cpu("world.photo3d_stream");
         if dt > 0.0 {
-            self.world.update_traffic(dt as f32, focus_abs);
+            self.world.update_traffic(dt as f32, focus_abs, self.traffic_presence(in_menu));
             let local = (self.utc + geo::pos_to_lla(focus_abs).1.to_degrees() / 15.0).rem_euclid(24.0);
             let player = (!self.crashed && !in_menu).then_some(focus_abs);
             self.world.update_airports(dt as f32, self.wx.wind_from as f32, (self.wx.wind * 1.94384) as f32, (cars::activity(local as f32) * 1.2).clamp(0.25, 1.0), player, focus_abs);
@@ -8182,7 +8285,9 @@ impl Game {
                 let in_reach = self.last_car.as_ref().is_some_and(|v| (v.pos - self.character.pos).length() < 4.0);
                 if in_reach {
                     Some(t!("ground.re_enter_car"))
-                } else if self.world.nearest_parked_car(self.character.pos, 3.2).is_some() {
+                } else if self.traffic_in_reach(TALK_RADIUS) {
+                    Some(t!("ground.take_moving_car"))
+                } else if self.world.nearest_parked_car(self.character.pos, TALK_RADIUS).is_some() {
                     Some(t!("ground.take_car"))
                 } else {
                     None
