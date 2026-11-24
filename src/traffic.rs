@@ -853,7 +853,7 @@ mod tests {
     #[test]
     #[ignore]
     fn traffic_runs() {
-        let cache = dirs::cache_dir().unwrap().join("fablegame");
+        let cache = crate::paths::cache().unwrap_or_else(|| std::path::PathBuf::from("."));
         let src = crate::sources::Sources::new(crate::fetch::Fetcher::new(cache, false), String::new());
         for code in std::env::var("AIRPORT").unwrap_or("KSFO".into()).split(',') {
             let idx = crate::airports::Db::get().find(code).unwrap();

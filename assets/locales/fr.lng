@@ -1,4 +1,4 @@
-# FableFlight interface text — French. A key missing here shows the English.
+# GTW interface text — French. A key missing here shows the English.
 #
 # One line per text: key = "value". Lines starting with # are comments.
 # Escapes in values: \n new line, \t tab, \" quote, \\ backslash.
@@ -274,6 +274,7 @@ game.needs_attention = "À surveiller"
 game.live_traffic = "Trafic réel"
 game.off_6 = "Désactivé"
 game.settings_general = "Réglages, Général"
+game.migrated_settings = "Vos réglages Fable Flight ont été importés dans GTW"
 game.aircraft_3 = "avions"
 game.nearest_1_km = "le plus proche {}  ·  {:.1} km"
 game.waiting_for_data = "en attente de données"
@@ -657,7 +658,7 @@ hangar.as_stated_in_the_aircraft_2 = "indiquée dans les commentaires du fichier
 hangar.the_file_states_no_license = "le fichier n'indique pas de licence propre : la licence de la collection de FlightGear s'applique"
 hangar.flightgears_collection_2 = "Collection de FlightGear :"
 hangar.notes_from_its_authors = "Notes de ses auteurs"
-hangar.in_fable_flight = "Dans Fable Flight"
+hangar.in_fable_flight = "Dans GTW"
 hangar.type = "Type"
 hangar.engines = "Moteurs"
 hangar.mass = "Masse"

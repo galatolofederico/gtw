@@ -1,7 +1,7 @@
 //! The graphics settings themselves: the quality levels, the presets, the
-//! upscaler choice and `graphics.json` (`<config>/fablegame/graphics.json`).
+//! upscaler choice and `graphics.json` (`<config>/gtw/graphics.json`).
 //! Kept free of the game's other modules so the launcher
-//! (src/bin/fableflight-launcher.rs) reads and writes the very same file with
+//! (src/bin/gtw-launcher/main.rs) reads and writes the very same file with
 //! the very same presets; graphics.rs adds the renderer's figures, the labels
 //! and the settings screen on top.
 use std::path::PathBuf;
@@ -279,7 +279,7 @@ impl Graphics {
     }
 
     pub fn path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("fablegame").join("graphics.json"))
+        crate::paths::config().map(|d| d.join("graphics.json"))
     }
 
     /// The saved settings, or High.

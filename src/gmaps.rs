@@ -2,7 +2,7 @@
 //! of the default imagery. Off by default: it needs the player's own API key,
 //! and every tile that is not already on disk is a billed request, so this
 //! counts requests and bytes (this session, this calendar month, all time) and
-//! keeps the counts in `<config>/fablegame/google_maps.json`.
+//! keeps the counts in `<config>/gtw/google_maps.json`.
 //!
 //! The API: `POST createSession` hands out a session token (valid ~2 weeks),
 //! then tiles are `GET 2dtiles/{z}/{x}/{y}?session=..&key=..` in the usual XYZ
@@ -159,7 +159,7 @@ impl Google {
     /// The saved settings and counts. `key` (from the command line or the
     /// environment) replaces the saved key when given.
     pub fn load(key: Option<String>) -> Self {
-        let path = dirs::config_dir().map(|d| d.join("fablegame").join("google_maps.json"));
+        let path = crate::paths::config().map(|d| d.join("google_maps.json"));
         let j: serde_json::Value = path.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|d| serde_json::from_slice(&d).ok()).unwrap_or_default();
         let n = |k: &str| j[k].as_u64().unwrap_or(0);
         let mut u = Usage { month: j["month"].as_str().unwrap_or("").to_string(), month_requests: n("month_requests"), month_bytes: n("month_bytes"), total_requests: n("total_requests"), total_bytes: n("total_bytes"), month_roots: n("month_roots"), total_roots: n("total_roots"), ..Default::default() };
@@ -173,7 +173,7 @@ impl Google {
             g.detail = AtomicU8::new(d as u8);
         }
         if std::env::var_os("FABLE_NO_3D_CACHE").is_none() {
-            g.cache3d = dirs::cache_dir().map(|d| d.join("fablegame").join("g3d"));
+            g.cache3d = crate::paths::cache().map(|d| d.join("g3d"));
             if let Some(dir) = g.cache3d.clone() {
                 std::thread::spawn(move || prune_cache3d(&dir, now_s(), CACHE3D_MAX));
             }

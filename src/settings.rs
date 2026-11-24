@@ -1,5 +1,5 @@
-//! Settings kept between runs, in `<config dir>/fablegame/settings.json`
-//! (`~/.config/fablegame` on Linux): the language, sound, camera, HUD and
+//! Settings kept between runs, in `<config dir>/gtw/settings.json`
+//! (`~/.config/gtw` on Linux): the language, sound, camera, HUD and
 //! anti-aliasing. Command-line flags still win over them for one run.
 
 use crate::i18n::Lang;
@@ -99,7 +99,7 @@ impl Default for Settings {
 }
 
 fn path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("fablegame").join("settings.json"))
+    crate::paths::config().map(|d| d.join("settings.json"))
 }
 
 impl Settings {

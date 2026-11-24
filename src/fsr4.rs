@@ -42,9 +42,10 @@ pub fn download_size() -> u64 {
     FILES.iter().map(|f| f.size).sum()
 }
 
-/// Where the runtime goes: `<data>/fablegame/amd-fsr-sdk-2.4.0/`.
+/// Where the runtime goes: `<data>/fablegame/amd-fsr-sdk-2.4.0/` (the data
+/// folder keeps its historical name, see `paths::data`).
 pub fn dir() -> Option<PathBuf> {
-    dirs::data_dir().map(|d| d.join("fablegame").join(format!("amd-fsr-sdk-{SDK}")))
+    crate::paths::data().map(|d| d.join(format!("amd-fsr-sdk-{SDK}")))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -175,7 +176,7 @@ fn notice() -> String {
     format!(
         "AMD FSR runtime (FSR Upscaling {VERSION}, FSR 3.1.6), from AMD's FSR SDK v{SDK}:\n\
          https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/releases/tag/v{SDK}\n\n\
-         Downloaded by FableFlight at the player's request; not part of FableFlight\n\
+         Downloaded by GTW at the player's request; not part of GTW\n\
          and not covered by its licence. Copyright (C) Advanced Micro Devices, Inc.\n\
          The terms are in license.md, next to this file. Remove it from the\n\
          graphics settings, or by deleting this folder.\n"

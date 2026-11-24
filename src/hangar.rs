@@ -10,7 +10,8 @@
 //! engines are read too, to show what it flies like here. Downloading takes
 //! the package's zip from a mirror and unpacks it (without its sounds, scripts
 //! and splash screens) into the player's data folder
-//! (`~/.local/share/fablegame/aircraft/<folder>/` on Linux), with a
+//! (`~/.local/share/fablegame/aircraft/<folder>/` on Linux; the data folder
+//! keeps its historical name, see `paths::data`), with a
 //! `source.json` saying where it came from and under which license.
 //!
 //! Flying one: our flight model is a handling model, not JSBSim's build-up
@@ -174,7 +175,7 @@ fn get(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, String> {
 }
 
 fn cache_dir() -> PathBuf {
-    dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")).join("fablegame").join("fgaddon")
+    crate::paths::cache().unwrap_or_else(|| PathBuf::from(".")).join("fgaddon")
 }
 
 /// Whether a name from the catalogue can be used as one folder name on disk:
@@ -185,7 +186,7 @@ fn safe_name(s: &str) -> bool {
 
 /// Where downloaded aircraft live, one folder each.
 pub fn install_dir() -> PathBuf {
-    dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("fablegame").join("aircraft")
+    crate::paths::data().unwrap_or_else(|| PathBuf::from(".")).join("aircraft")
 }
 
 /// A file of a package (path inside its folder), from the disk cache or read

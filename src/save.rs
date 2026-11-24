@@ -125,11 +125,8 @@ impl LoadError {
 }
 
 /// The snapshot's path: `<config dir>/gtw/save.json`.
-///
-/// The GTW config root is used from the start of ground play; phase 7 moves
-/// the other config files over to it too.
 pub fn path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("gtw").join("save.json"))
+    crate::paths::config().map(|d| d.join("save.json"))
 }
 
 impl SaveState {

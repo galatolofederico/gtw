@@ -15,9 +15,10 @@
 //!
 //! The files are compiled in as a safety net, and the copies on disk are laid
 //! over them at start-up: an edited or new `.lng` file shows up with no
-//! rebuild. They are looked for in `$FABLEFLIGHT_LOCALES`, next to the
-//! executable (`locales/`, `assets/locales/`), in `./assets/locales`, in the
-//! source tree, and in `<config dir>/fablegame/locales` for the player's own.
+//! rebuild. They are looked for in `$GTW_LOCALES` (or the old
+//! `$FABLEFLIGHT_LOCALES`), next to the executable (`locales/`,
+//! `assets/locales/`), in `./assets/locales`, in the source tree, and in
+//! `<config dir>/gtw/locales` for the player's own.
 //!
 //! In the code:
 //! - `t!("settings.language")` is the text for a key (`&'static str`);
@@ -284,11 +285,11 @@ pub fn search_dirs() -> Vec<PathBuf> {
         dirs.push(exe.join("assets/locales"));
         dirs.push(exe.join("locales"));
     }
-    if let Some(d) = std::env::var_os("FABLEFLIGHT_LOCALES") {
+    if let Some(d) = std::env::var_os("GTW_LOCALES").or_else(|| std::env::var_os("FABLEFLIGHT_LOCALES")) {
         dirs.push(PathBuf::from(d));
     }
-    if let Some(d) = dirs::config_dir() {
-        dirs.push(d.join("fablegame").join("locales"));
+    if let Some(d) = crate::paths::config() {
+        dirs.push(d.join("locales"));
     }
     // The same folder reached two ways is read once.
     let mut seen = HashSet::new();

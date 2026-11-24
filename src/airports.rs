@@ -1205,7 +1205,7 @@ mod tests {
     #[test]
     #[ignore]
     fn geo_report() {
-        let cache = dirs::cache_dir().unwrap().join("fablegame");
+        let cache = crate::paths::cache().unwrap_or_else(|| std::path::PathBuf::from("."));
         let src = Sources::new(crate::fetch::Fetcher::new(cache, false), String::new());
         for code in std::env::var("AIRPORT").unwrap_or("KSFO".into()).split(',') {
             let idx = Db::get().find(code).expect("unknown airport");
@@ -1305,7 +1305,7 @@ mod seam_tests {
     #[test]
     #[ignore]
     fn level_seams() {
-        let cache = dirs::cache_dir().unwrap().join("fablegame");
+        let cache = crate::paths::cache().unwrap_or_else(|| std::path::PathBuf::from("."));
         let src = Sources::new(crate::fetch::Fetcher::new(cache, false), String::new());
         let code = std::env::var("AIRPORT").unwrap_or("LFLJ".into());
         let a = &Db::get().apts[Db::get().find(&code).unwrap() as usize];

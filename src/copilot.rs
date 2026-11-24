@@ -11,7 +11,7 @@ use crate::geo;
 use crate::nav;
 use crate::traffic;
 use crate::{Game, Mode};
-use fablegame::mcp::{rpc, tools};
+use gtw::mcp::{rpc, tools};
 use glam::{DVec3, Vec2};
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -1333,8 +1333,8 @@ impl Game {
 }
 
 fn screenshot_path(frame: u64, n: u64) -> PathBuf {
-    let base = dirs::config_dir().unwrap_or_else(std::env::temp_dir);
-    let dir = base.join("fablegame").join("screenshots");
+    let base = crate::paths::config().unwrap_or_else(std::env::temp_dir);
+    let dir = base.join("screenshots");
     let _ = std::fs::create_dir_all(&dir);
     dir.join(format!("mcp-{frame}-{n}.png"))
 }

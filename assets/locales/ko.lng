@@ -1,4 +1,4 @@
-# FableFlight interface text — Korean. A key missing here shows the English.
+# GTW interface text — Korean. A key missing here shows the English.
 #
 # One line per text: key = "value". Lines starting with # are comments.
 # Escapes in values: \n new line, \t tab, \" quote, \\ backslash.
@@ -210,6 +210,7 @@ game.needs_attention = "주의 필요"
 game.live_traffic = "실시간 교통"
 game.off_6 = "꺼짐"
 game.settings_general = "설정, 일반"
+game.migrated_settings = "Fable Flight 설정을 GTW로 가져왔습니다"
 game.aircraft_3 = "항공기"
 game.nearest_1_km = "가장 가까움 {}  ·  {:.1} km"
 game.waiting_for_data = "데이터 대기 중"
@@ -545,7 +546,7 @@ hangar.view_its_files = "파일 보기"
 hangar.license_2 = "라이선스"
 hangar.flightgears_collection_2 = "FlightGear 컬렉션:"
 hangar.notes_from_its_authors = "제작자 노트"
-hangar.in_fable_flight = "Fable Flight 수록"
+hangar.in_fable_flight = "GTW 수록"
 hangar.type = "형식"
 hangar.engines = "엔진"
 hangar.mass = "질량"

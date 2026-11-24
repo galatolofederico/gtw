@@ -281,8 +281,8 @@ enum PauseAct {
 
 use crash::Crash;
 use damage::Tear;
-use fablegame::mcp;
 use glam::{DMat4, DQuat, DVec2, DVec3, Mat3, Mat4, Vec2, Vec3};
+use gtw::{mcp, paths};
 use i18n::{t, tr_en};
 use padui::Hint;
 use plane::{Controls, Plane};
@@ -605,7 +605,7 @@ struct Args {
     no_save: bool,
 }
 
-const CLI_USAGE: &str = "fablegame [--version] [--menu | --no-menu] [--start foot|car|plane] [--flat] [--carjack] [--no-save] [--menu-screen main|fly|aircraft|settings] [--menu-view LAT,LON,ALT_M] [--hangar mine|download[:FOLDER]] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--speed KT] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--rain 0..1] [--rain-at KM,BEARING] [--wet 0..1] [--birds off|low|medium|high] [--flock gull|crow|starling|buzzard|goose,KM[,BEARING[,AGL_M]]] [--snow auto|off|always] [--weather [clear|fair|hazy|overcast|windy|storm]] [--storm-at KM,BEARING[,RADIUS_KM][,shower|thunder|severe|supercell]] [--squall-at KM,BEARING[,LENGTH_KM]] [--strike cg|ic,KM,BEARING@SECONDS] [--flight-menu SECONDS] [--pause-menu flight|places|radio|weather|game|settings[:SECTION]|controls|failures[@SECONDS]] [--settings general|graphics|sound|camera|controls|map] [--airport CODE [--runway 28L] [--approach]] [--aircraft KEY] [--max-zoom 8..19] [--cockpit | --tail-view] [--fov DEG] [--no-vsync] [--no-taa] [--graphics very-low|low|medium|high|ultra] [--storm-quality low|medium|high|ultra] [--contrails | --no-contrails] [--dynamic FPS] [--render-scale 0.35..2] [--upscaler bilinear|fsr1|fsr3|fsr4] [--fsr4-install] [--headless] [--minimap plan|satellite] [--minimap-up north|heading] [--full-map] [--fps-log] [--bench SECONDS] [--mute] [--lang CODE] [--fuel 0..1] [--cold] [--arcade] [--mcp | --no-mcp] [--mcp-port PORT] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--no-scenery] [--surface-probe LAT,LON] [--livery N] [--still] [--boost-at SECONDS] [--stage-at SECONDS] [--engines GROUP] [--ship] [--damage ...]";
+const CLI_USAGE: &str = "gtw [--version] [--menu | --no-menu] [--start foot|car|plane] [--flat] [--carjack] [--no-save] [--menu-screen main|fly|aircraft|settings] [--menu-view LAT,LON,ALT_M] [--hangar mine|download[:FOLDER]] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--speed KT] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--rain 0..1] [--rain-at KM,BEARING] [--wet 0..1] [--birds off|low|medium|high] [--flock gull|crow|starling|buzzard|goose,KM[,BEARING[,AGL_M]]] [--snow auto|off|always] [--weather [clear|fair|hazy|overcast|windy|storm]] [--storm-at KM,BEARING[,RADIUS_KM][,shower|thunder|severe|supercell]] [--squall-at KM,BEARING[,LENGTH_KM]] [--strike cg|ic,KM,BEARING@SECONDS] [--flight-menu SECONDS] [--pause-menu flight|places|radio|weather|game|settings[:SECTION]|controls|failures[@SECONDS]] [--settings general|graphics|sound|camera|controls|map] [--airport CODE [--runway 28L] [--approach]] [--aircraft KEY] [--max-zoom 8..19] [--cockpit | --tail-view] [--fov DEG] [--no-vsync] [--no-taa] [--graphics very-low|low|medium|high|ultra] [--storm-quality low|medium|high|ultra] [--contrails | --no-contrails] [--dynamic FPS] [--render-scale 0.35..2] [--upscaler bilinear|fsr1|fsr3|fsr4] [--fsr4-install] [--headless] [--minimap plan|satellite] [--minimap-up north|heading] [--full-map] [--fps-log] [--bench SECONDS] [--mute] [--lang CODE] [--fuel 0..1] [--cold] [--arcade] [--mcp | --no-mcp] [--mcp-port PORT] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--no-scenery] [--surface-probe LAT,LON] [--livery N] [--still] [--boost-at SECONDS] [--stage-at SECONDS] [--engines GROUP] [--ship] [--damage ...]";
 
 fn parse_args() -> Args {
     let v: Vec<String> = std::env::args().skip(1).collect();
@@ -1867,7 +1867,7 @@ impl Game {
         if let Some(sc) = args.render_scale {
             gfx.scale = sc;
         }
-        let cache = dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")).join("fablegame");
+        let cache = paths::cache().unwrap_or_else(|| PathBuf::from("."));
         {
             let prune_dir = cache.clone();
             let _ = std::thread::Builder::new().name("cache-prune".into()).spawn(move || {
@@ -2114,6 +2114,9 @@ impl Game {
         } else {
             None
         };
+        if status.is_empty() && !paths::migration().copied.is_empty() {
+            status = t!("game.migrated_settings").into();
+        }
         let mut g = Self {
             gkey: src.google.key(), gkey_show: false, gm_logo: None, stills: std::collections::HashMap::new(), window, r, world, src, spec, model, piece_mesh, group_mesh, piece_cut, piece_inner, group_pivots, hangar: Vec::new(), building: Vec::new(), crashed: false, crash: None, crash_real: 0.0, egui_ctx, egui_state, keys: HashSet::new(), drag: false, lean_drag: None, last_cursor: None,
             minimap: minimap::Minimap::new(&prefs),
@@ -3502,7 +3505,7 @@ impl Game {
     /// The network's server list (read in the background from the first call on).
     fn mp_directory(&mut self) -> &mp::Directory {
         let (src, url) = (self.src.clone(), self.mp_list.clone());
-        let cache = dirs::config_dir().map(|d| d.join("fablegame")).inspect(|d| {
+        let cache = paths::config().inspect(|d| {
             let _ = std::fs::create_dir_all(d);
         }).map(|d| d.join("mp_servers.json"));
         self.mp_dir.get_or_insert_with(|| mp::Directory::start(src, url, cache))
@@ -9749,7 +9752,7 @@ impl ApplicationHandler for App {
             return;
         }
         progress::step("window");
-        let title = if self.args.bench.is_some() { "Fable Flight: graphics test" } else { "Fable Flight" };
+        let title = if self.args.bench.is_some() { "GTW: graphics test" } else { "GTW" };
         let attrs = Window::default_attributes().with_title(title).with_inner_size(winit::dpi::PhysicalSize::new(self.args.size.0, self.args.size.1));
         let window = Arc::new(el.create_window(attrs).expect("window"));
         match Game::new(window, &self.args) {
@@ -10161,7 +10164,7 @@ fn jsbsim_compare(file: Option<&String>, which: Option<&String>) -> i32 {
 /// Ours flown: the highest roll rate full aileron reaches from 90 kt, level,
 /// in the first four seconds (rad/s). No world is loaded (offline, empty).
 fn our_roll_rate(spec: &'static aircraft::Spec) -> Option<f64> {
-    let dir = std::env::temp_dir().join("fablegame-jsbsim-compare");
+    let dir = std::env::temp_dir().join("gtw-jsbsim-compare");
     let src = Arc::new(sources::Sources::new(fetch::Fetcher::new(dir, true), String::new()));
     let w = world::World::new(sources::Loader::new(src, 0), 14);
     let mut p = Plane::spawn(spec, 45f64.to_radians(), 5f64.to_radians(), 1500.0, 0.0, 90.0 / 1.943_84);
@@ -10187,7 +10190,7 @@ fn fly_check(key: Option<&String>) -> i32 {
         eprintln!("--fly-check KEY: one of {}", aircraft::list().iter().map(|s| s.keys[0]).collect::<Vec<_>>().join(", "));
         return 1;
     };
-    let dir = std::env::temp_dir().join("fablegame-jsbsim-compare");
+    let dir = std::env::temp_dir().join("gtw-jsbsim-compare");
     let src = Arc::new(sources::Sources::new(fetch::Fetcher::new(dir, true), String::new()));
     let mut w = world::World::new(sources::Loader::new(src, 0), 14);
     w.flat = Some(0.0);
@@ -10272,7 +10275,7 @@ fn fly_check(key: Option<&String>) -> i32 {
 /// `--surface-probe LAT,LON`: report the elevation and every surface source at
 /// a point, then exit. Needs no window or GPU.
 fn surface_probe(lat: f64, lon: f64, offline: bool, imagery: String) -> anyhow::Result<()> {
-    let cache = dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")).join("fablegame");
+    let cache = paths::cache().unwrap_or_else(|| PathBuf::from("."));
     let src = sources::Sources::new(fetch::Fetcher::new(cache, offline), imagery);
     let (la, lo) = (lat.to_radians(), lon.to_radians());
     let id = geo::TileId::at(la, lo, sources::DATA_ZOOM);
@@ -10303,11 +10306,15 @@ fn surface_probe(lat: f64, lon: f64, offline: bool, imagery: String) -> anyhow::
 
 fn main() -> anyhow::Result<()> {
     if std::env::args().skip(1).any(|a| a == "--version" || a == "-V") {
-        println!("fablegame {}", env!("CARGO_PKG_VERSION"));
+        println!("gtw {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     progress::step("boot");
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,fablegame=info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,gtw=info")).init();
+    let migration = paths::prepare();
+    if !migration.copied.is_empty() {
+        println!("GTW imported {} file(s) from the old FableFlight settings folder.", migration.copied.len());
+    }
     // A JSBSim aircraft compared with one of ours (see jsbsim.rs), and out.
     let argv: Vec<String> = std::env::args().collect();
     if let Some(i) = argv.iter().position(|a| a == "--jsbsim-compare") {
@@ -10351,7 +10358,7 @@ fn main() -> anyhow::Result<()> {
         return surface_probe(lat, lon, args.offline, args.imagery.clone());
     }
     if args.find_storms {
-        let cache = dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")).join("fablegame");
+        let cache = paths::cache().unwrap_or_else(|| PathBuf::from("."));
         match livewx::find_storms(&fetch::Fetcher::new(cache, false)) {
             Ok(s) if s.is_empty() => println!("no strong storms on radar right now"),
             Ok(s) => {

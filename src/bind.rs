@@ -1,6 +1,6 @@
 //! Control bindings: joysticks, rudder pedals, throttle quadrants and wheels
 //! (any device gilrs can open, laid out or not), and the keyboard's keys
-//! moved to suit. Kept in `<config dir>/fablegame/bindings.json`.
+//! moved to suit. Kept in `<config dir>/gtw/bindings.json`.
 //!
 //! - An axis is bound by moving it the way that means "more": nose up,
 //!   right roll, right rudder, full throttle, brake pressed. Its sign is
@@ -485,7 +485,7 @@ impl Bindings {
     // ------------------------------------------------------------ the file
 
     fn path() -> Option<std::path::PathBuf> {
-        dirs::config_dir().map(|d| d.join("fablegame").join("bindings.json"))
+        crate::paths::config().map(|d| d.join("bindings.json"))
     }
 
     pub fn load() -> Self {
@@ -525,8 +525,35 @@ impl Bindings {
                 self.auto_done.insert(u);
             }
         }
+        // Old files were all flight actions; the new foot and car tables add
+        // defaults on the same keys, which is fine across contexts. Within a
+        // context one key must mean one action: an explicit choice wins over
+        // a default, and the later of two explicit ones is left unbound.
         for ctx in Context::ALL {
+            self.resolve_duplicates(ctx);
             self.tidy(ctx);
+        }
+    }
+
+    /// Leaves one action on each key of `ctx`. An explicit key wins over a
+    /// default, and of two on the same key the earlier in the table keeps it.
+    fn resolve_duplicates(&mut self, ctx: Context) {
+        let acts: Vec<&'static Action> = actions_in(ctx).filter(|a| a.keyboard).collect();
+        let mut taken = std::collections::HashSet::new();
+        for a in &acts {
+            if let Some(Some(k)) = self.keys.get(a.id).copied() {
+                if !taken.insert(k) {
+                    self.keys.insert(a.id, None);
+                }
+            }
+        }
+        for a in &acts {
+            if self.keys.contains_key(a.id) {
+                continue;
+            }
+            if !taken.insert(a.key) {
+                self.keys.insert(a.id, None);
+            }
         }
     }
 
@@ -897,6 +924,43 @@ mod tests {
         assert!(actions_in(Context::Flight).all(|a| ACTIONS.iter().any(|f| f.id == a.id)));
         assert_eq!(actions_in(Context::Flight).count(), ACTIONS.len());
         assert!(actions_in(Context::Foot).any(|a| a.id == "move_forward") && actions_in(Context::Foot).any(|a| a.id == "camera"));
+    }
+
+    #[test]
+    fn legacy_bindings_keep_flight_keys_and_gain_contexts() {
+        // A FableFlight file, from before foot and car contexts existed: only
+        // flight actions, one of them moved. The old custom key stays; the new
+        // contexts appear with their own defaults.
+        let j = serde_json::json!({
+            "keys": { "pitch_down": "F9" },
+            "axes": [], "buttons": [], "presets_applied": [], "gamepad": {}
+        });
+        let mut b = Bindings::default();
+        b.read(&j);
+        assert_eq!(b.key_of(Context::Flight, action("pitch_down").unwrap()), Some(KeyCode::F9));
+        assert_eq!(b.map_key(Context::Flight, KeyCode::F9), Some(KeyCode::KeyW));
+        assert_eq!(b.map_key(Context::Foot, KeyCode::F9), Some(KeyCode::F9));
+        assert_eq!(b.action_at(Context::Foot, KeyCode::KeyW).map(|a| a.id), Some("move_forward"));
+        assert_eq!(b.action_at(Context::Car, KeyCode::KeyW).map(|a| a.id), Some("car_throttle"));
+        // A duplicate in an old file does not leave one key on two actions:
+        // the explicit action wins, otherwise the earlier one keeps it.
+        let mut b = Bindings::default();
+        b.read(&serde_json::json!({ "keys": { "gear": "KeyJ" } }));
+        assert_eq!(b.key_of(Context::Flight, action("gear").unwrap()), Some(KeyCode::KeyJ));
+        assert_eq!(b.key_of(Context::Flight, action("full_map").unwrap()), None);
+        // An explicit key wins even over an earlier default.
+        let mut b = Bindings::default();
+        b.read(&serde_json::json!({ "keys": { "full_map": "KeyS" } }));
+        assert_eq!(b.key_of(Context::Flight, action("full_map").unwrap()), Some(KeyCode::KeyS));
+        assert_eq!(b.key_of(Context::Flight, action("pitch_up").unwrap()), None);
+        for ctx in Context::ALL {
+            let mut keys = std::collections::HashSet::new();
+            for a in actions_in(ctx).filter(|a| a.keyboard) {
+                if let Some(k) = b.key_of(ctx, a) {
+                    assert!(keys.insert(k), "{} puts two actions on {k:?}", ctx.name());
+                }
+            }
+        }
     }
 
     #[test]

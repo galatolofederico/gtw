@@ -5,7 +5,7 @@
 //! for integrated graphics (a laptop without a GPU of its own): it also turns
 //! off the costs that do not shrink with the resolution (the cloud shadow map,
 //! MSAA, the water's reflections and sea bed, traffic and birds). Saved in
-//! `<config>/fablegame/graphics.json`.
+//! `<config>/gtw/graphics.json`.
 //!
 //! Where the time goes (RTX 3060, 1080p, `FABLE_GPU_TIMES=1`, over San
 //! Francisco with scattered cloud): High is about 23 ms of GPU work a frame,

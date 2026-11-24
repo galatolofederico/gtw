@@ -1,6 +1,6 @@
 //! The game's loopback control service.
 //!
-//! `fableflight-mcp` speaks MCP to the AI client and forwards tool calls here
+//! `gtw-mcp` speaks MCP to the AI client and forwards tool calls here
 //! as one JSON-RPC request per line.  The game drains the calls on its main
 //! thread, where it can read and change the live simulation safely.
 
@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Where the bridge looks unless `FABLEFLIGHT_MCP_PORT` or `--port` says otherwise.
+/// Where the bridge looks unless `GTW_MCP_PORT` or `--port` says otherwise.
 pub const DEFAULT_PORT: u16 = 42761;
 
 /// How long a tool may take before the bridge gives up.
@@ -32,15 +32,15 @@ pub struct Call {
 
 /// Path of the owner-only token file for the loopback MCP server on `port`.
 pub fn token_path(port: u16) -> PathBuf {
-    dirs::config_dir()
+    crate::paths::config()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("fablegame")
         .join(format!("mcp-{port}.token"))
 }
 
-/// Reads the MCP auth token from `FABLEFLIGHT_MCP_TOKEN` or the per-port token file.
+/// Reads the MCP auth token from `GTW_MCP_TOKEN` (or the old
+/// `FABLEFLIGHT_MCP_TOKEN`) or the per-port token file.
 pub fn read_token(port: u16) -> Option<String> {
-    if let Ok(tok) = std::env::var("FABLEFLIGHT_MCP_TOKEN") {
+    if let Ok(tok) = std::env::var("GTW_MCP_TOKEN").or_else(|_| std::env::var("FABLEFLIGHT_MCP_TOKEN")) {
         let tok = tok.trim().to_string();
         if !tok.is_empty() {
             return Some(tok);
@@ -119,11 +119,12 @@ fn ct_eq(a: &str, b: &str) -> bool {
 
 /// Start listening on `127.0.0.1:port` and return the queue the game drains.
 /// Writes a per-session secret token to `token_path(port)` (mode 0600 on Unix)
-/// so only the local user's `fableflight-mcp` bridge can issue commands.
+/// so only the local user's `gtw-mcp` bridge can issue commands.
 pub fn serve(port: u16) -> std::io::Result<Receiver<Call>> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     let bound_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
-    let token = std::env::var("FABLEFLIGHT_MCP_TOKEN")
+    let token = std::env::var("GTW_MCP_TOKEN")
+        .or_else(|_| std::env::var("FABLEFLIGHT_MCP_TOKEN"))
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
