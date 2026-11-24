@@ -3,7 +3,7 @@
 //! space alone (the menu camera looks away from the planet, see `frame`).
 use crate::menu::{self, Screen, ACCENT, DIM, FAINT, TEXT};
 use crate::padui::{self, Hint};
-use crate::{aircraft, hangar_ui, settings_ui, t, tr_en, Game};
+use crate::{aircraft, hangar_ui, save, settings_ui, t, tr_en, Game};
 use egui::{pos2, vec2, Align2, Color32, FontId, Painter, Pos2, Rect, Sense, Stroke};
 
 /// The picture behind the FLY tile, 4:3 at a little over twice the tile's
@@ -24,6 +24,8 @@ enum Tile {
     Settings,
     /// back into the air where the last flight started.
     Again,
+    /// pick the resume snapshot back up where it was left.
+    Continue,
     /// the settings' Multiplayer section
     Multiplayer,
 }
@@ -38,6 +40,7 @@ impl Game {
         let mut press: Option<Tile> = None;
         let mut quit = false;
         let again = self.last_start_label();
+        let resume = self.save.as_ref().map(save::summary);
         let rise = entrance(ctx);
         egui::Area::new(egui::Id::unique("main_menu")).order(egui::Order::Background).fixed_pos(screen.min).show(ctx, |ui| {
             let p = ui.painter().clone();
@@ -101,9 +104,23 @@ impl Game {
                 press = Some(Tile::Multiplayer);
             }
 
-            // under fly: the last start, one press away.
+            // Under fly: the resume snapshot first, then the last start, one
+            // press away each.
+            let mut bar_y = fly.bottom() + 14.0 * k;
+            if let Some(where_) = &resume {
+                let b = Rect::from_min_size(pos2(fly.left(), bar_y), vec2(fly.width(), 46.0));
+                let r = ui.interact(b, ui.scope_id().with("continue"), Sense::click());
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("menu.continue")));
+                let mut pc = p.clone();
+                pc.set_opacity(rise(3));
+                continue_button(&pc, b, &r, where_);
+                if r.clicked() {
+                    press = Some(Tile::Continue);
+                }
+                bar_y += 46.0 + 8.0 * k;
+            }
             if let Some((place, plane)) = &again {
-                let b = Rect::from_min_size(pos2(fly.left(), fly.bottom() + 14.0 * k), vec2(fly.width(), 46.0));
+                let b = Rect::from_min_size(pos2(fly.left(), bar_y), vec2(fly.width(), 46.0));
                 let r = ui.interact(b, ui.scope_id().with("again"), Sense::click());
                 r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("menu.fly_again")));
                 let mut pg = p.clone();
@@ -148,6 +165,12 @@ impl Game {
                 self.restore_last_start();
                 self.menu.screen = Screen::Fly;
                 self.begin();
+            }
+            Some(Tile::Continue) => {
+                if !self.resume_save() {
+                    self.status = t!("save.resume_failed").into();
+                    self.status_until = self.real + 4.0;
+                }
             }
             None => {}
         }
@@ -195,6 +218,21 @@ fn again_button(p: &Painter, r: Rect, resp: &egui::Response, place: &str, plane:
     p.add(egui::Shape::convex_polygon(vec![end + vec2(3.5, -3.5), end + vec2(4.0, 3.0), end + vec2(-2.5, 1.5)], col, Stroke::NONE));
     p.text(pos2(r.left() + 44.0, r.center().y), Align2::LEFT_CENTER, t!("menu.fly_again"), menu::label(), menu::mix(TEXT, Color32::WHITE, lit));
     let g = p.layout_no_wrap(format!("{place}  ·  {plane}"), menu::caption(), DIM);
+    p.galley(pos2(r.right() - 16.0 - g.size().x, r.center().y - g.size().y * 0.5), g, DIM);
+}
+
+/// The resume bar under fly: pick up where the last session left off.
+fn continue_button(p: &Painter, r: Rect, resp: &egui::Response, where_: &str) {
+    let lit = menu::ease(p.ctx(), resp.id, resp.hovered() || resp.has_focus());
+    p.rect_filled(r, menu::R_WIDGET, menu::mix(Color32::from_rgba_premultiplied(12, 16, 22, 226), Color32::from_rgba_premultiplied(26, 32, 42, 238), lit));
+    p.rect_stroke(r, menu::R_WIDGET, Stroke::new(1.0, menu::mix(Color32::from_white_alpha(26), ACCENT, lit)), egui::StrokeKind::Inside);
+    let col = menu::mix(TEXT, ACCENT, lit);
+    // a play mark in a ring.
+    let c = pos2(r.left() + 24.0, r.center().y);
+    p.circle_stroke(c, 8.0, Stroke::new(1.6, col));
+    p.add(egui::Shape::convex_polygon(vec![c + vec2(-2.2, -4.2), c + vec2(-2.2, 4.2), c + vec2(4.2, 0.0)], col, Stroke::NONE));
+    p.text(pos2(r.left() + 44.0, r.center().y), Align2::LEFT_CENTER, t!("menu.continue"), menu::label(), menu::mix(TEXT, Color32::WHITE, lit));
+    let g = p.layout_no_wrap(where_.to_string(), menu::caption(), DIM);
     p.galley(pos2(r.right() - 16.0 - g.size().x, r.center().y - g.size().y * 0.5), g, DIM);
 }
 

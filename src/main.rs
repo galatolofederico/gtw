@@ -71,6 +71,7 @@ mod render;
 mod single_sample;
 mod stroke_font;
 mod roads;
+mod save;
 mod scenery;
 mod skin;
 mod sources;
@@ -106,6 +107,12 @@ impl Mode {
 
 /// How close a car must be on foot to flag it down or get into it (m).
 const TALK_RADIUS: f64 = 3.2;
+
+/// How close a parked aircraft must be on foot to get into it (m).
+const AIRCRAFT_REACH: f64 = 15.0;
+
+/// How near an airfield the airport menu fallback offers a runway start (m).
+const AIRPORT_REACH: f64 = 5000.0;
 
 /// `--start foot|car|plane`: what the game starts in.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -144,10 +151,16 @@ fn focus_for(mode: Mode, character: DVec3, car: Option<DVec3>, plane: DVec3) -> 
     }
 }
 
-/// Whether the aircraft is part of the scene: only in flight, and only once
-/// it has been taken.
+/// Whether the aircraft is part of the scene: in flight, and on foot beside a
+/// parked one the player has left, but only once it has been taken.
 fn plane_drawn(mode: Mode, plane_visible: bool) -> bool {
-    mode == Mode::Fly && plane_visible
+    plane_visible && matches!(mode, Mode::Fly | Mode::Walk)
+}
+
+/// Whether the player may get out of an aircraft: only standing on the ground
+/// and moving no faster than a walk (2 m/s).
+fn exit_aircraft_allowed(on_ground: bool, ground_speed: f64) -> bool {
+    on_ground && ground_speed.is_finite() && ground_speed.abs() < 2.0
 }
 
 /// Whether the player's body is drawn: on foot, unless the eyes are in it.
@@ -180,6 +193,19 @@ fn drive_gear_text(gear: i8) -> String {
         g if g < 0 => "R".into(),
         0 => "N".into(),
         g => g.to_string(),
+    }
+}
+
+/// The snapshot record of a car.
+fn saved_car(v: &vehicle::Vehicle) -> save::SavedCar {
+    save::SavedCar {
+        model: v.model,
+        colour: v.colour,
+        pos: v.pos.to_array(),
+        yaw: v.yaw,
+        speed: v.speed(),
+        health: v.damage.health,
+        damage: v.damage.crumple,
     }
 }
 
@@ -558,9 +584,11 @@ struct Args {
     flat: bool,
     /// --carjack: take a traffic car and get out again, for the smoke run
     carjack: bool,
+    /// --no-save: neither load a resume snapshot nor write one (automated runs)
+    no_save: bool,
 }
 
-const CLI_USAGE: &str = "fablegame [--version] [--menu | --no-menu] [--start foot|car|plane] [--flat] [--carjack] [--menu-screen main|fly|aircraft|settings] [--menu-view LAT,LON,ALT_M] [--hangar mine|download[:FOLDER]] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--speed KT] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--rain 0..1] [--rain-at KM,BEARING] [--wet 0..1] [--birds off|low|medium|high] [--flock gull|crow|starling|buzzard|goose,KM[,BEARING[,AGL_M]]] [--snow auto|off|always] [--weather [clear|fair|hazy|overcast|windy|storm]] [--storm-at KM,BEARING[,RADIUS_KM][,shower|thunder|severe|supercell]] [--squall-at KM,BEARING[,LENGTH_KM]] [--strike cg|ic,KM,BEARING@SECONDS] [--flight-menu SECONDS] [--pause-menu flight|places|radio|weather|game|settings[:SECTION]|controls|failures[@SECONDS]] [--settings general|graphics|sound|camera|controls|map] [--airport CODE [--runway 28L] [--approach]] [--aircraft KEY] [--max-zoom 8..19] [--cockpit | --tail-view] [--fov DEG] [--no-vsync] [--no-taa] [--graphics very-low|low|medium|high|ultra] [--storm-quality low|medium|high|ultra] [--contrails | --no-contrails] [--dynamic FPS] [--render-scale 0.35..2] [--upscaler bilinear|fsr1|fsr3|fsr4] [--fsr4-install] [--headless] [--minimap plan|satellite] [--minimap-up north|heading] [--full-map] [--fps-log] [--bench SECONDS] [--mute] [--lang CODE] [--fuel 0..1] [--cold] [--arcade] [--mcp | --no-mcp] [--mcp-port PORT] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--no-scenery] [--surface-probe LAT,LON] [--livery N] [--still] [--boost-at SECONDS] [--stage-at SECONDS] [--engines GROUP] [--ship] [--damage ...]";
+const CLI_USAGE: &str = "fablegame [--version] [--menu | --no-menu] [--start foot|car|plane] [--flat] [--carjack] [--no-save] [--menu-screen main|fly|aircraft|settings] [--menu-view LAT,LON,ALT_M] [--hangar mine|download[:FOLDER]] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--speed KT] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--rain 0..1] [--rain-at KM,BEARING] [--wet 0..1] [--birds off|low|medium|high] [--flock gull|crow|starling|buzzard|goose,KM[,BEARING[,AGL_M]]] [--snow auto|off|always] [--weather [clear|fair|hazy|overcast|windy|storm]] [--storm-at KM,BEARING[,RADIUS_KM][,shower|thunder|severe|supercell]] [--squall-at KM,BEARING[,LENGTH_KM]] [--strike cg|ic,KM,BEARING@SECONDS] [--flight-menu SECONDS] [--pause-menu flight|places|radio|weather|game|settings[:SECTION]|controls|failures[@SECONDS]] [--settings general|graphics|sound|camera|controls|map] [--airport CODE [--runway 28L] [--approach]] [--aircraft KEY] [--max-zoom 8..19] [--cockpit | --tail-view] [--fov DEG] [--no-vsync] [--no-taa] [--graphics very-low|low|medium|high|ultra] [--storm-quality low|medium|high|ultra] [--contrails | --no-contrails] [--dynamic FPS] [--render-scale 0.35..2] [--upscaler bilinear|fsr1|fsr3|fsr4] [--fsr4-install] [--headless] [--minimap plan|satellite] [--minimap-up north|heading] [--full-map] [--fps-log] [--bench SECONDS] [--mute] [--lang CODE] [--fuel 0..1] [--cold] [--arcade] [--mcp | --no-mcp] [--mcp-port PORT] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--no-scenery] [--surface-probe LAT,LON] [--livery N] [--still] [--boost-at SECONDS] [--stage-at SECONDS] [--engines GROUP] [--ship] [--damage ...]";
 
 fn parse_args() -> Args {
     let v: Vec<String> = std::env::args().skip(1).collect();
@@ -673,6 +701,7 @@ fn parse_args_from(v: &[String]) -> Result<Args, String> {
         start: None,
         flat: false,
         carjack: false,
+        no_save: false,
     };
     let mut i = 0;
     let req = |flag: &str, i: usize| -> Result<&str, String> {
@@ -771,6 +800,10 @@ fn parse_args_from(v: &[String]) -> Result<Args, String> {
             }
             "--carjack" => {
                 a.carjack = true;
+                used = 1;
+            }
+            "--no-save" => {
+                a.no_save = true;
                 used = 1;
             }
             "--cockpit" | "--tail-view" => {
@@ -1573,8 +1606,14 @@ struct Game {
     pad_jump: bool,
     /// the gamepad's car handbrake held
     pad_car_handbrake: bool,
-    /// write the resume snapshot in the background (phase 5)
+    /// write the resume snapshot while playing (phase 5)
     autosave: bool,
+    /// whether this run may load and write the resume snapshot (--no-save turns it off)
+    save_enabled: bool,
+    /// the snapshot found at startup, offered as Continue on the main menu
+    save: Option<save::SaveState>,
+    /// seconds since the last autosave
+    save_t: f64,
     menu: menu::Menu,
     menu_go: Option<f64>,
     heading: f64,
@@ -2041,6 +2080,21 @@ impl Game {
         };
         // A car start puts a sedan at the same safe point.
         let start_vehicle = (mode == Mode::Drive).then(|| vehicle::Vehicle::spawn(0, [0.58, 0.06, 0.04], character.pos, character.yaw));
+        // A resume snapshot is offered on the main menu; --no-save never reads
+        // or writes one.
+        let save_enabled = !args.no_save;
+        let save = if save_enabled {
+            match save::SaveState::load() {
+                Ok(s) => Some(s),
+                Err(save::LoadError::Missing) => None,
+                Err(e) => {
+                    log::warn!("ignoring resume save: {}", e.message());
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let mut g = Self {
             gkey: src.google.key(), gkey_show: false, gm_logo: None, stills: std::collections::HashMap::new(), window, r, world, src, spec, model, piece_mesh, group_mesh, piece_cut, piece_inner, group_pivots, hangar: Vec::new(), building: Vec::new(), crashed: false, crash: None, crash_real: 0.0, egui_ctx, egui_state, keys: HashSet::new(), drag: false, lean_drag: None, last_cursor: None,
             minimap: minimap::Minimap::new(&prefs),
@@ -2067,6 +2121,9 @@ impl Game {
             pad_jump: false,
             pad_car_handbrake: false,
             autosave: prefs.autosave,
+            save_enabled,
+            save,
+            save_t: 0.0,
             character,
             menu, menu_go: args.menu_go, heading: args.heading.to_radians(), destr: destruct::Destruction::new(secs.to_bits()),
             sheds: damage::Sheds::default(), fx_anchor: plane.pos, fx_shift: DVec3::ZERO, smoke_acc: 0.0, flash: Vec::new(), airport_note: (String::new(), -100.0), weapon_flash: None, kills: Vec::new(), damage_spec: args.damage.clone(), wreck_dirty: false, wreck_t: 0.0, wreck_seen: 0.0,
@@ -2270,14 +2327,15 @@ impl Game {
         self.status_until = self.real + 2.0;
     }
 
-    /// Interact with what is close: get into a car, or out of one. Aircraft
-    /// come in phase 5.
+    /// Interact with what is close: get into or out of a car, or an aircraft
+    /// at an airport.
     fn interact(&mut self) {
         match self.mode {
             Mode::Drive => self.exit_car(),
+            Mode::Fly => self.exit_aircraft(),
             Mode::Walk => {
                 // The car left behind first, then a moving car being flagged
-                // down, then a parked one at the kerb.
+                // down, then a parked one at the kerb, then an aircraft.
                 if let Some(v) = self.last_car.as_ref().filter(|v| (v.pos - self.character.pos).length() < 4.0) {
                     let v = v.clone();
                     return self.enter_car(v);
@@ -2292,6 +2350,9 @@ impl Game {
                 if let Some(car) = self.world.take_parked_car(self.character.pos, TALK_RADIUS) {
                     let model = car.model.min(cars::N_MODELS as u8 - 1);
                     return self.enter_car(vehicle::Vehicle::spawn(model, car.colour, car.pos, car.yaw));
+                }
+                if self.enter_aircraft() || self.aircraft_at_the_airport() {
+                    return;
                 }
                 if !self.traffic_in_reach(TALK_RADIUS) {
                     self.status = t!("ground.nothing_to_interact_with").into();
@@ -2382,6 +2443,276 @@ impl Game {
         self.cam_pos = self.character.eye();
         self.status = t!("ground.left_the_car").into();
         self.status_until = self.real + 2.0;
+    }
+
+    /// Get into the parked aircraft in reach, or back into the one left on the
+    /// ground, and take the controls. Returns whether it happened.
+    fn enter_aircraft(&mut self) -> bool {
+        // The player's own aircraft, left with the engine off: walk up and in.
+        if self.plane_visible && self.plane.on_ground && (self.plane.pos - self.character.pos).length() < AIRCRAFT_REACH {
+            self.board_aircraft();
+            return true;
+        }
+        let Some(a) = self.world.parked_aircraft_near(self.character.pos, AIRCRAFT_REACH) else { return false };
+        let Some(spec) = traffic::player_spec_key(a.ty).and_then(aircraft::by_key) else { return false };
+        let Some(_p) = self.world.take_parked_aircraft(a.apt, a.stand) else { return false };
+        self.set_aircraft(spec);
+        let (lat, lon, h) = geo::pos_to_lla(a.pos);
+        self.respawn_ground(lat, lon, h, a.yaw, a.pitch);
+        self.plane_visible = true;
+        self.character.pos = self.plane.pos;
+        self.character.vel = DVec3::ZERO;
+        self.character.grounded = false;
+        self.mode = Mode::Fly;
+        self.cam_yaw = a.yaw;
+        self.cam_pitch = 0.0;
+        self.cam_pos = self.plane.pos - self.plane.forward() * self.spec.cam_dist;
+        self.cam_dir = -self.plane.forward();
+        self.status = t!("ground.in_the_aircraft", spec.name).into();
+        self.status_until = self.real + 2.0;
+        true
+    }
+
+    /// Take the controls of the aircraft already on the ground beside the player.
+    fn board_aircraft(&mut self) {
+        let (e, n, _) = geo::enu(self.plane.pos);
+        let f = self.plane.forward();
+        let yaw = f.dot(e).atan2(f.dot(n));
+        self.mode = Mode::Fly;
+        self.plane_visible = true;
+        self.cam_yaw = yaw;
+        self.cam_pitch = 0.0;
+        self.cam_pos = self.plane.pos - self.plane.forward() * self.spec.cam_dist;
+        self.cam_dir = -self.plane.forward();
+        self.plane.hold = false;
+        self.plane.parking_brake = false;
+        self.status = t!("ground.in_the_aircraft", self.spec.name).into();
+        self.status_until = self.real + 2.0;
+    }
+
+    /// The airport menu fallback: at an airfield with nothing to take, start the
+    /// chosen aircraft on the runway in use through the normal airport path.
+    fn aircraft_at_the_airport(&mut self) -> bool {
+        if self.airport_rx.is_some() || self.menu.starting {
+            return false;
+        }
+        let Some(idx) = self.world.airfield_near(self.character.pos, AIRPORT_REACH).map(|f| f.geo.idx) else { return false };
+        let spec = aircraft::nth(self.menu.aircraft);
+        self.set_aircraft(spec);
+        self.status = t!("ground.airport_fallback", spec.name).into();
+        self.status_until = self.real + 60.0;
+        self.start_airport(idx, None, false, false);
+        true
+    }
+
+    /// Get out of the aircraft: only on the ground, at walking pace. The
+    /// aircraft stays where it is, so the player can walk back and get in again.
+    fn exit_aircraft(&mut self) {
+        // Ground speed: the planet-frame velocity (the wind is separate).
+        let ground_speed = self.plane.vel.length();
+        if !exit_aircraft_allowed(self.plane.on_ground, ground_speed) {
+            self.status = t!("ground.cannot_exit_in_flight").into();
+            self.status_until = self.real + 2.0;
+            return;
+        }
+        let up = self.plane.pos.normalize();
+        let spot = self.plane.pos + self.plane.right() * 4.0 + up * 1.0;
+        let spot = character::safe_point(&self.world, spot).unwrap_or(spot);
+        self.character.pos = spot;
+        self.character.vel = DVec3::ZERO;
+        self.character.grounded = false;
+        self.character.last_safe = spot;
+        self.character.yaw = self.focus_yaw();
+        // Chocked where it stopped, for the walk back.
+        self.plane.throttle = 0.0;
+        self.plane.vel = DVec3::ZERO;
+        self.plane.parking_brake = true;
+        self.mode = Mode::Walk;
+        self.cam_yaw = self.character.yaw;
+        self.cam_pitch = 0.0;
+        self.cam_pos = self.character.eye();
+        self.status = t!("ground.left_the_aircraft").into();
+        self.status_until = self.real + 2.0;
+    }
+
+    /// The snapshot of the player's current state for the resume save.
+    fn snapshot(&self) -> save::SaveState {
+        let clock = save::SavedClock { utc: self.utc, doy: self.doy, snow: self.snow.code().into() };
+        let foot = (self.mode == Mode::Walk).then(|| save::SavedFoot {
+            pos: self.character.pos.to_array(),
+            yaw: self.character.yaw,
+            health: self.character.health,
+            style: self.avatar_style,
+        });
+        let car = self.vehicle.as_ref().map(saved_car);
+        let last_car = self.last_car.as_ref().map(saved_car);
+        let plane = self.plane_visible.then(|| save::SavedPlane {
+            spec: self.spec.keys.first().copied().unwrap_or("c172").into(),
+            pos: self.plane.pos.to_array(),
+            rot: self.plane.rot.to_array(),
+            vel: self.plane.vel.to_array(),
+            gear: self.plane.gear as f32,
+            flaps: self.plane.flaps as f32,
+            throttle: self.plane.throttle as f32,
+            fuel: (self.plane.fuel / self.spec.fuel_kg.max(1.0)).clamp(0.0, 1.0) as f32,
+        });
+        save::SaveState {
+            version: save::VERSION,
+            mode: match self.mode {
+                Mode::Drive => save::SaveMode::Drive,
+                Mode::Fly => save::SaveMode::Fly,
+                _ => save::SaveMode::Foot,
+            },
+            foot,
+            car,
+            plane,
+            last_car,
+            clock,
+        }
+    }
+
+    /// Write the resume snapshot now, unless this run must not save.
+    pub(crate) fn save_now(&self) {
+        if !self.save_enabled || !self.autosave || self.mode == Mode::Menu {
+            return;
+        }
+        if let Err(e) = self.snapshot().save() {
+            log::warn!("writing resume save: {e}");
+        }
+    }
+
+    /// Autosave every five seconds while playing.
+    fn update_autosave(&mut self, dt: f64) {
+        if !self.save_enabled || !self.autosave || self.mode == Mode::Menu {
+            return;
+        }
+        self.save_t += dt;
+        if self.save_t >= 5.0 {
+            self.save_t = 0.0;
+            self.save_now();
+        }
+    }
+
+    /// Build a car from a saved record, putting it on safe ground first.
+    fn saved_vehicle(&self, c: &save::SavedCar) -> vehicle::Vehicle {
+        let p = DVec3::from_array(c.pos);
+        let p = save::safe_position(&self.world, p).unwrap_or(p);
+        let mut v = vehicle::Vehicle::spawn(c.model.min(cars::N_MODELS as u8 - 1), c.colour, p, c.yaw);
+        let health = if c.health.is_finite() { c.health.clamp(0.0, vehicle::MAX_HEALTH) } else { vehicle::MAX_HEALTH };
+        let frac = health / vehicle::MAX_HEALTH;
+        v.damage.health = health;
+        v.damage.crumple = c.damage.clamp(0.0, 1.0);
+        v.damage.engine = if health <= 0.0 { 0.0 } else { v.damage.engine.min(0.35 + 0.65 * frac) };
+        v.damage.wheel_drag = (1.0 - frac) * 0.06;
+        v.damage.steer_pull = 0.0;
+        v
+    }
+
+    /// Put the saved aircraft back in the world at rest or in flight. Returns
+    /// false for a type this build does not have, or over water.
+    fn restore_saved_plane(&mut self, pl: &save::SavedPlane) -> bool {
+        let Some(spec) = aircraft::by_key(&pl.spec) else { return false };
+        let mut pos = DVec3::from_array(pl.pos);
+        let (mut lat, mut lon, mut h) = geo::pos_to_lla(pos);
+        let mut gh = self.world.ground(lat, lon).map(|g| (g.h, g.water));
+        if gh.is_some_and(|(_, water)| water) {
+            // Ditched or pushed into the sea: find dry land nearby rather than
+            // resuming in the water.
+            let Some(safe) = save::safe_position(&self.world, pos) else { return false };
+            pos = safe;
+            (lat, lon, h) = geo::pos_to_lla(pos);
+            gh = self.world.ground(lat, lon).map(|g| (g.h, g.water));
+            if gh.is_some_and(|(_, water)| water) {
+                return false;
+            }
+        }
+        self.set_aircraft(spec);
+        // Build the state from a normal spawn, then put the saved state back.
+        self.respawn_at(lat, lon, h, 0.0, 0.0);
+        self.plane.pos = pos;
+        self.plane.rot = DQuat::from_array(pl.rot).normalize();
+        self.plane.vel = DVec3::from_array(pl.vel);
+        self.plane.wind = self.wx.steady(pos, 300.0);
+        self.plane.gear = pl.gear as f64;
+        self.plane.gear_down = pl.gear > 0.5 || self.spec.fixed_gear();
+        self.plane.flaps = pl.flaps as f64;
+        self.plane.throttle = pl.throttle as f64;
+        self.plane.fuel = self.spec.fuel_kg * pl.fuel.clamp(0.0, 1.0) as f64;
+        let on_ground = gh.is_some_and(|(g, _)| h <= g + 2.0);
+        self.plane.on_ground = on_ground;
+        self.plane.hold = false;
+        self.plane.parking_brake = on_ground;
+        self.plane_visible = true;
+        self.hold_spot = None;
+        self.cam_pos = self.plane.pos - self.plane.forward() * self.spec.cam_dist;
+        self.cam_dir = -self.plane.forward();
+        self.prev_cam = self.cam_pos;
+        true
+    }
+
+    /// Resume the snapshot found at startup: clock, mode and place.
+    pub(crate) fn resume_save(&mut self) -> bool {
+        let Some(s) = self.save.clone() else { return false };
+        self.utc = if s.clock.utc.is_finite() { s.clock.utc.rem_euclid(24.0) } else { self.utc };
+        self.doy = if s.clock.doy.is_finite() { s.clock.doy.rem_euclid(365.0) } else { self.doy };
+        if let Some(m) = save::snow_mode(&s.clock.snow) {
+            self.snow = m;
+        }
+        self.crashed = false;
+        self.menu.starting = false;
+        // The aircraft, if one was left in the world, so it can be seen and
+        // re-entered on foot as well as flown.
+        let plane = s.plane.as_ref().is_some_and(|p| self.restore_saved_plane(p));
+        if !plane {
+            self.plane_visible = false;
+        }
+        self.vehicle = None;
+        self.last_car = s.last_car.as_ref().map(|c| self.saved_vehicle(c));
+        match s.mode {
+            save::SaveMode::Foot => {
+                let Some(f) = s.foot.as_ref() else { return false };
+                let p = DVec3::from_array(f.pos);
+                let p = save::safe_position(&self.world, p).unwrap_or(p);
+                self.character = character::Character::spawn(p, f.yaw);
+                self.character.health = f.health.clamp(0.0, character::MAX_HEALTH);
+                self.character.last_safe = p;
+                self.avatar_style = f.style.min(avatar::STYLES as u8 - 1);
+                self.mode = Mode::Walk;
+                self.cam_yaw = f.yaw;
+                self.cam_pitch = 0.0;
+                self.cam_pos = self.character.eye();
+                self.status = t!("save.resumed_on_foot").into();
+            }
+            save::SaveMode::Drive => {
+                let Some(c) = s.car.as_ref() else { return false };
+                let mut v = self.saved_vehicle(c);
+                v.vel = v.forward() * c.speed;
+                self.character.pos = v.pos;
+                self.character.yaw = v.yaw;
+                self.character.vel = DVec3::ZERO;
+                self.character.grounded = true;
+                self.mode = Mode::Drive;
+                self.vehicle = Some(v);
+                self.cam_yaw = self.character.yaw;
+                self.cam_pitch = 0.0;
+                self.cam_pos = self.character.pos;
+                self.status = t!("save.resumed_driving").into();
+            }
+            save::SaveMode::Fly => {
+                if !plane {
+                    return false;
+                }
+                let (e, n, _) = geo::enu(self.plane.pos);
+                let f = self.plane.forward();
+                self.mode = Mode::Fly;
+                self.cam_yaw = f.dot(e).atan2(f.dot(n));
+                self.cam_pitch = 0.0;
+                self.loading = Some(Loading::new(self.real));
+                self.status = t!("save.resumed_flying").into();
+            }
+        }
+        self.status_until = self.real + 3.0;
+        true
     }
 
     fn toggle_tail_view(&mut self) {
@@ -3963,6 +4294,11 @@ impl Game {
         c.throttle = (c.throttle + self.pad.throttle).clamp(-1.0, 1.0);
 
         // (With the flight panel open the right stick scrolls it instead.)
+        // On the ground the pad's X interacts (padmap::FOOT_LAYOUT/CAR_LAYOUT);
+        // in flight it is the way out of the aircraft.
+        if self.mode == Mode::Fly && !self.pause_open && pressed.contains(&padmap::PadBtn::X.gilrs()) {
+            self.interact();
+        }
         if self.mode.ground() && nav == Nav::Off && !self.pause_open {
             // On foot the right stick turns the head, the same way round as
             // the mouse: right swings the view right.
@@ -5069,7 +5405,7 @@ impl Game {
             KeyCode::KeyF if !self.crashed => self.plane.set_flaps(1),
             KeyCode::KeyV if self.mode.ground() => self.toggle_ground_view(),
             KeyCode::KeyV if !self.crashed => self.plane.set_flaps(-1),
-            KeyCode::KeyE if self.mode.ground() => self.interact(),
+            KeyCode::KeyE if self.mode != Mode::Menu => self.interact(),
             KeyCode::KeyL if !self.crashed => self.plane.toggle_gear(),
             KeyCode::Slash if !self.crashed => self.plane.toggle_speedbrake(),
             KeyCode::Digit6 if !self.crashed && self.model.pieces.iter().any(|p| p.anim.uses(airframe::Input::Canopy)) => {
@@ -7585,6 +7921,7 @@ impl Game {
             psim.ve = v4(ve, cs);
             psim.vn = v4(vn, zmin - lift);
         }
+        self.update_autosave(dt_real);
         let pf = self.world.photo_frame(cam);
         let photo = self.world.photo_draws(cam);
         g.photo_vp = pf.mask_vp.to_cols_array_2d();
@@ -9342,6 +9679,7 @@ impl ApplicationHandler for App {
         }
         match event {
             WindowEvent::CloseRequested => {
+                g.save_now();
                 g.keep_settings(true);
                 if !std::env::args().any(|a| a == "--headless" || a == "--shot" || a == "--record" || a == "--bench") { g.src.google.save(); }
                 // Dropped here, while the event loop (and with it the Wayland
@@ -9364,6 +9702,7 @@ impl ApplicationHandler for App {
                     progress::step("ready");
                 }
                 if g.quit {
+                    g.save_now();
                     g.keep_settings(true);
                     if !std::env::args().any(|a| a == "--headless" || a == "--shot" || a == "--record" || a == "--bench") { g.src.google.save(); }
                     // Worker threads may be mid-download, so the process just
@@ -10170,9 +10509,9 @@ mod cli_tests {
         assert_eq!(focus_for(Mode::Drive, character, Some(car), plane), car);
         assert_eq!(focus_for(Mode::Drive, character, None, plane), character);
         assert_eq!(focus_for(Mode::Fly, character, Some(car), plane), plane);
-        // The aircraft is drawn only in flight, and only once it is out.
+        // The aircraft is drawn in flight, and on foot beside a parked one.
         assert!(!plane_drawn(Mode::Walk, false));
-        assert!(!plane_drawn(Mode::Walk, true));
+        assert!(plane_drawn(Mode::Walk, true));
         assert!(!plane_drawn(Mode::Drive, true));
         assert!(plane_drawn(Mode::Fly, true));
         assert!(!plane_drawn(Mode::Fly, false));
@@ -10246,5 +10585,27 @@ mod cli_tests {
         assert_eq!(health_bar(500.0), (1.0, "100".into()));
         let (fill, _) = health_bar(f32::NAN);
         assert_eq!(fill, 0.0);
+    }
+
+    #[test]
+    fn exit_aircraft_needs_the_ground_and_a_walking_pace() {
+        assert!(exit_aircraft_allowed(true, 0.0));
+        assert!(exit_aircraft_allowed(true, 1.9));
+        assert!(!exit_aircraft_allowed(true, 2.0));
+        assert!(!exit_aircraft_allowed(true, 2.1));
+        // Airborne is always refused, however slow.
+        assert!(!exit_aircraft_allowed(false, 0.0));
+        assert!(!exit_aircraft_allowed(false, -1.0));
+        assert!(!exit_aircraft_allowed(true, f64::NAN));
+    }
+
+    #[test]
+    fn no_save_is_a_run_option() {
+        let a = parse_args_from(&s(&["--start", "plane", "--airport", "EZE", "--no-save"])).unwrap();
+        assert!(a.no_save);
+        assert_eq!(a.start, Some(StartMode::Plane));
+        assert_eq!(a.airport.as_deref(), Some("EZE"));
+        let b = parse_args_from(&s(&["--start", "foot"])).unwrap();
+        assert!(!b.no_save);
     }
 }
