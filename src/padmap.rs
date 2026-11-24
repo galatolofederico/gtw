@@ -205,18 +205,19 @@ pub fn foot_rows() -> Vec<(String, &'static str)> {
     rows
 }
 
-/// The pad in a car: the left stick drives, the right stick steers, and a
-/// button for the handbrake, getting out, the camera and the horn. Shown in
-/// Settings › Controls › In a car; the flying and on-foot layouts are unchanged.
+/// The pad in a car: the left stick steers, A accelerates, X brakes and
+/// reverses, and a button each for the handbrake, getting out, the camera and
+/// the horn. Shown in Settings › Controls › In a car; the flying and on-foot
+/// layouts are unchanged.
 pub const CAR_LAYOUT: &[(&str, Chord)] = {
     use PadBtn::*;
-    &[("car_handbrake", b(RB)), ("car_enter_exit", b(X)), ("camera", b(R3)), ("car_horn", b(L3))]
+    &[("car_throttle", b(A)), ("car_brake", b(X)), ("car_handbrake", b(RB)), ("car_enter_exit", b(B)), ("camera", b(R3)), ("car_horn", b(L3))]
 };
 
 /// What the pad does in a car, as the controls list shows it: (input, does).
 pub fn car_rows() -> Vec<(String, &'static str)> {
     use crate::i18n::t;
-    let mut rows = vec![("LS".to_string(), t!("gamepad.throttle_and_brake")), ("RS".to_string(), t!("gamepad.steer"))];
+    let mut rows = vec![("LS".to_string(), t!("gamepad.steer"))];
     for &(id, c) in CAR_LAYOUT {
         rows.push((c.spec(), label(id)));
     }
@@ -935,9 +936,11 @@ mod tests {
             assert_ne!(label(id), "?", "{id} has a label");
         }
         let rows = car_rows();
-        assert_eq!(rows[0].0, "LS");
-        assert_eq!(rows[1].0, "RS");
+        assert_eq!(rows[0], ("LS".to_string(), crate::i18n::tr("gamepad.steer")));
+        assert!(rows.iter().any(|(k, what)| k == "A" && *what == label("car_throttle")));
+        assert!(rows.iter().any(|(k, what)| k == "X" && *what == label("car_brake")));
         assert!(rows.iter().any(|(k, what)| k == "RB" && *what == label("car_handbrake")));
+        assert!(rows.iter().any(|(k, what)| k == "B" && *what == label("car_enter_exit")));
     }
 
     #[test]

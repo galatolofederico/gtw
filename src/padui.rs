@@ -1,7 +1,8 @@
 //! Gamepad button prompts in the Xbox style (green A, red B, blue X,
 //! yellow Y, bumpers, triggers, sticks, d-pad, View and Menu), and the
-//! switch between keyboard hints and gamepad ones: while a pad is plugged
-//! in, the menus and the HUD show its buttons instead of keys.
+//! switch between keyboard hints and gamepad ones: the menus and the HUD
+//! show whichever device was last used, so a pad that is merely plugged in
+//! does not hide the keys.
 //!
 //! Prompts are written as short specs: button names separated by spaces,
 //! with `+` and `/` drawn as text between them, e.g. `"Y + View"`, `"LT / RT"`.
@@ -11,13 +12,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// A gamepad is plugged in: hints show its buttons.
+/// A gamepad was the last input: hints show its buttons.
 pub fn active() -> bool {
     ACTIVE.load(Ordering::Relaxed)
 }
 
-pub fn set_active(on: bool) {
-    ACTIVE.store(on, Ordering::Relaxed);
+/// Mark the keyboard and mouse as the last input (their hints show).
+pub fn use_keyboard() {
+    ACTIVE.store(false, Ordering::Relaxed);
+}
+
+/// Mark the gamepad as the last input (its hints show).
+pub fn use_pad() {
+    ACTIVE.store(true, Ordering::Relaxed);
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]

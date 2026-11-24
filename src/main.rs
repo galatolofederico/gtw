@@ -1620,6 +1620,9 @@ struct Game {
     /// the gamepad's on-foot buttons: sprint held, jump pressed this frame
     pad_ground_sprint: bool,
     pad_jump: bool,
+    /// the gamepad's car controls held: A accelerates, X brakes and reverses
+    pad_car_throttle: bool,
+    pad_car_brake: bool,
     /// the gamepad's car handbrake held
     pad_car_handbrake: bool,
     /// write the resume snapshot while playing (phase 5)
@@ -2139,6 +2142,8 @@ impl Game {
             avatar_style: prefs.avatar_style,
             pad_ground_sprint: false,
             pad_jump: false,
+            pad_car_throttle: false,
+            pad_car_brake: false,
             pad_car_handbrake: false,
             autosave: prefs.autosave,
             save_enabled,
@@ -3899,11 +3904,11 @@ impl Game {
     /// Behind the wheel: what the keyboard and pad ask the car to do.
     fn car_controls(&self) -> vehicle::VehicleControls {
         let k = |id: &str| self.ground_key_down(bind::Context::Car, id);
-        let pads = self.pad.pitch;
-        let throttle = (k("car_throttle") as u8 as f64 + (-pads).max(0.0)).min(1.0);
-        let brake = (k("car_brake") as u8 as f64 + pads.max(0.0)).min(1.0);
+        let throttle = k("car_throttle") || self.pad_car_throttle;
+        let brake = k("car_brake") || self.pad_car_brake;
         let steer = (k("car_steer_right") as i32 - k("car_steer_left") as i32) as f64 + self.pad.roll;
-        vehicle::VehicleControls { throttle, brake, steer: steer.clamp(-1.0, 1.0), handbrake: k("car_handbrake") || self.pad_car_handbrake }
+        let on = |b: bool| if b { 1.0 } else { 0.0 };
+        vehicle::VehicleControls { throttle: on(throttle), brake: on(brake), steer: steer.clamp(-1.0, 1.0), handbrake: k("car_handbrake") || self.pad_car_handbrake }
     }
 
     /// The weather's effect on the surfaces under the player on foot.
@@ -4134,9 +4139,13 @@ impl Game {
         let Some(pad) = id.and_then(|id| g.connected_gamepad(id)) else {
             self.pad = Controls::default();
             self.pad_live = None;
-            padui::set_active(false);
+            padui::use_keyboard();
             self.pad_aim = false;
             self.pad_rep = None;
+            self.pad_car_throttle = false;
+            self.pad_car_brake = false;
+            self.pad_car_handbrake = false;
+            self.pad_ground_sprint = false;
             (self.pad_y, self.pad_y_combo) = (false, false);
             self.pad_release_all();
             if self.binds.capture.as_ref().is_some_and(|c| c.from_pad()) {
@@ -4144,8 +4153,14 @@ impl Game {
             }
             return;
         };
-        padui::set_active(true);
-        self.pad_live = Some(pad_live(&pad));
+        // Hints follow the last device touched: a pad only takes them over
+        // when a button is pressed or a stick or trigger is moved.
+        let live = pad_live(&pad);
+        self.pad_live = Some(live);
+        let pad_moved = live.ls.iter().chain(live.rs.iter()).any(|v| v.abs() > 0.2) || live.lt > 0.15 || live.rt > 0.15;
+        if !pressed.is_empty() || pad_moved {
+            padui::use_pad();
+        }
         // Binding from the pad (Settings › Controls › Gamepad): its buttons
         // and sticks go to that alone.
         if let Some(cap) = self.binds.capture.clone().filter(|c| c.from_pad()) {
@@ -4327,8 +4342,9 @@ impl Game {
         c.throttle = (c.throttle + self.pad.throttle).clamp(-1.0, 1.0);
 
         // (With the flight panel open the right stick scrolls it instead.)
-        // On the ground the pad's X interacts (padmap::FOOT_LAYOUT/CAR_LAYOUT);
-        // in flight it is the way out of the aircraft.
+        // On the ground the pad's buttons work: X interacts on foot, B gets
+        // out of a car (padmap::FOOT_LAYOUT/CAR_LAYOUT); in flight X is the
+        // way out of the aircraft.
         if self.mode == Mode::Fly && !self.pause_open && pressed.contains(&padmap::PadBtn::X.gilrs()) {
             self.interact();
         }
@@ -4340,13 +4356,16 @@ impl Game {
             self.cam_pitch = (self.cam_pitch + look_y * rate * 0.8).clamp(-1.35, 1.35);
             // The pad's on-foot buttons (padmap::FOOT_LAYOUT): RB sprints, A
             // jumps, X interacts and R3 swaps the camera. In a car (padmap::
-            // CAR_LAYOUT) the left stick drives, RB is the handbrake, X gets
-            // out, R3 swaps the view and L3 sounds the horn.
+            // CAR_LAYOUT) the left stick steers, A accelerates, X brakes and
+            // reverses, RB is the handbrake, B gets out, R3 swaps the view and
+            // L3 sounds the horn.
             use padmap::PadBtn;
             if self.mode == Mode::Drive {
+                self.pad_car_throttle = down.contains(&PadBtn::A);
+                self.pad_car_brake = down.contains(&PadBtn::X);
                 self.pad_car_handbrake = down.contains(&PadBtn::RB);
                 self.pad_ground_sprint = false;
-                if pressed.contains(&PadBtn::X.gilrs()) {
+                if pressed.contains(&PadBtn::B.gilrs()) {
                     self.interact();
                 }
                 if pressed.contains(&PadBtn::R3.gilrs()) {
@@ -4356,6 +4375,8 @@ impl Game {
                     self.honk();
                 }
             } else {
+                self.pad_car_throttle = false;
+                self.pad_car_brake = false;
                 self.pad_car_handbrake = false;
                 self.pad_ground_sprint = down.contains(&PadBtn::RB);
                 if pressed.contains(&PadBtn::A.gilrs()) {
@@ -4370,6 +4391,8 @@ impl Game {
             }
         } else if self.mode.ground() {
             self.pad_ground_sprint = false;
+            self.pad_car_throttle = false;
+            self.pad_car_brake = false;
             self.pad_car_handbrake = false;
         }
         if flying && nav != Nav::Panel && self.cam_mode != settings::TAIL_VIEW {
@@ -8520,9 +8543,67 @@ impl Game {
                 });
             });
         }
+        if self.mode == Mode::Drive {
+            // What drives the car, for the device in hand: keys or pad buttons.
+            let pad = padui::active();
+            let key_of = |id: &str| {
+                bind::action_in(bind::Context::Car, id)
+                    .and_then(|a| self.binds.key_of(bind::Context::Car, a))
+                    .map(bind::key_name)
+                    .unwrap_or_else(|| "—".to_string())
+            };
+            let pair = |a: &str, b: &str| format!("{} / {}", key_of(a), key_of(b));
+            let spec = |id: &str| padmap::CAR_LAYOUT.iter().find(|(i, _)| *i == id).map(|(_, c)| c.spec()).unwrap_or_default();
+            let rows: [Vec<(String, &'static str)>; 2] = if pad {
+                [
+                    vec![
+                        (spec("car_throttle"), t!("action.car_throttle")),
+                        (spec("car_brake"), t!("action.car_brake")),
+                        ("LS".into(), t!("gamepad.steer")),
+                        (spec("car_handbrake"), t!("action.car_handbrake")),
+                    ],
+                    vec![(spec("car_enter_exit"), t!("ground.leave_car")), (spec("car_horn"), t!("action.car_horn")), (spec("camera"), t!("ground.camera"))],
+                ]
+            } else {
+                [
+                    vec![
+                        (key_of("car_throttle"), t!("action.car_throttle")),
+                        (key_of("car_brake"), t!("action.car_brake")),
+                        (pair("car_steer_left", "car_steer_right"), t!("gamepad.steer")),
+                    ],
+                    vec![
+                        (key_of("car_handbrake"), t!("action.car_handbrake")),
+                        (key_of("car_enter_exit"), t!("ground.leave_car")),
+                        (key_of("car_horn"), t!("action.car_horn")),
+                        (key_of("camera"), t!("ground.camera")),
+                    ],
+                ]
+            };
+            egui::Area::new(egui::Id::unique("drive hints")).anchor(Align2::CENTER_BOTTOM, [0.0, -40.0]).interactable(false).show(ctx, |ui| {
+                egui::Frame::new().fill(Color32::from_black_alpha(140)).corner_radius(menu::R_WIDGET).inner_margin(egui::Margin::symmetric(12, 7)).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 3.0;
+                    for row in rows.iter().filter(|r| !r.is_empty()) {
+                        if pad {
+                            let items: Vec<(&str, &str)> = row.iter().map(|(s, w)| (s.as_str(), *w)).collect();
+                            padui::prompts(ui, &items, 20.0, 12.5, menu::TEXT);
+                        } else {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                for (k, (key, what)) in row.iter().enumerate() {
+                                    if k > 0 {
+                                        ui.add_space(14.0);
+                                    }
+                                    menu::key_cap(ui, key);
+                                    ui.label(RichText::new(*what).font(menu::label()).color(menu::TEXT));
+                                }
+                            });
+                        }
+                    }
+                });
+            });
+        }
         // What the interact action does from here (controller button or bound key).
         let prompt = match self.mode {
-            Mode::Drive => Some(t!("ground.leave_car")),
             Mode::Walk => {
                 let in_reach = self.last_car.as_ref().is_some_and(|v| (v.pos - self.character.pos).length() < 4.0);
                 let own_aircraft = self.plane_visible && self.plane.on_ground && (self.plane.pos - self.character.pos).length() < AIRCRAFT_REACH;
@@ -8543,11 +8624,7 @@ impl Game {
             _ => None,
         };
         if let Some(what) = prompt {
-            let (ctx_kind, act_id, pad_spec) = if self.mode == Mode::Drive {
-                (bind::Context::Car, "car_enter_exit", padmap::CAR_LAYOUT.iter().find(|(id, _)| *id == "car_enter_exit").map(|(_, c)| c.spec()).unwrap_or_else(|| "X".to_string()))
-            } else {
-                (bind::Context::Foot, "interact", padmap::FOOT_LAYOUT.iter().find(|(id, _)| *id == "interact").map(|(_, c)| c.spec()).unwrap_or_else(|| "X".to_string()))
-            };
+            let (ctx_kind, act_id, pad_spec) = (bind::Context::Foot, "interact", padmap::FOOT_LAYOUT.iter().find(|(id, _)| *id == "interact").map(|(_, c)| c.spec()).unwrap_or_else(|| "X".to_string()));
             let key_label = bind::action_in(ctx_kind, act_id)
                 .and_then(|a| self.binds.key_of(ctx_kind, a))
                 .map(bind::key_name)
@@ -9609,6 +9686,13 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, _el: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         let Some(g) = self.game.as_mut() else { return };
         let consumed = g.egui_state.on_window_event(&g.window, &event).consumed;
+        // Hints follow the last device touched: a key or a click brings the
+        // keyboard hints back, a pad button or stick brings its own (in
+        // `gamepad`).
+        let typed = matches!(&event, WindowEvent::KeyboardInput { event: k, .. } if k.state == ElementState::Pressed);
+        if typed || matches!(event, WindowEvent::MouseInput { state: ElementState::Pressed, .. } | WindowEvent::MouseWheel { .. }) {
+            padui::use_keyboard();
+        }
         // A look drag ends on any release, even one the UI took (the flight menu
         // or a panel under the pointer), and when the window loses focus;
         // otherwise the view keeps turning with the mouse after the button is up.
