@@ -1120,16 +1120,16 @@ pub fn park_cars(cx: &Ctx, net: &RoadNet, hoods: &Hoods, built: &[u8]) -> Vec<Pa
                 let nn = pos.dot(up0.cross(Vec3::Z.cross(up0).normalize()));
                 let u = cx.units(Vec2::new(m, -nn));
                 let hood = hoods.at(cx, u);
-                let fill = ((hood.cover - 0.06) / 0.25).clamp(0.0, 0.85);
+                let fill = ((hood.cover - 0.08) / 0.35).clamp(0.0, 0.32);
                 let (bx, by) = ((u[0] * k) as i64, (u[1] * k) as i64);
                 let clear = bx >= 1 && by >= 1 && bx < RASTER as i64 - 1 && by < RASTER as i64 - 1 && built[by as usize * RASTER + bx as usize] == 0;
                 let crossing = p.keep_clear.iter().any(|(sj, r)| (s - sj).abs() < *r);
-                if h < fill && clear && !crossing && out.len() < 2600 {
+                if h < fill && clear && !crossing && out.len() < 400 {
                     let model = car_model(hash(seed, j * 4 + 1), false).min(5);
                     let facing = if (*side > 0.0) == net.left && !p.oneway { -t } else { t };
                     out.push(Parked { pos: pos - up0 * 0.02, fwd: facing, up: up0, model, col: paint(hash(seed, j * 4 + 2)), shift: Vec3::ZERO, bump: Vec3::ZERO });
                 }
-                s += 5.6 + hash(seed, j * 4 + 3) * 2.5;
+                s += 10.0 + hash(seed, j * 4 + 3) * 8.0;
             }
         }
     }
