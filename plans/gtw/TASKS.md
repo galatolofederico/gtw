@@ -146,51 +146,51 @@ cargo run --release -- --help
 
 ### Implementation
 
-- [ ] 3.1 Create `src/vehicle.rs` with `Vehicle`, `VehicleControls`, `VehicleDamage`, `VehicleStep`, and the single-body state.
-- [ ] 3.2 Implement longitudinal forces: engine torque curve, automatic gearbox, reverse, drag, rolling resistance, brakes, handbrake, and surface grip.
-- [ ] 3.3 Implement lateral arcade behaviour: steering yaw target, grip circle, slide at the limit, handbrake rear-grip drop, and cosmetic body roll/pitch.
-- [ ] 3.4 Implement four-point ground sampling, slope gravity, airborne ballistic motion, water stall, and substeps at 1/120 s with a displacement cap.
-- [ ] 3.5 Add the per-model tuning table for mass, power, drivetrain (FWD/RWD/AWD), gear ratios, top speed, and grip for all eight existing models.
-- [ ] 3.6 Implement OBB collisions against buildings, trees, and later traffic bodies; convert penetration into impulses and damage.
-- [ ] 3.7 Implement persistent damage: engine power loss, steering pull, wheel drag, visual crumple amount, smoke at low health, and wreck state at zero.
-- [ ] 3.8 Refactor `src/cars.rs` into `vehicle_body` and `wheel_mesh`; keep `build_models()` returning the existing traffic meshes unchanged.
-- [ ] 3.9 Add `player_models()` returning body mesh, wheel mesh, four wheel local positions, wheel radius, length, and width for each of the eight models.
-- [ ] 3.10 Add wheel spin and steering instances, body roll/pitch, and the player-body damage instance in `Game`.
-- [ ] 3.11 Extend `inst.wgsl` with player-car deformation selected by a negative `Inst.ext.w` amount; keep traffic and photo-hidden behaviour unchanged.
-- [ ] 3.12 Add `Mode::Drive`; implement enter-parked-car via a nearby parked car, exit to the safe side of the car, and `Game.last_car` persistence for re-entry.
-- [ ] 3.13 Add chase and hood/bumper car cameras with mouse look and camera collision.
-- [ ] 3.14 Add the speed/gear/minimap HUD and hide flight instruments in `Mode::Drive`.
-- [ ] 3.15 Add car actions for throttle, brake, steer, handbrake, enter/exit, camera, and horn; add the car gamepad layout and controls tab.
-- [ ] 3.16 Add `World::nearest_parked_car` and `World::take_parked_car` in `src/world.rs`; remove the taken car from its `BTile.parked` list.
-- [ ] 3.17 Add locale strings for car actions, HUD, damage, and enter/exit prompts.
-- [ ] 3.18 Extend `tests/gtw_smoke.rs` with `--flat --start car --hold` using a default sedan spawned at the start point.
+- [x] 3.1 Create `src/vehicle.rs` with `Vehicle`, `VehicleControls`, `VehicleDamage`, `VehicleStep`, and the single-body state.
+- [x] 3.2 Implement longitudinal forces: engine torque curve, automatic gearbox, reverse, drag, rolling resistance, brakes, handbrake, and surface grip.
+- [x] 3.3 Implement lateral arcade behaviour: steering yaw target, grip circle, slide at the limit, handbrake rear-grip drop, and cosmetic body roll/pitch.
+- [x] 3.4 Implement four-point ground sampling, slope gravity, airborne ballistic motion, water stall, and substeps at 1/120 s with a displacement cap.
+- [x] 3.5 Add the per-model tuning table for mass, power, drivetrain (FWD/RWD/AWD), gear ratios, top speed, and grip for all eight existing models.
+- [x] 3.6 Implement OBB collisions against buildings, trees, and later traffic bodies; convert penetration into impulses and damage.
+- [x] 3.7 Implement persistent damage: engine power loss, steering pull, wheel drag, visual crumple amount, smoke at low health, and wreck state at zero.
+- [x] 3.8 Refactor `src/cars.rs` into `vehicle_body` and `wheel_mesh`; keep `build_models()` returning the existing traffic meshes unchanged.
+- [x] 3.9 Add `player_models()` returning body mesh, wheel mesh, four wheel local positions, wheel radius, length, and width for each of the eight models.
+- [x] 3.10 Add wheel spin and steering instances, body roll/pitch, and the player-body damage instance in `Game`.
+- [x] 3.11 Extend `inst.wgsl` with player-car deformation selected by a negative `Inst.ext.w` amount; keep traffic and photo-hidden behaviour unchanged.
+- [x] 3.12 Add `Mode::Drive`; implement enter-parked-car via a nearby parked car, exit to the safe side of the car, and `Game.last_car` persistence for re-entry.
+- [x] 3.13 Add chase and hood/bumper car cameras with mouse look and camera collision.
+- [x] 3.14 Add the speed/gear/minimap HUD and hide flight instruments in `Mode::Drive`.
+- [x] 3.15 Add car actions for throttle, brake, steer, handbrake, enter/exit, camera, and horn; add the car gamepad layout and controls tab.
+- [x] 3.16 Add `World::nearest_parked_car` and `World::take_parked_car` in `src/world.rs`; remove the taken car from its `BTile.parked` list.
+- [x] 3.17 Add locale strings for car actions, HUD, damage, and enter/exit prompts.
+- [x] 3.18 Extend `tests/gtw_smoke.rs` with `--flat --start car --hold` using a default sedan spawned at the start point.
 
 ### Tests
 
-- [ ] 3.19 Unit-test acceleration, braking, top speed, reverse, and auto upshift/downshift for the sedan and bus in `src/vehicle.rs`.
-- [ ] 3.20 Unit-test handbrake yaw and slide on asphalt versus grass in `src/vehicle.rs`.
-- [ ] 3.21 Unit-test rolling resistance and grip on all six surfaces in `src/vehicle.rs`.
-- [ ] 3.22 Unit-test slope gravity, airborne state, landing, and water stall in `src/vehicle.rs`.
-- [ ] 3.23 Unit-test OBB-versus-building separation and impulse damage in `src/vehicle.rs`.
-- [ ] 3.24 Unit-test damage persistence, power loss, steering pull, and wreck state in `src/vehicle.rs`.
-- [ ] 3.25 Unit-test finite state under large `dt`, zero speed, reverse, and full-lock steering in `src/vehicle.rs`.
-- [ ] 3.26 Unit-test `player_models()` returns eight bodies, eight wheel meshes, and four finite wheel positions per model in `src/cars.rs`.
-- [ ] 3.27 Unit-test nearest parked-car selection and removal in `src/world.rs`.
-- [ ] 3.28 Unit-test exit placement on both sides of the car and the safe fallback against a building in `src/main.rs` or `src/vehicle.rs`.
-- [ ] 3.29 Unit-test the driving HUD formatting for speed, gear, and minimap visibility, and chase/hood camera selection in `src/main.rs`.
-- [ ] 3.30 Run the headless smoke test for `--start car` from `tests/gtw_smoke.rs`.
+- [x] 3.19 Unit-test acceleration, braking, top speed, reverse, and auto upshift/downshift for the sedan and bus in `src/vehicle.rs`.
+- [x] 3.20 Unit-test handbrake yaw and slide on asphalt versus grass in `src/vehicle.rs`.
+- [x] 3.21 Unit-test rolling resistance and grip on all six surfaces in `src/vehicle.rs`.
+- [x] 3.22 Unit-test slope gravity, airborne state, landing, and water stall in `src/vehicle.rs`.
+- [x] 3.23 Unit-test OBB-versus-building separation and impulse damage in `src/vehicle.rs`.
+- [x] 3.24 Unit-test damage persistence, power loss, steering pull, and wreck state in `src/vehicle.rs`.
+- [x] 3.25 Unit-test finite state under large `dt`, zero speed, reverse, and full-lock steering in `src/vehicle.rs`.
+- [x] 3.26 Unit-test `player_models()` returns eight bodies, eight wheel meshes, and four finite wheel positions per model in `src/cars.rs`.
+- [x] 3.27 Unit-test nearest parked-car selection and removal in `src/world.rs`.
+- [x] 3.28 Unit-test exit placement on both sides of the car and the safe fallback against a building in `src/main.rs` or `src/vehicle.rs`.
+- [x] 3.29 Unit-test the driving HUD formatting for speed, gear, and minimap visibility, and chase/hood camera selection in `src/main.rs`.
+- [x] 3.30 Run the headless smoke test for `--start car` from `tests/gtw_smoke.rs`.
 
 ### Verification
 
-- [ ] Run `cargo check --all-targets`; it exits 0.
-- [ ] Run `cargo test`; it exits 0 and all vehicle, model, and parked-car tests pass.
-- [ ] Run `cargo test --test gtw_smoke`; it exits 0.
-- [ ] Run `cargo test --test shaders`; it exits 0 with the modified `inst.wgsl`.
+- [x] Run `cargo check --all-targets`; it exits 0.
+- [x] Run `cargo test`; it exits 0 and all vehicle, model, and parked-car tests pass.
+- [x] Run `cargo test --test gtw_smoke`; it exits 0.
+- [x] Run `cargo test --test shaders`; it exits 0 with the modified `inst.wgsl`.
 - [ ] Run `cargo run --release -- --place "Buenos Aires" --start foot`; walk to a parked car, enter it, drive, drift with the handbrake, hit a building, exit, and re-enter.
 - [ ] Run `cargo run --release -- --place "Buenos Aires" --start car`; confirm the default sedan spawns and the HUD shows speed, gear, and minimap.
-- [ ] Run `cargo run --release -- --headless --flat --start car --hold 5`; it exits 0.
-- [ ] Run `cargo build --release --locked`; it exits 0.
-- [ ] Confirm no new skipped, quarantined, or failing tests.
+- [x] Run `cargo run --release -- --headless --flat --start car --hold 5`; it exits 0.
+- [x] Run `cargo build --release --locked`; it exits 0.
+- [x] Confirm no new skipped, quarantined, or failing tests.
 
 **Done when:** A player can take any parked car, drive it with believable single-body arcade handling, see speed and gear, damage it persistently, exit safely, and re-enter it.
 
