@@ -54,6 +54,12 @@ pub struct Settings {
     pub mp_name: String,
     /// where the last flight started.
     pub last: Option<LastStart>,
+    /// on foot: start in first person rather than over the shoulder
+    pub ground_first_person: bool,
+    /// the avatar's clothing palette (0..3)
+    pub avatar_style: u8,
+    /// write the resume snapshot in the background
+    pub autosave: bool,
 }
 
 /// the start of the last flight.
@@ -88,7 +94,7 @@ impl LastStart {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { lang: None, sound_on: true, volume: 1.0, cam_mode: 0, cockpit_fov: crate::cockpit::FOV, look_sens: 1.0, invert_look_cockpit: false, invert_look_outside_x: false, invert_look_outside_y: false, show_hud: true, hud_cockpit: false, path_marker: false, minimap: true, landing_guidance: true, arcade: false, minimap_plan: false, minimap_heading_up: false, minimap_zoom: 12, minimap_size: 280.0, minimap_height: 280.0, map_airports: true, map_navaids: true, taa: true, live_traffic: true, live_weather: true, real_time: true, snow: crate::snow::Mode::Auto, last: None, multiplayer: true, mp_server: "auto".into(), mp_name: String::new() }
+        Self { lang: None, sound_on: true, volume: 1.0, cam_mode: 0, cockpit_fov: crate::cockpit::FOV, look_sens: 1.0, invert_look_cockpit: false, invert_look_outside_x: false, invert_look_outside_y: false, show_hud: true, hud_cockpit: false, path_marker: false, minimap: true, landing_guidance: true, arcade: false, minimap_plan: false, minimap_heading_up: false, minimap_zoom: 12, minimap_size: 280.0, minimap_height: 280.0, map_airports: true, map_navaids: true, taa: true, live_traffic: true, live_weather: true, real_time: true, snow: crate::snow::Mode::Auto, last: None, multiplayer: false, mp_server: "auto".into(), mp_name: String::new(), ground_first_person: false, avatar_style: 0, autosave: true }
     }
 }
 
@@ -150,13 +156,15 @@ impl Settings {
             live_weather: b("live_weather", d.live_weather),
             real_time: b("real_time", d.real_time),
             snow: j["terrain_snow"].as_str().and_then(crate::snow::Mode::parse).unwrap_or(d.snow),
-            // Multiplayer is on by default. Settings saved before that (without
-            // `mp_default_on`) had it off only because it was then the default:
-            // they get it on once; turned off since, it stays off.
-            multiplayer: if j["mp_default_on"].as_bool() == Some(true) { b("multiplayer", d.multiplayer) } else { d.multiplayer },
+            // Multiplayer is off by default; the code and settings stay
+            // reachable, and a saved "on" is kept.
+            multiplayer: b("multiplayer", d.multiplayer),
             mp_server: j["mp_server"].as_str().map(|s| s.trim().chars().take(100).collect()).unwrap_or(d.mp_server),
             mp_name: j["mp_name"].as_str().map(crate::mp_proto::clean_name).unwrap_or(d.mp_name),
             last: LastStart::from_json(&j["last_start"]),
+            ground_first_person: b("ground_first_person", d.ground_first_person),
+            avatar_style: j["avatar_style"].as_u64().map(|v| v.min(crate::avatar::STYLES as u64 - 1) as u8).unwrap_or(d.avatar_style),
+            autosave: b("autosave", d.autosave),
         }
     }
 
@@ -194,6 +202,9 @@ impl Settings {
             "mp_server": self.mp_server,
             "mp_name": self.mp_name,
             "last_start": self.last.as_ref().map(LastStart::to_json),
+            "ground_first_person": self.ground_first_person,
+            "avatar_style": self.avatar_style,
+            "autosave": self.autosave,
         })
     }
 
@@ -217,14 +228,20 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let s = Settings { lang: Lang::parse("fr"), sound_on: false, volume: 0.4, cam_mode: 1, cockpit_fov: 50.0, look_sens: 1.5, invert_look_cockpit: true, invert_look_outside_x: true, invert_look_outside_y: false, show_hud: false, hud_cockpit: true, path_marker: true, minimap: false, landing_guidance: false, arcade: true, minimap_plan: true, minimap_heading_up: true, minimap_zoom: 15, minimap_size: 420.0, minimap_height: 300.0, map_airports: false, map_navaids: false, taa: false, live_traffic: false, live_weather: false, real_time: false, snow: crate::snow::Mode::Always, last: Some(LastStart { lat: 37.6, lon: -122.4, name: "KSFO".into(), airport: Some("KSFO".into()), start: "approach".into(), runway: Some("28L".into()), aircraft: "c172".into() }), multiplayer: true, mp_server: "example.org:7000".into(), mp_name: "Dany".into() };
+        let s = Settings { lang: Lang::parse("fr"), sound_on: false, volume: 0.4, cam_mode: 1, cockpit_fov: 50.0, look_sens: 1.5, invert_look_cockpit: true, invert_look_outside_x: true, invert_look_outside_y: false, show_hud: false, hud_cockpit: true, path_marker: true, minimap: false, landing_guidance: false, arcade: true, minimap_plan: true, minimap_heading_up: true, minimap_zoom: 15, minimap_size: 420.0, minimap_height: 300.0, map_airports: false, map_navaids: false, taa: false, live_traffic: false, live_weather: false, real_time: false, snow: crate::snow::Mode::Always, last: Some(LastStart { lat: 37.6, lon: -122.4, name: "KSFO".into(), airport: Some("KSFO".into()), start: "approach".into(), runway: Some("28L".into()), aircraft: "c172".into() }), multiplayer: true, mp_server: "example.org:7000".into(), mp_name: "Dany".into(), ground_first_person: true, avatar_style: 2, autosave: false };
         assert_eq!(Settings::from_json(&s.to_json()), s);
-        // Multiplayer: on by default, and once for settings saved before it was;
-        // turned off since, it stays off.
-        assert!(Settings::default().multiplayer && Settings::from_json(&serde_json::json!({})).multiplayer);
-        assert!(Settings::from_json(&serde_json::json!({"multiplayer": false})).multiplayer);
-        let off = Settings { multiplayer: false, ..Settings::default() };
-        assert!(!Settings::from_json(&off.to_json()).multiplayer);
+        // Multiplayer is off by default now, while still reachable; settings
+        // saved before the change keep whatever they had.
+        assert!(!Settings::default().multiplayer && !Settings::from_json(&serde_json::json!({})).multiplayer);
+        assert!(Settings::from_json(&serde_json::json!({"multiplayer": true})).multiplayer);
+        let on = Settings { multiplayer: true, ..Settings::default() };
+        assert!(Settings::from_json(&on.to_json()).multiplayer);
+        // Ground-play defaults.
+        let d = Settings::default();
+        assert!(!d.ground_first_person && d.avatar_style == 0 && d.autosave);
+        assert_eq!(Settings::from_json(&serde_json::json!({"avatar_style": 250})).avatar_style, crate::avatar::STYLES as u8 - 1);
+        assert_eq!(Settings::from_json(&serde_json::json!({"ground_first_person": true, "autosave": false})).ground_first_person, true);
+        assert!(!Settings::from_json(&serde_json::json!({"autosave": false})).autosave);
         let legacy_invert = Settings::from_json(&serde_json::json!({"invert_look_outside": true}));
         assert_eq!((legacy_invert.invert_look_outside_x, legacy_invert.invert_look_outside_y), (true, true));
         let tail = Settings { cam_mode: TAIL_VIEW, ..Settings::default() };
