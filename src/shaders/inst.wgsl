@@ -32,13 +32,13 @@ fn world(p: vec3f, w: f32, m0: vec4f, m1: vec4f, m2: vec4f) -> vec3f {
 }
 @vertex fn vs_shadow(@location(0) pos: vec3f, @location(3) m0: vec4f, @location(4) m1: vec4f, @location(5) m2: vec4f, @location(6) tint: vec4f, @location(7) ext: vec4f) -> @builtin(position) vec4f {
   // Street traffic hidden under the 3D tiles casts nothing (decided per car).
-  if (tint.a < 0.5 && ext.w > 0.5 && photo_shadow_gone(vec3f(m0.w, m1.w, m2.w))) { return vec4f(2.0, 2.0, 0.0, 1.0); }
+  if (tint.a < 0.5 && ext.w > 0.5 && ext.w < 1.5 && photo_shadow_gone(vec3f(m0.w, m1.w, m2.w))) { return vec4f(2.0, 2.0, 0.0, 1.0); }
   return CS.vp * vec4f(world(pos, 1.0, m0, m1, m2), 1.0);
 }
 
 @fragment fn fs(in: VOut) -> GOut {
   // Street traffic (ext.w = 1) gives way to the 3D tiles (tiles3d.rs).
-  if (in.tint.a < 0.5 && in.ext.w > 0.5 && photo_hides(in.P, in.clip.xy)) { discard; }
+  if (in.tint.a < 0.5 && in.ext.w > 0.5 && in.ext.w < 1.5 && photo_hides(in.P, in.clip.xy)) { discard; }
   var N = in.N;
   if (dot(N, N) < 1e-10) { N = -normalize(in.P); }
   N = normalize(N);
@@ -54,7 +54,19 @@ fn world(p: vec3f, w: f32, m0: vec4f, m1: vec4f, m2: vec4f) -> vec3f {
   var c: vec3f;
   var Nout = N;
   var mirror = 0.0;
-  if (in.tint.a > 0.5) {
+  if (in.ext.w > 1.5) {
+    // Character (ext.w = 2): m = 0 skin, 0.25 cloth, 0.5 hair, 0.75 shoe.
+    // Cloth and hair take the palette tint fully; skin keeps a little warmth,
+    // shoes stay matte and dark. No metal, no lights, nothing that shines.
+    let hair = step(0.4, m) * step(m, 0.6);
+    let shoe = step(0.6, m);
+    let albedo = in.tint.rgb;
+    // A gentle wrap light so limbs read as rounded even out of direct sun.
+    let wrap = clamp(dot(N, normalize(-V + l.sun.xyz * 0.25)) * 0.5 + 0.5, 0.0, 1.0);
+    c = shade(in.P, N, albedo) * mix(0.92, 1.04, wrap);
+    // Hair and shoes are rougher: a touch darker away from the light.
+    c *= 1.0 - 0.10 * hair * sh - 0.16 * shoe * sh;
+  } else if (in.tint.a > 0.5) {
     // Matte rubble and rock, tinted per piece, with grit.
     let n = textureSampleLevel(t_noise, s_repeat, in.L * 0.23 + in.tint.rgb * 3.0, 0.0);
     let n2 = textureSampleLevel(t_noise, s_repeat, in.L * 1.1, 0.0);

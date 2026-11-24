@@ -1,0 +1,697 @@
+//! The player on foot: a capsule body that walks, runs, sprints, jumps, steps
+//! up kerbs, keeps to slopes it can climb, takes fall damage, regenerates and
+//! respawns nearby after dying.
+//!
+//! The body is a single capsule (radius 0.30 m, height 1.80 m, eye 1.65 m) in
+//! the planet frame. All ground information comes from [`WorldQuery`], so the
+//! controller runs without a GPU, a streamed world, or a network: the tests
+//! drive it over synthetic flat, step and slope worlds.
+
+use crate::geo;
+use crate::surface::{Surface, SurfaceHit, SurfaceWeather};
+use crate::world::WorldQuery;
+use glam::DVec3;
+
+/// Capsule radius (m).
+pub const RADIUS: f64 = 0.30;
+/// Standing height (m), feet to crown.
+pub const HEIGHT: f64 = 1.80;
+/// Eye height above the feet (m).
+pub const EYE: f64 = 1.65;
+/// Strolling pace (m/s).
+pub const WALK: f64 = 1.6;
+/// Jogging pace (m/s).
+pub const RUN: f64 = 4.5;
+/// Sprinting pace (m/s).
+pub const SPRINT: f64 = 7.0;
+/// Jump apex above the take-off point (m).
+pub const JUMP_HEIGHT: f64 = 1.1;
+/// The highest kerb that can be stepped over (m).
+pub const STEP_UP: f64 = 0.35;
+/// The steepest slope that can be stood or walked on (degrees).
+pub const SLOPE_LIMIT: f64 = 40.0;
+/// Downward acceleration (m/s²).
+pub const GRAVITY: f64 = 9.81;
+/// An impact faster than this hurts (m/s).
+pub const SAFE_IMPACT: f64 = 4.0;
+/// Hit points lost per m/s of impact past [`SAFE_IMPACT`].
+pub const IMPACT_DAMAGE: f32 = 8.0;
+/// Full health.
+pub const MAX_HEALTH: f32 = 100.0;
+/// Quiet time before health starts coming back (s).
+pub const REGEN_DELAY: f64 = 5.0;
+/// Health regained per second once it does.
+pub const REGEN_RATE: f32 = 2.0;
+/// Distance between footsteps (m).
+pub const STRIDE: f64 = 0.9;
+/// How fast the body can change its horizontal velocity on the ground (m/s²).
+const GROUND_ACCEL: f64 = 22.0;
+/// …and in the air.
+const AIR_ACCEL: f64 = 3.5;
+
+/// What the player is asking the body to do this step. `forward` and `right`
+/// are -1..1; `sprint` is held; `jump` is the press edge.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct CharacterControls {
+    pub forward: f64,
+    pub right: f64,
+    pub sprint: bool,
+    pub jump: bool,
+    /// The direction "forward" means, as a bearing; none uses the body's own
+    /// facing (useful for tests).
+    pub heading: Option<f64>,
+}
+
+impl CharacterControls {
+    /// The intended pace for the input: a nudge walks, holding it runs, and
+    /// sprint adds the rest. Zero when there is no input.
+    pub fn pace(&self) -> f64 {
+        let m = self.forward.hypot(self.right);
+        if m < 0.01 {
+            0.0
+        } else if self.sprint {
+            SPRINT
+        } else if m > 0.5 {
+            RUN
+        } else {
+            WALK
+        }
+    }
+}
+
+/// The body's state.
+#[derive(Clone, Debug)]
+pub struct Character {
+    /// Feet position in the planet frame.
+    pub pos: DVec3,
+    /// Velocity in the planet frame (the vertical part included).
+    pub vel: DVec3,
+    /// Facing as a bearing: radians from north, clockwise.
+    pub yaw: f64,
+    pub grounded: bool,
+    pub health: f32,
+    /// The last place the body stood safely (respawn point).
+    pub last_safe: DVec3,
+    /// Seconds since the last damage.
+    pub since_hurt: f64,
+    /// Gait phase (radians), advanced a half turn per footstep.
+    pub stride_phase: f64,
+    /// Distance walked since the last footstep (m).
+    stride: f64,
+    /// Landing damage is forgiven while the body has just appeared (streaming
+    /// may put the ground a little below the spawn estimate).
+    spawn_grace: f64,
+    /// Deaths this session.
+    pub respawns: u32,
+}
+
+/// What one step did, for the camera, the HUD, audio and the pose.
+#[derive(Clone, Debug, Default)]
+pub struct CharacterStep {
+    pub pos: DVec3,
+    pub vel: DVec3,
+    pub grounded: bool,
+    /// Impact speed, on the step that landed (m/s).
+    pub landed: Option<f64>,
+    /// Hit points lost this step.
+    pub damage: f32,
+    /// The body died and was moved to a nearby safe point.
+    pub died: bool,
+    /// One surface class per footstep this step.
+    pub footsteps: Vec<Surface>,
+}
+
+impl Character {
+    /// Standing at `pos` (feet), facing `yaw` (bearing radians).
+    pub fn spawn(pos: DVec3, yaw: f64) -> Self {
+        let pos = if pos.is_finite() { pos } else { geo::lla_to_pos(0.0, 0.0, 0.0) };
+        Self { pos, vel: DVec3::ZERO, yaw, grounded: false, health: MAX_HEALTH, last_safe: pos, since_hurt: REGEN_DELAY, stride_phase: 0.0, stride: 0.0, spawn_grace: 2.0, respawns: 0 }
+    }
+
+    /// The eye in the planet frame.
+    pub fn eye(&self) -> DVec3 {
+        self.pos + self.pos.normalize() * EYE
+    }
+
+    /// Horizontal speed (m/s).
+    pub fn speed(&self) -> f64 {
+        let up = self.pos.normalize();
+        (self.vel - up * self.vel.dot(up)).length()
+    }
+
+    /// The forward direction as a unit vector in the planet frame.
+    #[allow(dead_code)]
+    pub fn forward(&self) -> DVec3 {
+        let (e, n, _) = geo::enu(self.pos);
+        e * self.yaw.sin() + n * self.yaw.cos()
+    }
+
+    /// Take `amount` hit points; returns whether this killed the body.
+    pub fn hurt(&mut self, amount: f32) -> bool {
+        if amount <= 0.0 || self.health <= 0.0 {
+            return false;
+        }
+        self.health = (self.health - amount).max(0.0);
+        self.since_hurt = 0.0;
+        self.health <= 0.0
+    }
+
+    /// Move the body to the nearest safe point around `center`, or to `center`
+    /// when the world cannot be queried (tiles not in yet).
+    pub fn respawn_near<W: WorldQuery>(&mut self, world: &W, center: DVec3) {
+        let p = safe_point(world, center).unwrap_or(center);
+        self.pos = p;
+        self.vel = DVec3::ZERO;
+        self.last_safe = p;
+        self.grounded = false;
+        self.health = MAX_HEALTH;
+        self.since_hurt = REGEN_DELAY;
+        self.spawn_grace = 2.0;
+        self.respawns += 1;
+    }
+
+    /// Advance the body by `dt` (s).
+    pub fn step<W: WorldQuery>(&mut self, dt: f64, c: &CharacterControls, world: &W, wx: &SurfaceWeather) -> CharacterStep {
+        let mut out = CharacterStep::default();
+        // Never integrate an absurd or broken frame; substep for stability.
+        let total = if dt.is_finite() { dt.clamp(0.0, 0.5) } else { 0.0 };
+        if total > 0.0 {
+            let n = ((total / (1.0 / 60.0)).ceil() as usize).clamp(1, 32);
+            let h = total / n as f64;
+            for _ in 0..n {
+                self.substep(h, c, world, wx, &mut out);
+            }
+        } else {
+            self.settle(world, &mut out);
+        }
+        out.pos = self.pos;
+        out.vel = self.vel;
+        out.grounded = self.grounded;
+        out
+    }
+
+    /// A single integration step of at most a sixtieth of a second.
+    fn substep<W: WorldQuery>(&mut self, h: f64, c: &CharacterControls, world: &W, wx: &SurfaceWeather, out: &mut CharacterStep) {
+        self.since_hurt += h;
+        self.spawn_grace = (self.spawn_grace - h).max(0.0);
+        let up = self.pos.normalize();
+        let (east, north, _) = geo::enu(self.pos);
+        let hit = world.surface_at(self.pos);
+        let normal = ground_normal(world, self.pos, up);
+        let slope = normal.dot(up).clamp(-1.0, 1.0).acos().to_degrees();
+        let steep = slope > SLOPE_LIMIT;
+        let surface = hit.map(|h| h.kind).filter(|k| *k != Surface::Water).unwrap_or(Surface::Grass);
+        let blocked = hit.is_none_or(|h| h.blocked());
+
+        // The intended horizontal velocity: the facing is the camera's, so
+        // forward means "away from the camera".
+        let wish_len = c.forward.hypot(c.right).clamp(0.0, 1.0);
+        let heading = c.heading.unwrap_or(self.yaw);
+        let (sin_h, cos_h) = heading.sin_cos();
+        let wish_dir = if wish_len > 1e-6 { (east * (sin_h * c.forward + cos_h * c.right) + north * (cos_h * c.forward - sin_h * c.right)).normalize() } else { DVec3::ZERO };
+        let pace = c.pace() * surface.foot_speed() as f64 * wx.foot_factor(surface) as f64;
+        // Too steep to walk on: the input cannot push the body uphill.
+        let wish = if steep { DVec3::ZERO } else { wish_dir * pace };
+
+        let vh = self.vel - up * self.vel.dot(up);
+        let accel = if self.grounded { GROUND_ACCEL } else { AIR_ACCEL };
+        let mut new_vh = vh + (wish - vh).clamp_length_max(accel * h);
+        if steep {
+            // Gravity takes the body down the slope.
+            let downhill = (up - normal * up.dot(normal)).normalize_or_zero();
+            let downhill = if downhill.length_squared() > 1e-9 { -downhill } else { DVec3::ZERO };
+            new_vh += downhill * GRAVITY * 0.5 * h;
+            self.grounded = false;
+        }
+        if blocked {
+            new_vh = DVec3::ZERO;
+        }
+        self.vel = new_vh + up * self.vel.dot(up);
+
+        // Jump from the ground.
+        if self.grounded && c.jump && !blocked && !steep {
+            self.vel += up * (2.0 * GRAVITY * JUMP_HEIGHT).sqrt();
+            self.grounded = false;
+        }
+
+        // Horizontal move, with the kerb test.
+        let old_h = hit.map(|h| h.h);
+        let mut p = self.pos + new_vh * h;
+        if new_vh.length_squared() > 1e-12 {
+            // (keep the current altitude: the vertical pass puts the feet on the ground)
+            p = p.normalize() * self.pos.length();
+            let step_hit = world.surface_at(p);
+            let rise = match (old_h, step_hit) {
+                (Some(a), Some(b)) if !b.blocked() => b.h - a,
+                _ => 0.0,
+            };
+            if step_hit.is_none_or(|b| b.blocked()) || (self.grounded && rise > STEP_UP) {
+                // A wall, deep water, or a ledge too high to step over.
+                p = self.pos;
+                self.vel -= up * self.vel.dot(up);
+            }
+        }
+        self.pos = p;
+
+        // Vertical: stick to the ground, or fall.
+        let up = self.pos.normalize();
+        let hit = world.surface_at(self.pos);
+        match hit {
+            Some(s) if !s.blocked() => {
+                let ground = up * (geo::R + s.h);
+                let feet = self.pos.length() - geo::R;
+                let vertical = self.vel.dot(up);
+                if self.grounded {
+                    self.pos = ground;
+                    self.vel -= up * vertical;
+                } else if feet <= s.h + 0.02 && vertical <= 0.0 {
+                    // Touchdown.
+                    let impact = -vertical;
+                    self.pos = ground;
+                    self.vel -= up * vertical;
+                    self.grounded = true;
+                    out.landed = Some(impact);
+                    if impact > SAFE_IMPACT && self.spawn_grace <= 0.0 {
+                        let dmg = ((impact - SAFE_IMPACT) * IMPACT_DAMAGE as f64) as f32;
+                        if self.hurt(dmg) {
+                            out.died = true;
+                        }
+                        out.damage += dmg;
+                    }
+                } else {
+                    self.vel += up * (-GRAVITY * h);
+                    self.pos += up * (self.vel.dot(up) * h);
+                }
+            }
+            _ => {
+                // No ground here (a missing tile): hold the last sample.
+                self.vel -= up * self.vel.dot(up);
+            }
+        }
+
+        // Solid things: buildings and tree trunks push the capsule out.
+        let up = self.pos.normalize();
+        let centre = self.pos + up * (HEIGHT * 0.5);
+        if let Some(push) = world.building_push_sphere(centre, RADIUS) {
+            self.pos += push;
+        }
+        if let Some(push) = world.tree_push_sphere(centre, RADIUS) {
+            self.pos += push;
+        }
+        if !self.pos.is_finite() {
+            self.pos = geo::lla_to_pos(0.0, 0.0, 0.0);
+            self.vel = DVec3::ZERO;
+        }
+
+        // Facing follows the way the body is going.
+        if new_vh.length() > 0.25 {
+            self.yaw = new_vh.dot(east).atan2(new_vh.dot(north));
+        }
+
+        // Footsteps, and the last safe place.
+        let travelled = self.speed() * h;
+        if self.grounded {
+            self.stride += travelled;
+            while self.stride >= STRIDE {
+                self.stride -= STRIDE;
+                self.stride_phase += std::f64::consts::PI;
+                out.footsteps.push(surface);
+            }
+            if !steep && hit.is_some_and(|s| !s.blocked()) {
+                self.last_safe = self.pos;
+            }
+        }
+
+        // Health: a slow mend after a quiet spell.
+        if self.health > 0.0 && self.health < MAX_HEALTH && self.since_hurt > REGEN_DELAY {
+            self.health = (self.health + REGEN_RATE * h as f32).min(MAX_HEALTH);
+        }
+        if self.health <= 0.0 {
+            let center = self.last_safe;
+            self.respawn_near(world, center);
+            out.died = true;
+            out.damage = 0.0;
+        }
+    }
+
+    /// No time passed: keep the feet on the ground under them.
+    fn settle<W: WorldQuery>(&mut self, world: &W, _out: &mut CharacterStep) {
+        let up = self.pos.normalize();
+        if let Some(hit) = world.surface_at(self.pos).filter(|h| !h.blocked()) {
+            self.pos = up * (geo::R + hit.h);
+            self.grounded = true;
+            self.vel = DVec3::ZERO;
+        }
+    }
+}
+
+/// Outward unit normal of the surface under `p`, from four one-metre samples.
+fn ground_normal<W: WorldQuery>(world: &W, p: DVec3, up: DVec3) -> DVec3 {
+    let (east, north, _) = geo::enu(p);
+    let Some(h0) = world.surface_at(p).map(|h| h.h) else { return up };
+    let d = 1.0;
+    let hx = world.surface_at(p + east * d).map(|h| h.h).unwrap_or(h0);
+    let hz = world.surface_at(p + north * d).map(|h| h.h).unwrap_or(h0);
+    (up - east * ((hx - h0) / d) - north * ((hz - h0) / d)).normalize_or(up)
+}
+
+/// Whether a point can be stood on: there is ground, it is not water, and no
+/// building or tree trunk occupies the body's space.
+pub fn standable<W: WorldQuery>(world: &W, p: DVec3) -> Option<DVec3> {
+    let hit: SurfaceHit = world.surface_at(p)?;
+    if hit.blocked() {
+        return None;
+    }
+    let up = p.normalize();
+    let ground = up * (geo::R + hit.h);
+    let centre = ground + up * (HEIGHT * 0.5);
+    if world.building_push_sphere(centre, RADIUS).is_some() || world.tree_push_sphere(centre, RADIUS).is_some() {
+        return None;
+    }
+    Some(ground)
+}
+
+/// The nearest standable point to `center`: there first, then rings out to
+/// 72 m. `None` only where nothing can be queried (a missing tile).
+pub fn safe_point<W: WorldQuery>(world: &W, center: DVec3) -> Option<DVec3> {
+    if let Some(p) = standable(world, center) {
+        return Some(p);
+    }
+    let (east, north, _) = geo::enu(center);
+    for ring in 1..=12 {
+        let r = ring as f64 * 6.0;
+        for k in 0..12 {
+            let a = k as f64 * std::f64::consts::TAU / 12.0;
+            let q = center + (east * a.cos() + north * a.sin()) * r;
+            if let Some(p) = standable(world, q) {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::surface::SurfaceWeather;
+
+    /// Flat asphalt at height 0.
+    struct FlatWorld;
+    impl WorldQuery for FlatWorld {
+        fn surface_at(&self, p: DVec3) -> Option<SurfaceHit> {
+            let _ = p;
+            Some(SurfaceHit { h: 0.0, kind: Surface::Asphalt, water: false, road: false, sidewalk: false, bridge: false })
+        }
+        fn building_push_sphere(&self, _p: DVec3, _r: f64) -> Option<DVec3> {
+            None
+        }
+        fn building_push_box(&self, _p: DVec3, _h: [f64; 2], _y: f64) -> Option<DVec3> {
+            None
+        }
+        fn tree_push_sphere(&self, _p: DVec3, _r: f64) -> Option<DVec3> {
+            None
+        }
+        fn tree_push_box(&self, _p: DVec3, _h: [f64; 2], _y: f64) -> Option<DVec3> {
+            None
+        }
+    }
+
+    /// Grass everywhere, of one class.
+    struct SurfaceWorld(Surface);
+    impl WorldQuery for SurfaceWorld {
+        fn surface_at(&self, _p: DVec3) -> Option<SurfaceHit> {
+            Some(SurfaceHit { h: 0.0, kind: self.0, water: self.0 == Surface::Water, road: false, sidewalk: false, bridge: false })
+        }
+        fn building_push_sphere(&self, _p: DVec3, _r: f64) -> Option<DVec3> {
+            None
+        }
+        fn building_push_box(&self, _p: DVec3, _h: [f64; 2], _y: f64) -> Option<DVec3> {
+            None
+        }
+        fn tree_push_sphere(&self, _p: DVec3, _r: f64) -> Option<DVec3> {
+            None
+        }
+        fn tree_push_box(&self, _p: DVec3, _h: [f64; 2], _y: f64) -> Option<DVec3> {
+            None
+        }
+    }
+
+    /// Flat, with a raised platform from half a metre east of the origin.
+    struct StepWorld(f64);
+    impl WorldQuery for StepWorld {
+        fn surface_at(&self, p: DVec3) -> Option<SurfaceHit> {
+            let (east, _, _) = geo::enu(origin());
+            let h = if (p - origin()).dot(east) >= 0.5 { self.0 } else { 0.0 };
+            Some(SurfaceHit { h, kind: Surface::Grass, water: false, road: false, sidewalk: false, bridge: false })
+        }
+        fn building_push_sphere(&self, _p: DVec3, _r: f64) -> Option<DVec3> {
+            None
+        }
+        fn building_push_box(&self, _p: DVec3, _h: [f64; 2], _y: f64) -> Option<DVec3> {
+            None
+        }
+        fn tree_push_sphere(&self, _p: DVec3, _r: f64) -> Option<DVec3> {
+            None
+        }
+        fn tree_push_box(&self, _p: DVec3, _h: [f64; 2], _y: f64) -> Option<DVec3> {
+            None
+        }
+    }
+
+    /// A plane rising to the east at `angle` degrees.
+    struct SlopeWorld(f64);
+    impl SlopeWorld {
+        fn height(&self, p: DVec3) -> f64 {
+            let (east, _, _) = geo::enu(origin());
+            (p - origin()).dot(east) * self.0.to_radians().tan()
+        }
+    }
+    impl WorldQuery for SlopeWorld {
+        fn surface_at(&self, p: DVec3) -> Option<SurfaceHit> {
+            Some(SurfaceHit { h: self.height(p), kind: Surface::Rock, water: false, road: false, sidewalk: false, bridge: false })
+        }
+        fn building_push_sphere(&self, _p: DVec3, _r: f64) -> Option<DVec3> {
+            None
+        }
+        fn building_push_box(&self, _p: DVec3, _h: [f64; 2], _y: f64) -> Option<DVec3> {
+            None
+        }
+        fn tree_push_sphere(&self, _p: DVec3, _r: f64) -> Option<DVec3> {
+            None
+        }
+        fn tree_push_box(&self, _p: DVec3, _h: [f64; 2], _y: f64) -> Option<DVec3> {
+            None
+        }
+    }
+
+    fn origin() -> DVec3 {
+        geo::lla_to_pos(48.0f64.to_radians(), 2.0f64.to_radians(), 0.0)
+    }
+
+    fn at_origin() -> Character {
+        // Facing east.
+        Character::spawn(origin(), std::f64::consts::FRAC_PI_2)
+    }
+
+    fn run<W: WorldQuery>(c: &mut Character, world: &W, controls: CharacterControls, secs: f64) -> CharacterStep {
+        let mut last = CharacterStep::default();
+        let n = (secs * 60.0).round() as usize;
+        for _ in 0..n {
+            last = c.step(1.0 / 60.0, &controls, world, &SurfaceWeather::default());
+        }
+        last
+    }
+
+    fn height(c: &Character) -> f64 {
+        c.pos.length() - geo::R
+    }
+
+    #[test]
+    fn walk_run_and_sprint_on_flat_ground() {
+        let w = FlatWorld;
+        for (input, want) in [(CharacterControls { forward: 0.3, ..Default::default() }, WALK), (CharacterControls { forward: 1.0, ..Default::default() }, RUN), (CharacterControls { forward: 1.0, sprint: true, ..Default::default() }, SPRINT)] {
+            let mut c = at_origin();
+            run(&mut c, &w, input, 2.0);
+            assert!((c.speed() - want).abs() < 0.05, "speed {} want {want}", c.speed());
+            assert!(c.grounded);
+        }
+    }
+
+    #[test]
+    fn surface_multipliers_apply_to_on_foot_speed() {
+        let classes = [(Surface::Asphalt, 1.00), (Surface::Concrete, 1.00), (Surface::Dirt, 0.82), (Surface::Grass, 0.78), (Surface::Sand, 0.58), (Surface::Rock, 0.72)];
+        for (kind, factor) in classes {
+            let w = SurfaceWorld(kind);
+            let mut c = at_origin();
+            run(&mut c, &w, CharacterControls { forward: 1.0, ..Default::default() }, 2.0);
+            assert!((c.speed() - RUN * factor).abs() < 0.08, "{kind:?}: speed {} want {}", c.speed(), RUN * factor);
+        }
+        let w = SurfaceWorld(Surface::Water);
+        let mut c = at_origin();
+        run(&mut c, &w, CharacterControls { forward: 1.0, ..Default::default() }, 1.0);
+        assert!(c.speed() < 0.01, "deep water blocks walking");
+    }
+
+    #[test]
+    fn kerbs_up_to_the_limit_are_stepped_over() {
+        for (rise, should_climb) in [(0.34, true), (0.36, false)] {
+            let w = StepWorld(rise);
+            let mut c = at_origin();
+            run(&mut c, &w, CharacterControls { forward: 1.0, ..Default::default() }, 2.0);
+            let (east, _, _) = geo::enu(origin());
+            let travelled = (c.pos - origin()).dot(east);
+            if should_climb {
+                assert!(travelled > 2.0, "climbed {travelled:.2} m");
+                assert!((height(&c) - rise).abs() < 0.03, "height {:.3}", height(&c));
+            } else {
+                assert!(travelled < 0.6, "refused, stayed at {travelled:.2} m");
+                assert!(height(&c) < 0.03);
+            }
+        }
+    }
+
+    #[test]
+    fn slopes_are_walked_up_to_the_limit_and_slid_beyond_it() {
+        for (deg, climbs) in [(39.0, true), (41.0, false)] {
+            let w = SlopeWorld(deg);
+            let mut c = at_origin();
+            // Put the feet on the slope at the origin.
+            c.step(1.0 / 60.0, &CharacterControls::default(), &w, &SurfaceWeather::default());
+            let start = height(&c);
+            run(&mut c, &w, CharacterControls { forward: 1.0, ..Default::default() }, 1.0);
+            let end = height(&c);
+            if climbs {
+                assert!(end > start + 0.2, "{deg}° should be walkable: {start:.2} -> {end:.2}");
+                assert!(c.grounded);
+            } else {
+                assert!(!c.grounded || end <= start + 0.05, "{deg}° should not be walkable: {start:.2} -> {end:.2}");
+                // With no input it keeps sliding downhill.
+                let before = height(&c);
+                run(&mut c, &w, CharacterControls::default(), 0.5);
+                assert!(height(&c) < before + 0.02, "{deg}° should slide");
+            }
+        }
+    }
+
+    #[test]
+    fn jump_reaches_its_apex_and_lands() {
+        let w = FlatWorld;
+        let mut c = at_origin();
+        c.step(1.0 / 60.0, &CharacterControls::default(), &w, &SurfaceWeather::default());
+        let mut apex: f64 = 0.0;
+        let mut landed = false;
+        let ctrl = CharacterControls { jump: true, ..Default::default() };
+        c.step(1.0 / 60.0, &ctrl, &w, &SurfaceWeather::default());
+        for _ in 0..180 {
+            let s = c.step(1.0 / 60.0, &CharacterControls::default(), &w, &SurfaceWeather::default());
+            apex = apex.max(height(&c));
+            landed |= s.landed.is_some();
+        }
+        assert!((apex - JUMP_HEIGHT).abs() < 0.16, "apex {apex:.2}");
+        assert!(landed && c.grounded);
+    }
+
+    #[test]
+    fn falls_hurt_and_health_mends() {
+        let w = FlatWorld;
+        let mut c = at_origin();
+        // Ten metres up, falling.
+        c.pos = c.pos.normalize() * (geo::R + 10.0);
+        c.grounded = false;
+        c.spawn_grace = 0.0;
+        let mut damage = 0.0;
+        for _ in 0..300 {
+            let s = c.step(1.0 / 60.0, &CharacterControls::default(), &w, &SurfaceWeather::default());
+            damage += s.damage;
+            if s.landed.is_some() {
+                break;
+            }
+        }
+        assert!(damage > 0.0, "a ten-metre fall hurts");
+        assert!(c.health < MAX_HEALTH);
+        // A small drop does not.
+        let mut c2 = at_origin();
+        c2.pos = c2.pos.normalize() * (geo::R + 0.5);
+        c2.grounded = false;
+        let mut d2 = 0.0;
+        for _ in 0..120 {
+            d2 += c2.step(1.0 / 60.0, &CharacterControls::default(), &w, &SurfaceWeather::default()).damage;
+        }
+        assert_eq!(d2, 0.0);
+        // Five quiet seconds, then two points a second.
+        c.since_hurt = REGEN_DELAY + 1.0;
+        let before = c.health;
+        c.step(0.5, &CharacterControls::default(), &w, &SurfaceWeather::default());
+        c.step(0.5, &CharacterControls::default(), &w, &SurfaceWeather::default());
+        assert!((c.health - (before + REGEN_RATE)).abs() < 0.2, "regenerated {:.2}", c.health - before);
+    }
+
+    #[test]
+    fn death_respawns_close_by() {
+        let w = FlatWorld;
+        let mut c = at_origin();
+        c.last_safe = origin();
+        c.health = 1.0;
+        c.pos = c.pos.normalize() * (geo::R + 30.0);
+        c.grounded = false;
+        c.spawn_grace = 0.0;
+        let mut died = false;
+        for _ in 0..600 {
+            let s = c.step(1.0 / 60.0, &CharacterControls::default(), &w, &SurfaceWeather::default());
+            if s.died || c.respawns > 0 {
+                died = true;
+                break;
+            }
+        }
+        assert!(died);
+        assert_eq!(c.respawns, 1);
+        assert_eq!(c.health, MAX_HEALTH);
+        assert!((c.pos - origin()).length() < 200.0, "respawned nearby");
+        assert!((height(&c)).abs() < 0.5);
+    }
+
+    #[test]
+    fn state_stays_finite_under_bad_inputs() {
+        let w = FlatWorld;
+        let mut c = at_origin();
+        for dt in [1e9, f64::NAN, f64::INFINITY, -1.0, 0.0] {
+            let s = c.step(dt, &CharacterControls { forward: 1.0, right: -1.0, sprint: true, jump: true, heading: None }, &w, &SurfaceWeather::default());
+            assert!(s.pos.is_finite() && s.vel.is_finite(), "dt {dt}");
+            assert!(c.pos.is_finite() && c.vel.is_finite() && c.health.is_finite());
+        }
+        // At the pole and at the antimeridian the local frame is still finite.
+        for (lat, lon) in [(89.999f64, 0.0f64), (0.0, 179.999), (-89.999, -179.999)] {
+            let mut c = Character::spawn(geo::lla_to_pos(lat.to_radians(), lon.to_radians(), 0.0), 0.0);
+            let s = c.step(1.0 / 60.0, &CharacterControls { forward: 1.0, ..Default::default() }, &w, &SurfaceWeather::default());
+            assert!(s.pos.is_finite() && s.vel.is_finite(), "{lat},{lon}");
+        }
+    }
+
+    #[test]
+    fn safe_point_skips_water_and_finds_dry_land() {
+        struct HalfWater;
+        impl WorldQuery for HalfWater {
+            fn surface_at(&self, p: DVec3) -> Option<SurfaceHit> {
+                let (east, _, _) = geo::enu(origin());
+                let water = (p - origin()).dot(east) > -20.0;
+                Some(SurfaceHit { h: 0.0, kind: if water { Surface::Water } else { Surface::Grass }, water, road: false, sidewalk: false, bridge: false })
+            }
+            fn building_push_sphere(&self, _p: DVec3, _r: f64) -> Option<DVec3> {
+                None
+            }
+            fn building_push_box(&self, _p: DVec3, _h: [f64; 2], _y: f64) -> Option<DVec3> {
+                None
+            }
+            fn tree_push_sphere(&self, _p: DVec3, _r: f64) -> Option<DVec3> {
+                None
+            }
+            fn tree_push_box(&self, _p: DVec3, _h: [f64; 2], _y: f64) -> Option<DVec3> {
+                None
+            }
+        }
+        let w = HalfWater;
+        let p = safe_point(&w, origin()).expect("dry land within reach");
+        assert!(!w.surface_at(p).unwrap().blocked());
+    }
+}

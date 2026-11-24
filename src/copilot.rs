@@ -362,6 +362,8 @@ impl Game {
         let track = p.vel.dot(e).atan2(p.vel.dot(n)).to_degrees().rem_euclid(360.0);
         let mode = match self.mode {
             Mode::Menu => "menu",
+            Mode::Walk => "walk",
+            Mode::Drive => "drive",
             Mode::Fly => "fly",
         };
         let local = (self.utc + lon.to_degrees() / 15.0).rem_euclid(24.0);
