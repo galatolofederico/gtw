@@ -338,44 +338,44 @@ cargo run --release -- --help
 
 ### Implementation
 
-- [ ] 7.1 Create `src/paths.rs` with `<config>/gtw/`, `<cache>/gtw/`, and a one-time migration from `<config>/fablegame/` for `settings.json`, `bindings.json`, `graphics.json`, `google_maps.json`, and `launcher.json`; switch `settings.rs`, `bind.rs`, `graphics_core.rs`, `gmaps.rs`, `i18n.rs`, `mcp/rpc.rs`, `copilot.rs`, `autopilot.rs`, and the launcher config/run/update paths to the GTW roots.
-- [ ] 7.2 Add cache migration: rename `<cache>/fablegame` to `<cache>/gtw` when possible; otherwise read the old cache for the session and log a warning.
-- [ ] 7.3 Change `Cargo.toml` to package `gtw`, default-run `gtw`; keep edition, rust-version, license, and all dependencies.
-- [ ] 7.4 Rename `src/bin/fableflight-mcp.rs` to `src/bin/gtw-mcp.rs` and update `use`, help text, and MCP server name.
-- [ ] 7.5 Rename `src/bin/fableflight-launcher/` to `src/bin/gtw-launcher/` and update window titles, app id, binary names, paths, and update source.
-- [ ] 7.6 Update `src/lib.rs`, `src/bin/gtw-mcp.rs`, `tests/mcp.rs`, and `tests/gtw_smoke.rs` to the `gtw` crate and `CARGO_BIN_EXE_*` names.
-- [ ] 7.7 Update `src/main.rs` window title, CLI usage, and all user-facing “Fable Flight” strings to GTW.
-- [ ] 7.8 Update `src/fetch.rs` user agent to `gtw` and the GTW repository URL.
-- [ ] 7.9 Update `src/i18n.rs` locale search paths and locale strings, including the hangar “in Fable Flight” label, without renaming translation keys.
-- [ ] 7.10 Disable automatic upstream updates in the launcher; point the repository constant at `galatolofederico/gtw` and make the updater fail gracefully or hide the install action when no GTW release exists.
-- [ ] 7.11 Update `README.md` for GTW: identity, controls, build/run names, config/cache paths, features, non-goals, and the ESA WorldCover/Planetary Computer attribution.
-- [ ] 7.12 Update `AGENTS.md` for GTW scope and ground-play conventions, keeping the existing aircraft rules for flight work.
-- [ ] 7.13 Add a startup migration notice when legacy settings are copied, update the GTW references in `docs/`, and point `assets/aircraft/liveries/stills.sh` at the renamed `gtw` binary.
+- [x] 7.1 Create `src/paths.rs` with `<config>/gtw/`, `<cache>/gtw/`, and a one-time migration from `<config>/fablegame/` for `settings.json`, `bindings.json`, `graphics.json`, `google_maps.json`, and `launcher.json`; switch `settings.rs`, `bind.rs`, `graphics_core.rs`, `gmaps.rs`, `i18n.rs`, `mcp/rpc.rs`, `copilot.rs`, `autopilot.rs`, and the launcher config/run/update paths to the GTW roots.
+- [x] 7.2 Add cache migration: rename `<cache>/fablegame` to `<cache>/gtw` when possible; otherwise read the old cache for the session and log a warning.
+- [x] 7.3 Change `Cargo.toml` to package `gtw`, default-run `gtw`; keep edition, rust-version, license, and all dependencies.
+- [x] 7.4 Rename `src/bin/fableflight-mcp.rs` to `src/bin/gtw-mcp.rs` and update `use`, help text, and MCP server name.
+- [x] 7.5 Rename `src/bin/fableflight-launcher/` to `src/bin/gtw-launcher/` and update window titles, app id, binary names, paths, and update source.
+- [x] 7.6 Update `src/lib.rs`, `src/bin/gtw-mcp.rs`, `tests/mcp.rs`, and `tests/gtw_smoke.rs` to the `gtw` crate and `CARGO_BIN_EXE_*` names.
+- [x] 7.7 Update `src/main.rs` window title, CLI usage, and all user-facing “Fable Flight” strings to GTW.
+- [x] 7.8 Update `src/fetch.rs` user agent to `gtw` and the GTW repository URL.
+- [x] 7.9 Update `src/i18n.rs` locale search paths and locale strings, including the hangar “in Fable Flight” label, without renaming translation keys.
+- [x] 7.10 Disable automatic upstream updates in the launcher; point the repository constant at `galatolofederico/gtw` and make the updater fail gracefully or hide the install action when no GTW release exists.
+- [x] 7.11 Update `README.md` for GTW: identity, controls, build/run names, config/cache paths, features, non-goals, and the ESA WorldCover/Planetary Computer attribution.
+- [x] 7.12 Update `AGENTS.md` for GTW scope and ground-play conventions, keeping the existing aircraft rules for flight work.
+- [x] 7.13 Add a startup migration notice when legacy settings are copied, update the GTW references in `docs/`, and point `assets/aircraft/liveries/stills.sh` at the renamed `gtw` binary.
 
 ### Tests
 
-- [ ] 7.14 Unit-test GTW path resolution and the one-time config migration for each file, including the “both exist” and “neither exists” cases in `src/paths.rs`.
-- [ ] 7.15 Unit-test cache migration fallback when the rename fails.
-- [ ] 7.16 Unit-test binding migration keeps old flight customizations and adds the new contexts without duplicate keys.
-- [ ] 7.17 Update `tests/mcp.rs` for the renamed binary and server name; it passes.
-- [ ] 7.18 Update `tests/gtw_smoke.rs` for `CARGO_BIN_EXE_gtw`; it passes.
-- [ ] 7.19 Add a test that CLI usage and `--version` mention GTW, not FableFlight.
-- [ ] 7.20 Run a text audit for remaining user-facing `Fable Flight`, `FableFlight`, `fableflight-launcher`, and `fablegame` strings and either update them or document intentional internal references.
-- [ ] 7.21 Unit-test the launcher default (automatic updates disabled, GTW repository constant, GTW binary names) and the graceful behaviour when no GTW release exists.
+- [x] 7.14 Unit-test GTW path resolution and the one-time config migration for each file, including the “both exist” and “neither exists” cases in `src/paths.rs`.
+- [x] 7.15 Unit-test cache migration fallback when the rename fails.
+- [x] 7.16 Unit-test binding migration keeps old flight customizations and adds the new contexts without duplicate keys.
+- [x] 7.17 Update `tests/mcp.rs` for the renamed binary and server name; it passes.
+- [x] 7.18 Update `tests/gtw_smoke.rs` for `CARGO_BIN_EXE_gtw`; it passes.
+- [x] 7.19 Add a test that CLI usage and `--version` mention GTW, not FableFlight.
+- [x] 7.20 Run a text audit for remaining user-facing `Fable Flight`, `FableFlight`, `fableflight-launcher`, and `fablegame` strings and either update them or document intentional internal references.
+- [x] 7.21 Unit-test the launcher default (automatic updates disabled, GTW repository constant, GTW binary names) and the graceful behaviour when no GTW release exists.
 
 ### Verification
 
-- [ ] Run `cargo check --all-targets`; it exits 0 with the renamed package and binaries.
-- [ ] Run `cargo test`; it exits 0 including migration and renamed-binary tests.
-- [ ] Run `cargo test --test mcp`; it exits 0.
-- [ ] Run `cargo test --test gtw_smoke`; it exits 0.
-- [ ] Run `cargo test --test shaders`; it exits 0.
-- [ ] Run `cargo build --release --locked`; it produces `gtw`, `gtw-mcp`, and `gtw-launcher`.
-- [ ] Run `cargo run --release -- --help`; it prints GTW usage.
+- [x] Run `cargo check --all-targets`; it exits 0 with the renamed package and binaries.
+- [x] Run `cargo test`; it exits 0 including migration and renamed-binary tests.
+- [x] Run `cargo test --test mcp`; it exits 0.
+- [x] Run `cargo test --test gtw_smoke`; it exits 0.
+- [x] Run `cargo test --test shaders`; it exits 0.
+- [x] Run `cargo build --release --locked`; it produces `gtw`, `gtw-mcp`, and `gtw-launcher`.
+- [x] Run `cargo run --release -- --help`; it prints GTW usage.
 - [ ] Launch `gtw-launcher`; confirm the title, pages, and disabled/GTW update behaviour.
-- [ ] Start GTW with an existing FableFlight config; confirm settings and bindings migrate and the game runs.
-- [ ] Confirm `README.md` and in-game credits preserve MIT, upstream FableFlight credit, and ESA WorldCover attribution.
-- [ ] Confirm no new skipped, quarantined, or failing tests.
+- [x] Start GTW with an existing FableFlight config; confirm settings and bindings migrate and the game runs.
+- [x] Confirm `README.md` and in-game credits preserve MIT, upstream FableFlight credit, and ESA WorldCover attribution.
+- [x] Confirm no new skipped, quarantined, or failing tests.
 
 **Done when:** GTW is the visible product and binary identity, old settings migrate once, the launcher cannot overwrite the fork with upstream FableFlight, and all targets build and test.
 
