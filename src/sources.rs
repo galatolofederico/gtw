@@ -189,6 +189,8 @@ pub struct Sources {
     pub fetch: Fetcher,
     elev: Mutex<Lru<ElevTile>>,
     raw: Mutex<Lru<ElevTile>>,
+    /// decoded 256x256 ESA WorldCover class grids (surface.rs, landcover.rs)
+    lc: Mutex<Lru<Vec<u8>>>,
     /// airfields that have been put together (see airports.rs)
     pub fields: Mutex<HashMap<u32, Arc<crate::airports::Geo>>>,
     vec: Mutex<Lru<VecTile>>,
@@ -204,7 +206,7 @@ impl Sources {
     }
 
     pub fn with_google(fetch: Fetcher, imagery_url: String, google: Arc<crate::gmaps::Google>) -> Self {
-        Self { fetch, elev: Mutex::new(Lru::new(96)), raw: Mutex::new(Lru::new(160)), fields: Mutex::new(HashMap::new()), vec: Mutex::new(Lru::new(96)), vec_url: Mutex::new(None), imagery_url, google }
+        Self { fetch, elev: Mutex::new(Lru::new(96)), raw: Mutex::new(Lru::new(160)), lc: Mutex::new(Lru::new(96)), fields: Mutex::new(HashMap::new()), vec: Mutex::new(Lru::new(96)), vec_url: Mutex::new(None), imagery_url, google }
     }
 
     /// Satellite image for a tile: Google's when that is on (and has the
@@ -487,6 +489,35 @@ impl Sources {
         Ok(t)
     }
 
+    /// ESA WorldCover classes for a z14 tile: 256 x 256 bytes, 0 where no item
+    /// has data. The item containing the tile centre is cached under the
+    /// documented `lc/{z}/{x}/{y}.png` key; the other items of a tile that
+    /// crosses a 3-degree boundary get their own key so they cannot overwrite
+    /// it. Any failure is an error and the caller falls back to the OSM mask.
+    pub fn landcover(&self, id: TileId) -> Result<Arc<Vec<u8>>> {
+        if id.z < DATA_ZOOM {
+            return Err(anyhow!("landcover is z14 only"));
+        }
+        let did = id.ancestor(DATA_ZOOM).0;
+        if let Some(t) = self.lc.lock().get(did) {
+            return Ok(t);
+        }
+        let (clat, clon) = did.lat_lon(0.5, 0.5);
+        let primary = crate::landcover::item_id(clat.to_degrees(), clon.to_degrees());
+        let out = crate::landcover::compose(did, |item| {
+            let url = crate::landcover::tile_url(item, did);
+            let key = if item == primary.as_str() {
+                format!("lc/{}/{}/{}.png", did.z, did.x, did.y)
+            } else {
+                format!("lc/{}/{}/{}/{}.png", did.z, did.x, did.y, item)
+            };
+            self.fetch.get_cached(&key, &url).and_then(|data| crate::landcover::decode(&data))
+        })?;
+        let out = Arc::new(out);
+        self.lc.lock().put(did, out.clone());
+        Ok(out)
+    }
+
     /// Runways, taxiways and aprons are smooth; the elevation data under them
     /// is not (bumps of a metre every fifty, enough to throw an aircraft
     /// about on its take-off run). So pavement takes the average height of
@@ -745,6 +776,9 @@ pub struct TileData {
     pub imagery: Vec<Vec<u8>>, // mip chain, rgba
     pub img_size: u32,
     pub mask: Vec<Vec<u8>>, // mip chain, rgba (see ground_mask)
+    /// MASK * MASK, one `surface::Surface` per cell (OSM + WorldCover), kept on
+    /// the CPU for the gameplay ground query.
+    pub surface: Vec<u8>,
     /// mip chain, one byte: how much artificial light there is at night (see `NightLights`)
     pub lights: Vec<Vec<u8>>,
     /// imagery source generation the tile was made with (see `Google::generation`)
@@ -984,7 +1018,7 @@ pub const GC_PITCH: u8 = 9;
 /// B = ground class | seed << 4, A = direction of the polygon's longest side
 /// (0..255 over 0..pi, from east toward north): crop rows and mowing stripes
 /// run along it.
-fn ground_mask(vt: &VecTile, ox: f64, oy: f64, scale: f64, tile_m: f64) -> Vec<u8> {
+pub(crate) fn ground_mask(vt: &VecTile, ox: f64, oy: f64, scale: f64, tile_m: f64) -> Vec<u8> {
     let water = water_mask(vt, ox, oy, scale);
     let mut out = vec![0u8; MASK * MASK * 4];
     for i in 0..MASK * MASK {
@@ -1093,6 +1127,29 @@ fn ground_mask(vt: &VecTile, ox: f64, oy: f64, scale: f64, tile_m: f64) -> Vec<u
     out
 }
 
+/// The gameplay class of every mask cell: the OSM ground class and water merged
+/// with the z14 WorldCover grid. `ox`, `oy` and `scale` place this tile inside
+/// its z14 ancestor, as `ground_mask` does. Missing landcover leaves the OSM
+/// class (or grass) in place.
+fn surface_kinds(mask: &[u8], landcover: Option<&[u8]>, ox: f64, oy: f64, scale: f64) -> Vec<u8> {
+    let mut out = vec![0u8; MASK * MASK];
+    for y in 0..MASK {
+        for x in 0..MASK {
+            let i = y * MASK + x;
+            let water = mask[i * 4] > 127;
+            let osm = mask[i * 4 + 2] & 0x0f;
+            let worldcover = landcover.and_then(|lc| {
+                let u = ox + (x as f64 + 0.5) / MASK as f64 * scale;
+                let v = oy + (y as f64 + 0.5) / MASK as f64 * scale;
+                let (lx, ly) = (((u * MASK as f64) as usize).min(MASK - 1), ((v * MASK as f64) as usize).min(MASK - 1));
+                Some(lc[ly * MASK + lx]).filter(|c| *c != 0)
+            });
+            out[i] = crate::surface::merge(osm, water, worldcover) as u8;
+        }
+    }
+    out
+}
+
 pub fn build_tile(src: &Sources, id: TileId) -> Result<TileData> {
     // read before the image, so a switch while this tile loads still refreshes it
     let imagery_gen = src.google.generation();
@@ -1141,6 +1198,10 @@ pub fn build_tile(src: &Sources, id: TileId) -> Result<TileData> {
             m
         }
     };
+    // WorldCover fills in where OSM says nothing. Coarser terrain tiles cover
+    // several 3-degree items, so only z14 tiles take the landcover grid.
+    let landcover = if did.z == DATA_ZOOM { src.landcover(did).ok() } else { None };
+    let surface = surface_kinds(&mask, landcover.as_deref().map(|lc| lc.as_slice()), ox, oy, sc);
     let lights = NightLights::get().tile_mask(id, &mask);
 
     let (clat, clon) = id.lat_lon(0.5, 0.5);
@@ -1239,6 +1300,7 @@ pub fn build_tile(src: &Sources, id: TileId) -> Result<TileData> {
         imagery: mip_chain(img.into_raw(), img_size as usize, 4),
         img_size,
         mask: mask_mips,
+        surface,
         lights: mip_chain(lights, MASK, 1),
         imagery_gen,
     })
@@ -1405,5 +1467,36 @@ mod night_lights_tests {
         let dropped = loader.cancel_where(|j| matches!(j, Job::Airfield(id) if *id >= 10));
         assert!(!dropped.is_empty());
         assert!(loader.queue.0.lock().len() <= 10);
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+    use crate::surface::Surface;
+
+    #[test]
+    fn surface_kinds_use_osm_then_landcover() {
+        let mut mask = vec![0u8; MASK * MASK * 4];
+        // (0, 0): paved OSM, so asphalt wins over the landcover below.
+        mask[2] = GC_PAVED;
+        // (1, 0): OSM water.
+        mask[4] = 255;
+        // Everything else is bare in OSM; WorldCover says sand.
+        let lc = vec![60u8; MASK * MASK];
+        let s = surface_kinds(&mask, Some(&lc), 0.0, 0.0, 1.0);
+        assert_eq!(s[0], Surface::Asphalt as u8);
+        assert_eq!(s[1], Surface::Water as u8);
+        assert_eq!(s[2], Surface::Sand as u8);
+        // Without landcover the same cells fall back to grass.
+        let s = surface_kinds(&mask, None, 0.0, 0.0, 1.0);
+        assert_eq!(s[2], Surface::Grass as u8);
+    }
+
+    #[test]
+    fn landcover_is_limited_to_z14_tiles() {
+        let src = Sources::new(Fetcher::new(std::env::temp_dir(), true), String::new());
+        let id = TileId::new(DATA_ZOOM - 1, 0, 0);
+        assert!(src.landcover(id).is_err());
     }
 }
