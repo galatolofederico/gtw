@@ -1,22 +1,22 @@
-# Hosting a Fable Flight Multiplayer Relay
+# Hosting a GTW Multiplayer Relay
 
-Fable Flight multiplayer uses lightweight UDP relay servers. You can host one for friends, join the public relay network, or run a separate private network.
+GTW flight multiplayer uses lightweight UDP relay servers, inherited from the upstream FableFlight relay network. You can host one for friends, join the public relay network, or run a separate private network.
 
 ## Quick start
 
 You need a server with Docker and a publicly reachable UDP port **7480**.
 
-From the Fable Flight repository:
+From the GTW repository:
 
 ```sh
 cd relay
 docker compose up -d
 ```
 
-Or run the published image directly:
+Or run the upstream published image directly (the same relay protocol):
 
 ```sh
-docker run -d --name fableflight-relay --restart unless-stopped \
+docker run -d --name gtw-relay --restart unless-stopped \
   -p 7480:7480/udp \
   ghcr.io/danux-be/fableflight-relay
 ```
@@ -42,7 +42,7 @@ The relay is configured through environment variables. Add them to your Compose 
 For example, give your relay a recognizable identity:
 
 ```sh
-docker run -d --name fableflight-relay --restart unless-stopped \
+docker run -d --name gtw-relay --restart unless-stopped \
   -p 7480:7480/udp \
   -e FFMP_NAME="My Relay" \
   -e FFMP_PUBLIC="relay.example.com" \
@@ -61,7 +61,7 @@ The directory endpoint `/servers.json` is also used for relay discovery.
 
 Relays can share player information, so pilots on different servers still see one another. Relays exchange signed, dated, sequenced messages using a common `FFMP_PEER_SECRET`. **Do not publish that secret in a repository or documentation.**
 
-By default, relays use Fable Flight's built-in main relays for discovery. To join an existing coordinated network, configure the network's shared secret and public hostname with its operators. `FFMP_PEERS` can add direct peer connections.
+By default, relays use GTW's built-in main relays for discovery. These are the upstream relay hosts the simulator ships with. To join an existing coordinated network, configure the network's shared secret and public hostname with its operators. `FFMP_PEERS` can add direct peer connections.
 
 For a separate private network, configure the same secret on your participating relays and use `FFMP_HUB=none` to exclude the built-in hubs, or set `FFMP_HUB` to your own comma-separated hub addresses. Configure clients to reach your private servers directly; they will not automatically appear in the public directory.
 

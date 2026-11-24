@@ -1,6 +1,6 @@
 # AI copilot over MCP
 
-FableFlight can expose the running aircraft and its world to an AI assistant
+GTW can expose the running aircraft and its world to an AI assistant
 through the [Model Context Protocol](https://modelcontextprotocol.io).  The
 assistant works as a copilot: it reads the instruments and the environment,
 tunes radios, handles the throttle, flaps, gear and engine state, changes weather
@@ -13,10 +13,10 @@ The setup has two processes:
 AI client (OpenCode, Claude Code, Claude Desktop, ...)
         │ MCP over stdio
         ▼
-fableflight-mcp                    the stdio bridge
+gtw-mcp                    the stdio bridge
         │ JSON-RPC on 127.0.0.1:42761
         ▼
-fablegame (the running simulator)
+gtw (the running simulator)
 ```
 
 The bridge can be started before the game: `tools/list` works, and tool calls
@@ -27,10 +27,10 @@ game's control service binds only to localhost.
 
 ```sh
 cargo build --release
-./target/release/fablegame
+./target/release/gtw
 ```
 
-The game listens on `127.0.0.1:42761` by default and writes a per-session secret token to `<config dir>/fablegame/mcp-<port>.token` (mode `0600` on Unix).  `--mcp-port PORT` changes the port; `--no-mcp` disables the service for one run.  The bridge uses the same default port, reads the token automatically (or from `FABLEFLIGHT_MCP_TOKEN`), and reads `FABLEFLIGHT_MCP_PORT` if the port was changed, or accepts `--port PORT`.
+The game listens on `127.0.0.1:42761` by default and writes a per-session secret token to `<config dir>/gtw/mcp-<port>.token` (mode `0600` on Unix).  `--mcp-port PORT` changes the port; `--no-mcp` disables the service for one run.  The bridge uses the same default port, reads the token automatically (or from `GTW_MCP_TOKEN`), and reads `GTW_MCP_PORT` if the port was changed, or accepts `--port PORT`.
 
 ## Client configuration
 
@@ -41,9 +41,9 @@ The game listens on `127.0.0.1:42761` by default and writes a per-session secret
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
     "servers": {
-      "fableflight": {
+      "gtw": {
         "type": "local",
-        "command": ["/absolute/path/to/fableflight-mcp"]
+        "command": ["/absolute/path/to/gtw-mcp"]
       }
     }
   }
@@ -53,13 +53,13 @@ The game listens on `127.0.0.1:42761` by default and writes a per-session secret
 or:
 
 ```sh
-opencode mcp add fableflight -- /absolute/path/to/fableflight-mcp
+opencode mcp add gtw -- /absolute/path/to/gtw-mcp
 ```
 
 ### Claude Code
 
 ```sh
-claude mcp add fableflight /absolute/path/to/fableflight-mcp
+claude mcp add gtw /absolute/path/to/gtw-mcp
 ```
 
 ### Claude Desktop
@@ -67,15 +67,15 @@ claude mcp add fableflight /absolute/path/to/fableflight-mcp
 ```json
 {
   "mcpServers": {
-    "fableflight": {
-      "command": "/absolute/path/to/fableflight-mcp",
+    "gtw": {
+      "command": "/absolute/path/to/gtw-mcp",
       "args": []
     }
   }
 }
 ```
 
-Put `FABLEFLIGHT_MCP_PORT` in the server's environment if you changed the
+Put `GTW_MCP_PORT` in the server's environment if you changed the
 game's port.
 
 ## A copilot prompt
@@ -119,7 +119,7 @@ Units are feet, knots, ft/min, degrees true, hPa and kg.
 `current` (default), `cockpit` or `chase`; optional `hud` defaults to `true`.
 The camera and HUD are restored afterwards.  The result is an MCP image (JPEG,
 downscaled to at most 1600 px) plus the path of the saved PNG under the
-FableFlight config folder's `screenshots` directory.
+GTW config folder's `screenshots` directory.
 
 ## Safety and behaviour
 

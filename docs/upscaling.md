@@ -82,7 +82,8 @@ it. The **Download from AMD** button fetches those two files and AMD's
 `license.md` (34.6 MB in all) from the FSR SDK v2.4.0 tag on GitHub, checks
 each against a pinned size and SHA-256 (taken from AMD's files, whose GitHub
 blob ids for the tag were checked), and moves them into
-`<data dir>/fablegame/amd-fsr-sdk-2.4.0/` with a NOTICE; **Remove** deletes
+`<data dir>/fablegame/amd-fsr-sdk-2.4.0/` (the data folder keeps its historical
+name so existing downloads are not orphaned) with a NOTICE; **Remove** deletes
 the folder. The hashes are checked again before the DLLs are loaded.
 
 AMD's terms (`license.md`): binary redistribution with the notice; no reverse

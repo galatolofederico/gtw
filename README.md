@@ -1,33 +1,26 @@
 <div align="center">
 
-# Fable Flight
+# GTW — Grand Theft World
 
-### An Open-World Flight Simulator Built in Pure Rust
+### An open-world sandbox on the real Earth: walk, drive, and fly
 
-Explore the skies with real-world weather, live air traffic, and an immersive open-world flying experience.
+Spawn anywhere on the planet, cross surface-aware terrain on foot, take a parked or moving car, and fly the aircraft you find at an airport. GTW v1 keeps the upstream flight simulator and its aircraft, and adds ground play without pedestrians, police, interiors, or ground weapons.
 
-*Created with Claude Fable 5.2, Opus 5.5 and other AI's*
+*GTW is a fork of [FableFlight](https://github.com/Rolandjg/fableflight), built in Rust with wgpu.*
 
 <br>
 
-[![Discord](https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/9akYzMRBc6)
 [![Rust](https://img.shields.io/badge/Rust-CE422B?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 <br>
 </div>
-<div align="center">
-  <video
-    src="https://github.com/user-attachments/assets/4f8833da-13c0-4d20-a50b-c0acf2d88df1"
-    width="800"
-    controls>
-  </video>
-</div>
 
 ## Download
-Download the [latest release](https://github.com/Rolandjg/fableflight/releases/latest), unpack it, and run **`fableflight-launcher`** (`fableflight-launcher.exe` on Windows).
+
+There is no packaged GTW release yet: build from source below. Releases, once published, will appear at <https://github.com/galatolofederico/gtw/releases>. The release launcher is **`gtw-launcher`** (`gtw-launcher.exe` on Windows).
 
 ## Compiling
 
-Requires **Rust 1.85+** (edition 2024). Note that the Cargo crate and main simulator binary are named `fablegame` (the optional AI copilot bridge binary is `fableflight-mcp`, and the launcher is `fableflight-launcher`), while the application is Fable Flight.
+GTW is a Rust 2024 project and needs **Rust 1.85+**. The package and Cargo binaries are all named for the game: **`gtw`** (the simulator), **`gtw-mcp`** (the optional AI copilot bridge) and **`gtw-launcher`** (the launcher).
 
 ### Platform prerequisites
 
@@ -48,7 +41,7 @@ Requires **Rust 1.85+** (edition 2024). Note that the Cargo crate and main simul
 cargo run --release
 ```
 
-Or build the release binaries (`target/release/fablegame`, `target/release/fableflight-mcp` and `target/release/fableflight-launcher`) with:
+Or build the release binaries (`target/release/gtw`, `target/release/gtw-mcp` and `target/release/gtw-launcher`) with:
 
 ```sh
 cargo build --release --locked
@@ -56,19 +49,58 @@ cargo build --release --locked
 
 ## Features
 
-- **Aircraft:** Cessna 172RG, Robin DR400, Beechcraft A36 Bonanza, Boeing 747, Gulfstream G650, F/A-18, F-4, F-22, Concorde, SR-71, Starship, and downloadable [FlightGear aircraft](https://wiki.flightgear.org/FGAddon).
-- **Flight systems:** fuel, mass and balance, electrical failures, clickable cockpits, radio navigation, and autopilot.
-- **World:** real METAR weather, seasonal & live snow cover, satellite/road minimap, live ADS-B traffic, and multiplayer.
-- **Controls:** remappable keyboard, joystick, throttle, pedals, and gamepad. Configure them in **Settings → Controls**.
-- **Arcade mode:** optional boosts, missiles, and in-flight respawns. Enable in **Settings → General** or pass `--arcade`.
+- **Ground play:** start on foot anywhere; walk, run, sprint, jump, step up kerbs, and climb or slide on slopes. Six surface classes (asphalt, concrete, gravel, grass, sand, snow/ice) change grip, speed, and footstep audio, and weather modifies them.
+- **Cars:** take any of the eight existing road vehicles while parked or moving, drive them with single-body arcade physics, drift with the handbrake, take collision damage, and get out again.
+- **Flight:** the upstream aircraft, cockpits, systems, and flight model: Cessna 172RG, Robin DR400, Beechcraft A36 Bonanza, Boeing 747, Gulfstream G650, F/A-18, F-4, F-22, Concorde, SR-71, Starship, and downloadable [FlightGear aircraft](https://wiki.flightgear.org/FGAddon).
+- **World:** real elevation, OpenStreetMap roads and buildings, ESA WorldCover land cover, satellite imagery, real METAR weather, seasonal and live snow, a satellite/road minimap, live ADS-B traffic, and flight multiplayer.
+- **Controls:** remappable keyboard, joystick, throttle, pedals, and gamepad, with separate on-foot, car, and flight contexts in **Settings → Controls**.
+- **Arcade mode:** optional boosts, missiles, and in-flight respawns, flight-only and off by default. Enable it in **Settings → General** or pass `--arcade`.
 - **AI copilot:** optional MCP integration; see [docs/mcp.md](docs/mcp.md).
 - **Upscaling:** bilinear, AMD FSR 1 and FSR 3.1 built in, and AMD FSR 4.1 downloaded from AMD on request (Windows, Radeon RX 6000 or newer), with a suggestion for your GPU. In **Settings → Graphics → Upscaling**; see [docs/upscaling.md](docs/upscaling.md).
 
-The UI supports English (`en`), French (`fr`), and Korean (`ko`). Settings and key bindings are saved automatically.
+The UI supports English (`en`), French (`fr`), and Korean (`ko`). Settings, bindings, and the resume snapshot are saved automatically.
+
+## Non-goals (v1)
+
+GTW v1 deliberately has **no** pedestrians, crowds, police or wanted levels, building interiors, missions, economy, swimming or diving, motorcycles, bicycles, boats or trains, ground weapons, or multiplayer ground play. Flight-only arcade weapons remain behind the off-by-default arcade toggle. Tunnels stay at grade and are not enterable.
+
+## Starting a run
+
+```sh
+gtw --start foot                 # on foot at the default place
+gtw --start car                  # in a car
+gtw --start plane --airport EZE  # on an airport runway
+gtw --place "Buenos Aires" --start foot
+```
+
+`--start` chooses the initial mode; without it the game uses the saved mode and place when a save exists. `--flat` gives a deterministic flat world for scripted runs, `--no-save` disables loading and autosave, and `--surface-probe LAT,LON` prints the elevation and surface classes for a point and exits. Run `gtw --help` for every flag.
 
 ## Default Controls
 
-All bindings can be customized in **Settings → Controls**. In cockpit view, hover over switches, levers, and knobs to click, hold, or scroll them directly with the mouse (or the gamepad's aim dot).
+All bindings can be customized in **Settings → Controls**, which has separate **On foot**, **Car**, and **Flight** pages. In cockpit view, hover over switches, levers, and knobs to click, hold, or scroll them directly with the mouse (or the gamepad's aim dot).
+
+### On foot
+
+| Action | Default Key |
+| --- | --- |
+| Walk forward / back / left / right | `W` / `S` / `A` / `D` |
+| Look up / down / left / right | `Arrow Up` / `Arrow Down` / `Arrow Left` / `Arrow Right` |
+| Sprint (hold) | `Left Shift` |
+| Jump | `Space` |
+| Get in / interact | `E` |
+| First / third person | `V` |
+
+### In a car
+
+| Action | Default Key |
+| --- | --- |
+| Throttle / brake and reverse | `W` / `S` |
+| Steer left / right | `A` / `D` |
+| Handbrake | `Space` |
+| Get out | `E` |
+| Horn | `B` |
+
+### In flight
 
 | Action | Default Key |
 | --- | --- |
@@ -89,19 +121,29 @@ All bindings can be customized in **Settings → Controls**. In cockpit view, ho
 | Mixture richer / leaner | `Page Up` / `Page Down` |
 | Autopilot toggle / HDG / NAV / APR / ALT | `F5` / `7` / `8` / `9` / `0` |
 | Heading bug / Altitude preselect | `-` `=` / `;` `'` |
+
+### Everywhere
+
+| Action | Default Key |
+| --- | --- |
 | Camera (chase / cockpit) | `C` |
 | HUD / Minimap toggle | `H` / `` ` `` |
+| Full map | `J` |
 | Go to place / Respawn / Pause | `G` / `R` / `P` |
 | Flight panel / Pause menu | `Tab` / `Esc` |
 | Sound toggle / Screenshot | `U` / `F12` |
 
 ## Configuration & Data Paths
 
-| Platform | Config (settings, bindings, Google key, MCP token) | Cache (tiles, downloaded hangar cache) |
+| Platform | Config (settings, bindings, graphics, Google key, MCP token) | Cache (tiles, airport and traffic data, downloaded hangar cache) |
 | --- | --- | --- |
-| **Linux** | `~/.config/fablegame/` | `~/.cache/fablegame/` |
-| **macOS** | `~/Library/Application Support/fablegame/` | `~/Library/Caches/fablegame/` |
-| **Windows** | `%APPDATA%\fablegame\` | `%LOCALAPPDATA%\fablegame\` |
+| **Linux** | `~/.config/gtw/` | `~/.cache/gtw/` |
+| **macOS** | `~/Library/Application Support/gtw/` | `~/Library/Caches/gtw/` |
+| **Windows** | `%APPDATA%\gtw\` | `%LOCALAPPDATA%\gtw\` |
+
+On the first start, GTW imports `settings.json`, `bindings.json`, `graphics.json`, `google_maps.json`, and `launcher.json` from an existing FableFlight config folder (`<config>/fablegame/`) once, and renames the old tile cache to `<cache>/gtw/` when it can. The game shows a notice when that happens; a file already in the GTW folder always wins. Downloaded aircraft and AMD's optional FSR runtime stay under `<data>/fablegame/`, because moving them would orphan files already downloaded.
+
+The `FABLE_*` environment variables (`FABLE_GOOGLE_KEY`, `FABLE_GPU_TIMES`, `FABLE_MSAA`, `FABLE_PROGRESS` and the rest) keep their historical names for compatibility. The MCP bridge also reads `GTW_MCP_PORT` and `GTW_MCP_TOKEN` first, then the old `FABLEFLIGHT_MCP_*` names.
 
 When using optional Google Maps imagery/3D tiles, prefer setting the `FABLE_GOOGLE_KEY` environment variable (or entering the key in **Settings → Map**) rather than passing `--google-key` on the command line.
 
@@ -110,35 +152,34 @@ When using optional Google Maps imagery/3D tiles, prefer setting the `FABLE_GOOG
 - **GPU startup or driver issues:** Run from a terminal to see GPU error output. Make sure Vulkan (Linux/Windows), DX12 (Windows), or Metal (macOS) drivers are up to date. On integrated GPUs, try `--graphics very-low` or set `FABLE_MSAA=1`.
 - **Low frame rate / laptops without a dedicated GPU:** In **Settings → Graphics**, pick the **Very Low** preset (the first start on integrated graphics picks Very Low on Intel, Low elsewhere). For more speed, set **Clouds** to Off and lower **Render resolution** (down to 35%). A 30 fps **Frame limit** keeps the laptop cooler and saves battery. To see where the GPU time goes, run with `FABLE_GPU_TIMES=1`: it logs the time spent in each render stage.
 - **No sound or switched headphones:** Audio automatically attempts to reopen the default output device every few seconds after a stream error. Use `U` to toggle mute or `--mute` to launch silently.
-- **Offline / slow network:** Launch with `--offline` to fly using only cached tiles and built-in data.
+- **Offline / slow network:** Launch with `--offline` to fly and drive using only cached tiles and built-in data.
 - **Linux gamepads not detected:** Ensure your user has read access to `/dev/input/event*` (usually the `input` group) and `libudev` is installed.
-- **Invalid command-line flags:** Run `fablegame --help` to see all supported options.
+- **Invalid command-line flags:** Run `gtw --help` to see all supported options.
 - **The game stops while starting from the launcher:** the launcher shows the game's last log lines, and the full log of the last run is in the cache folder as `last-run.log` (Home → Open the last game log).
 
 ## Multiplayer
 
-Multiplayer is on by default, under a random pilot name (such as `SwiftKestrel27`). Change the name, pick a server, or turn multiplayer off in the **Multiplayer** settings. Offline and scripted runs (`--offline`, `--shot`, `--record`, `--bench`, `--headless`) stay off the network unless `--mp` is given. To host a relay:
+Flight multiplayer is **off by default**; when on, it uses a random pilot name (such as `SwiftKestrel27`). Change the name, pick a server, or turn it on in the **Multiplayer** settings. Offline and scripted runs (`--offline`, `--shot`, `--record`, `--bench`, `--headless`) stay off the network unless multiplayer is enabled. Ground play is single-player in v1. To host a relay:
 
 ```sh
 cd relay
 docker compose up -d
 ```
-Allow UDP port `7480` through your firewall.
 
-Read [docs/relay.md](docs/relay.md) for more info.
+Allow UDP port `7480` through your firewall. Read [docs/relay.md](docs/relay.md) for more info.
 
 ## Assets & Attributions
 
-The source code is licensed under the MIT License (see [LICENSE](LICENSE)). Bundled data and media assets include:
+GTW is a fork of [FableFlight](https://github.com/Rolandjg/fableflight) and keeps its MIT-licensed code and upstream credit. The source code is licensed under the MIT License (see [LICENSE](LICENSE)). Bundled data and media assets include:
 
+- **Ground land cover (cached under `lc/`):** ESA WorldCover 2021 v200, © ESA WorldCover project, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), fetched through the [Microsoft Planetary Computer](https://planetarycomputer.microsoft.com/dataset/esa-worldcover) data API. Used for ground surface classes; OpenStreetMap data takes precedence where it exists.
 - **Airports & navigation aids (`assets/airports.tsv.gz`, `assets/navaids.tsv.gz`):** Derived from [OurAirports](https://ourairports.com/data/) (Public Domain).
 - **Night lights (`assets/night_lights.bin`):** Block-wise zlib-compressed global radiance tiles packed from NASA Earth Observatory's Black Marble 2016 dataset (Public Domain).
-- **Ground land cover (cached under `lc/`):** ESA WorldCover 2021 v200, © ESA WorldCover project, licensed under CC BY 4.0, fetched through the Microsoft Planetary Computer data API. Used for ground surface classes; OpenStreetMap data takes precedence where it exists.
 - **Fonts (`assets/fonts/`):** Barlow and IBM Plex Mono, licensed under the SIL Open Font License 1.1 (see `assets/fonts/OFL-Barlow.txt` and `assets/fonts/OFL-IBMPlexMono.txt`).
 - **AMD FidelityFX Super Resolution:** `src/shaders/fsr3.wgsl` and the FSR 1/RCAS functions in `src/shaders/post.wgsl` are ported from AMD's FSR SDK v2.4.0 (MIT; notice in [docs/upscaling.md](docs/upscaling.md)). AMD's FSR 4 runtime is not bundled: it is downloaded from AMD at the player's request, under AMD's licence.
 - **Google Maps badge (`assets/google_maps_logo.png`):** Displayed when optional Google Maps Platform imagery or Photorealistic 3D Tiles are enabled, per Google Maps attribution requirements.
-- **Aircraft models, textures, and audio (`assets/*.bin.gz`, `assets/*_paint.jpg`, `assets/audio/`, `assets/ui/`):** Project-authored or procedural assets bundled with Fable Flight. Optional downloadable aircraft from [FGAddon](https://wiki.flightgear.org/FGAddon) carry their own per-aircraft licenses recorded in each installed aircraft's `source.json`.
+- **Aircraft models, textures, and audio (`assets/*.bin.gz`, `assets/*_paint.jpg`, `assets/audio/`, `assets/ui/`):** Project-authored or procedural assets inherited from FableFlight and bundled with GTW. Optional downloadable aircraft from [FGAddon](https://wiki.flightgear.org/FGAddon) carry their own per-aircraft licenses recorded in each installed aircraft's `source.json`.
 
 ## Contributing
 
-Contributions are welcome, see [AGENTS.md](AGENTS.md) for guidance on coding agent standards.
+Contributions are welcome; see [AGENTS.md](AGENTS.md) for guidance on coding agent standards and the project scope.

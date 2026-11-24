@@ -1,4 +1,4 @@
-# Translating FableFlight
+# Translating GTW
 
 The interface text lives in `assets/locales/`, one file per language:
 `eng.lng` (English, the reference), `fr.lng`, `ko.lng`… The game reads these
@@ -53,8 +53,8 @@ ones before it:
 1. the copies compiled into the game;
 2. `assets/locales/` in the source tree, and in the folder the game runs from;
 3. `assets/locales/` and `locales/` next to the executable;
-4. `$FABLEFLIGHT_LOCALES`;
-5. `<config dir>/fablegame/locales/` (`~/.config/fablegame/locales` on Linux),
+4. `$GTW_LOCALES` (the old `$FABLEFLIGHT_LOCALES` still works);
+5. `<config dir>/gtw/locales/` (`~/.config/gtw/locales` on Linux),
    for your own languages and fixes.
 
 ## In the code
