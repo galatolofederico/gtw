@@ -116,6 +116,35 @@ pub struct Ground {
     pub water: bool,
 }
 
+/// A parked car the player can take: its pose on the planet (not tile-relative).
+#[derive(Copy, Clone, Debug)]
+pub struct ParkedCar {
+    pub model: u8,
+    pub colour: [f32; 3],
+    pub pos: DVec3,
+    /// Bearing: radians from north, clockwise.
+    pub yaw: f64,
+}
+
+/// Index of the nearest parked car in one tile's list to `p`, within `radius`.
+fn nearest_parked(center: DVec3, parked: &[Parked], p: DVec3, radius: f64) -> Option<usize> {
+    let mut best: Option<(f64, usize)> = None;
+    for (i, pk) in parked.iter().enumerate() {
+        let d = (center + pk.pos.as_dvec3() - p).length();
+        if d <= radius && best.is_none_or(|(bd, _)| d < bd) {
+            best = Some((d, i));
+        }
+    }
+    best.map(|(_, i)| i)
+}
+
+/// A parked prop's facing, as a bearing on the planet.
+fn parked_yaw(pos: DVec3, fwd: Vec3) -> f64 {
+    let (e, n, _) = geo::enu(pos);
+    let f = fwd.as_dvec3();
+    f.dot(e).atan2(f.dot(n))
+}
+
 /// A building or bridge deck over a point.
 pub struct BHit {
     pub base: f64,
@@ -656,6 +685,65 @@ impl World {
     #[allow(dead_code)]
     pub fn surface(&self, lat: f64, lon: f64) -> Option<SurfaceHit> {
         self.surface_hit(lat, lon, None)
+    }
+
+    /// The nearest parked car within `radius` of `p`, if any.
+    pub fn nearest_parked_car(&self, p: DVec3, radius: f64) -> Option<ParkedCar> {
+        let (lat, lon, _) = geo::pos_to_lla(p);
+        let c = TileId::at(lat, lon, DATA_ZOOM);
+        let size = 1i64 << DATA_ZOOM;
+        let mut best: Option<(f64, ParkedCar)> = None;
+        for dy in -1..=1i64 {
+            for dx in -1..=1i64 {
+                let (x, y) = ((c.x as i64 + dx).rem_euclid(size), c.y as i64 + dy);
+                if y < 0 || y >= size {
+                    continue;
+                }
+                let id = TileId::new(DATA_ZOOM, x as u32, y as u32);
+                let Some(BSlot::Ready(b)) = self.builds.get(&id) else { continue };
+                let Some(i) = nearest_parked(b.center, &b.parked, p, radius) else { continue };
+                let pk = &b.parked[i];
+                let pos = b.center + pk.pos.as_dvec3();
+                let d = (pos - p).length();
+                if best.is_none_or(|(bd, _)| d < bd) {
+                    best = Some((d, ParkedCar { model: pk.model, colour: pk.col, pos, yaw: parked_yaw(pos, pk.fwd) }));
+                }
+            }
+        }
+        best.map(|(_, car)| car)
+    }
+
+    /// Take the nearest parked car within `radius` of `p`, removing it from its
+    /// tile so it cannot be taken twice.
+    pub fn take_parked_car(&mut self, p: DVec3, radius: f64) -> Option<ParkedCar> {
+        let (lat, lon, _) = geo::pos_to_lla(p);
+        let c = TileId::at(lat, lon, DATA_ZOOM);
+        let size = 1i64 << DATA_ZOOM;
+        let mut best: Option<(f64, TileId, usize, ParkedCar)> = None;
+        for dy in -1..=1i64 {
+            for dx in -1..=1i64 {
+                let (x, y) = ((c.x as i64 + dx).rem_euclid(size), c.y as i64 + dy);
+                if y < 0 || y >= size {
+                    continue;
+                }
+                let id = TileId::new(DATA_ZOOM, x as u32, y as u32);
+                let Some(BSlot::Ready(b)) = self.builds.get(&id) else { continue };
+                let Some(i) = nearest_parked(b.center, &b.parked, p, radius) else { continue };
+                let pk = &b.parked[i];
+                let pos = b.center + pk.pos.as_dvec3();
+                let d = (pos - p).length();
+                if best.as_ref().is_none_or(|(bd, _, _, _)| d < *bd) {
+                    best = Some((d, id, i, ParkedCar { model: pk.model, colour: pk.col, pos, yaw: parked_yaw(pos, pk.fwd) }));
+                }
+            }
+        }
+        let (_, id, i, car) = best?;
+        if let Some(BSlot::Ready(b)) = self.builds.get_mut(&id) {
+            if i < b.parked.len() {
+                b.parked.swap_remove(i);
+            }
+        }
+        Some(car)
     }
 
     /// Building or bridge deck over a lat/lon.
@@ -2196,5 +2284,28 @@ mod tests {
         assert!(WorldQuery::building_push_box(&w, p, [1.0, 0.5], 0.0).is_none());
         assert!(WorldQuery::tree_push_sphere(&w, p, 0.3).is_none());
         assert!(WorldQuery::tree_push_box(&w, p, [1.0, 0.5], 0.0).is_none());
+    }
+
+    #[test]
+    fn parked_cars_are_selected_removed_and_faced() {
+        let center = geo::lla_to_pos(0.0, 0.0, 0.0);
+        let (e, n, up) = geo::enu(center);
+        let mk = |at: DVec3, model| Parked { pos: (at - center).as_vec3(), fwd: n.as_vec3(), up: up.as_vec3(), model, col: [0.5; 3] };
+        let mut list = vec![mk(center + e * 2.0, 0), mk(center + e * 5.0, 3), mk(center + n * 1.0, 5)];
+        let p = center + e * 1.8;
+        let i = nearest_parked(center, &list, p, 3.0).expect("one is in reach");
+        assert_eq!(list[i].model, 0, "the nearest, not the first in reach");
+        let taken = list.swap_remove(i);
+        assert_eq!(taken.model, 0);
+        assert_eq!(list.len(), 2, "only the taken one goes");
+        assert!(nearest_parked(center, &list, p, 3.0).is_some(), "neighbours stay");
+        assert!(nearest_parked(center, &list, center + n * 20.0, 1.0).is_none());
+        // The prop's facing becomes a bearing: north 0, east a quarter turn.
+        assert!(parked_yaw(center, n.as_vec3()).abs() < 1e-9);
+        assert!((parked_yaw(center, e.as_vec3()) - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+        // A world with no detail tile loaded has nothing to take.
+        let mut w = flat_world();
+        assert!(w.nearest_parked_car(p, 10.0).is_none());
+        assert!(w.take_parked_car(p, 10.0).is_none());
     }
 }

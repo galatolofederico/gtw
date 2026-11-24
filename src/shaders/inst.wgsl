@@ -21,19 +21,34 @@ fn world(p: vec3f, w: f32, m0: vec4f, m1: vec4f, m2: vec4f) -> vec3f {
   return vec3f(dot(m0, v), dot(m1, v), dot(m2, v));
 }
 
+// The player's car carries its damage in ext.w (negative): the panels pull in
+// and ripple in the body's own frame. Traffic (ext.w = 1) is untouched.
+fn crumple_body(p: vec3f, amt: f32) -> vec3f {
+  let k = clamp(amt, 0.0, 1.0);
+  let s = 0.5 + 0.5 * sin(p.z * 2.3 + p.x * 1.7);
+  let side = p.x * 0.22 * k * (0.35 + 0.65 * s);
+  let dy = 0.07 * k * sin(p.z * 8.0 + p.x * 5.0);
+  let dz = 0.10 * k * sin(p.x * 6.0 - p.z * 4.0);
+  return vec3f(p.x - side, p.y + dy, p.z + dz);
+}
+
 @vertex fn vs(@location(0) pos: vec3f, @location(1) nrm: vec3f, @location(2) col: vec4f,
               @location(3) m0: vec4f, @location(4) m1: vec4f, @location(5) m2: vec4f, @location(6) tint: vec4f, @location(7) ext: vec4f) -> VOut {
-  let P = world(pos, 1.0, m0, m1, m2);
+  let bent = ext.w < -0.0001;
+  let lp = select(pos, crumple_body(pos, -ext.w), bent);
+  let P = world(lp, 1.0, m0, m1, m2);
   // Scale may be uneven (rubble slabs): normals need the inverse scale.
   let sx = vec3f(length(vec3f(m0.x, m1.x, m2.x)), length(vec3f(m0.y, m1.y, m2.y)), length(vec3f(m0.z, m1.z, m2.z)));
-  let N = world(nrm / max(sx * sx, vec3f(1e-6)), 0.0, m0, m1, m2);
+  let ln = select(nrm, normalize(nrm + vec3f(0.0, 0.35, 0.0) * (-ext.w) * sin(pos.z * 7.0 + pos.x * 3.0)), bent);
+  let N = world(ln / max(sx * sx, vec3f(1e-6)), 0.0, m0, m1, m2);
   let T = normalize(vec3f(m0.x, m1.x, m2.x)) * sign(ext.z);
-  return VOut(G.view_proj * vec4f(P, 1.0), P, N, col, pos * sx, tint, nrm, ext, T);
+  return VOut(G.view_proj * vec4f(P, 1.0), P, N, col, lp * sx, tint, ln, ext, T);
 }
 @vertex fn vs_shadow(@location(0) pos: vec3f, @location(3) m0: vec4f, @location(4) m1: vec4f, @location(5) m2: vec4f, @location(6) tint: vec4f, @location(7) ext: vec4f) -> @builtin(position) vec4f {
   // Street traffic hidden under the 3D tiles casts nothing (decided per car).
   if (tint.a < 0.5 && ext.w > 0.5 && ext.w < 1.5 && photo_shadow_gone(vec3f(m0.w, m1.w, m2.w))) { return vec4f(2.0, 2.0, 0.0, 1.0); }
-  return CS.vp * vec4f(world(pos, 1.0, m0, m1, m2), 1.0);
+  let lp = select(pos, crumple_body(pos, -ext.w), ext.w < -0.0001);
+  return CS.vp * vec4f(world(lp, 1.0, m0, m1, m2), 1.0);
 }
 
 @fragment fn fs(in: VOut) -> GOut {
