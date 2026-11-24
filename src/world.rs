@@ -735,23 +735,50 @@ impl World {
         b.road_index.query(&b.net, [(u * ext as f64) as f32, (v * ext as f64) as f32])
     }
 
+    /// The road index hit under a lat/lon for a body at `alt`: the ribbon at
+    /// the body's own level where several roads overlap in plan (a deck over a
+    /// street, a switchback), so a car under a bridge finds the street below
+    /// it and a car on the deck stays on it.
+    fn road_hit_at(&self, lat: f64, lon: f64, alt: f64) -> Option<RoadHit> {
+        let id = TileId::at(lat, lon, DATA_ZOOM);
+        let Some(BSlot::Ready(b)) = self.builds.get(&id) else { return None };
+        let (u, v) = id.frac(lat, lon);
+        let ext = b.road_index.ext();
+        b.road_index.query_for_body(&b.net, [(u * ext as f64) as f32, (v * ext as f64) as f32], alt)
+    }
+
     /// The shared surface query: terrain height and class, refined by the road
-    /// index. `body` is the querying body's altitude; a deck more than 2.5 m
-    /// above it (a bridge overhead) is ignored, so a body under the bridge
-    /// stays on the terrain. `None` means the tile selection had no ground.
+    /// index. `body` is the querying body's altitude: a bridge deck more than
+    /// 2.5 m above it is ignored, so a body under the bridge stays on the
+    /// terrain, and an at-grade street a little above it still counts, so a
+    /// body that has sunk under a ribbon climbs back out. `None` means the
+    /// tile selection had no ground.
     #[allow(dead_code)]
     fn surface_hit(&self, lat: f64, lon: f64, body: Option<f64>) -> Option<SurfaceHit> {
         let (g, class) = self.terrain_sample(lat, lon)?;
         let kind = Surface::from_u8(class);
         let mut hit = SurfaceHit { h: g.h, kind, water: g.water || kind == Surface::Water, road: false, sidewalk: false, bridge: false };
-        if let Some(r) = self.road_hit(lat, lon) {
-            if !r.hidden && body.is_none_or(|alt| r.h - alt <= 2.5) {
+        let road = match body {
+            Some(alt) => self.road_hit_at(lat, lon, alt),
+            None => self.road_hit(lat, lon),
+        };
+        if let Some(r) = road {
+            if !r.hidden {
                 hit.kind = r.kind;
                 hit.h = r.h;
                 hit.road = true;
                 hit.sidewalk = r.sidewalk;
                 hit.bridge = r.bridge;
                 hit.water = r.kind == Surface::Water;
+                // Where the photorealistic mesh is drawn over our road, its
+                // street is what the player sees: stand on that rather than on
+                // the ribbon hidden under it. The mesh surface is looked up
+                // near the road's own height, so roofs, trees and decks over
+                // the street are passed by; no mesh street near that level
+                // leaves the ribbon in charge.
+                if let Some(h) = self.photo.as_deref().and_then(|p| p.street(lat, lon, r.h, r.bridge)) {
+                    hit.h = h;
+                }
             }
         }
         Some(hit)
@@ -2797,6 +2824,51 @@ mod tests {
         assert!(WorldQuery::building_push_box(&w, p, [1.0, 0.5], 0.0).is_none());
         assert!(WorldQuery::tree_push_sphere(&w, p, 0.3).is_none());
         assert!(WorldQuery::tree_push_box(&w, p, [1.0, 0.5], 0.0).is_none());
+    }
+
+    #[test]
+    fn a_body_on_a_bridge_takes_the_deck_and_one_under_it_the_street() {
+        // A ground street with a bridge deck directly over it, as at an
+        // overpass. The surface query must use the body's altitude: on the
+        // deck it takes the deck, underneath it the street below.
+        let mut w = flat_world();
+        let id = TileId::at(0.0, 0.0, DATA_ZOOM);
+        let (clat, clon) = id.lat_lon(0.5, 0.5);
+        let center = geo::lla_to_pos(clat, clon, 0.0);
+        let ext = 1024.0f32;
+        let unit_m = (id.width_m() / ext as f64) as f32;
+        let path = |alt: f32, bridge: bool| crate::roads::Path {
+            pts: Vec::new(),
+            cum: vec![0.0, 120.0],
+            len: 120.0,
+            class: crate::sources::RC_MINOR,
+            oneway: false,
+            lanes: 1,
+            lane_w: 3.0,
+            park_off: 0.0,
+            speed: 8.0,
+            hidden: false,
+            drive_half: 5.0,
+            walk: false,
+            bridge,
+            local: vec![[ext * 0.5 - 60.0 / unit_m, ext * 0.5], [ext * 0.5 + 60.0 / unit_m, ext * 0.5]],
+            alt: vec![alt, alt],
+            nodes: [0, 0],
+            edge: [0, 0],
+            junctions: Vec::new(),
+            keep_clear: Vec::new(),
+        };
+        let net = RoadNet { paths: vec![path(0.0, false), path(8.0, true)], ..Default::default() };
+        let road_index = RoadIndex::build(&net, ext, unit_m);
+        let tile = BTile { center, radius: 500.0, gpu: None, footprints: Vec::new(), last_used: 0, net, road_index, cars: Vec::new(), parked: Vec::new(), trees: Vec::new(), tree_var: Vec::new(), chunks: Vec::new(), under: Vec::new(), cells: Vec::new(), near_idx: Vec::new(), ax: [0.0; 4], ay: [0.0; 4], shown: 1.0, mid_t: 1.0, fine_t: 1.0, tall: 0.0 };
+        w.builds.insert(id, BSlot::Ready(Box::new(tile)));
+        let up = center.normalize();
+        let street = w.surface_at(center).unwrap();
+        assert!(street.road && !street.bridge, "the street: {street:?}");
+        assert!(street.h.abs() < 1e-6, "at the street's height: {:.2}", street.h);
+        let deck = w.surface_at(center + up * 8.0).unwrap();
+        assert!(deck.road && deck.bridge, "the deck: {deck:?}");
+        assert!((deck.h - 8.0).abs() < 1e-6, "at the deck's height: {:.2}", deck.h);
     }
 
     #[test]

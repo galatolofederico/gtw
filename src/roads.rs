@@ -60,6 +60,15 @@ impl Path {
 /// Sidewalk band width outside the carriageway (metres), as in `cfg`.
 pub const SIDEWALK_W: f32 = 1.9;
 
+/// A bridge deck more than this above a body is a bridge it is under, not the
+/// street it stands on (metres).
+const BRIDGE_CLEARANCE: f64 = 2.5;
+
+/// A road on the ground this far above a body still counts as its street: the
+/// ribbon sits a little proud of the terrain, and a car that has sunk into a
+/// seam must find it and climb out rather than drive under it (metres).
+const ROAD_CLEARANCE: f64 = 6.0;
+
 /// What the road index found under a point.
 #[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]
@@ -134,51 +143,99 @@ impl RoadIndex {
         self.ext
     }
 
+    /// The road nearest `p`, without regard to height (the diagnostic query).
     pub fn query(&self, net: &RoadNet, p: [f32; 2]) -> Option<RoadHit> {
         let q = Vec2::from(p);
         let cx = ((p[0] / self.cell).floor().max(0.0) as usize).min(Self::N - 1);
         let cy = ((p[1] / self.cell).floor().max(0.0) as usize).min(Self::N - 1);
         let mut best: Option<RoadHit> = None;
         for &pi in &self.cells[cy * Self::N + cx] {
-            let path = &net.paths[pi as usize];
-            let n = path.local.len().min(path.alt.len());
-            if n < 2 {
-                continue;
+            let Some(hit) = self.path_hit(net, pi, q) else { continue };
+            if best.is_none_or(|b| hit.dist < b.dist) {
+                best = Some(hit);
             }
-            let (mut d2, mut t, mut seg) = (f32::INFINITY, 0.0f32, 0usize);
-            for (k, w) in path.local[..n].windows(2).enumerate() {
-                let (a, b) = (Vec2::from(w[0]), Vec2::from(w[1]));
-                let d = b - a;
-                let dd = d.length_squared().max(1e-9);
-                let u = ((q - a).dot(d) / dd).clamp(0.0, 1.0);
-                let dist = (a + d * u - q).length_squared();
-                if dist < d2 {
-                    (d2, t, seg) = (dist, u, k);
-                }
-            }
-            let dist = d2.sqrt() * self.unit_m;
-            let max = path.drive_half + if path.walk { SIDEWALK_W } else { 0.0 };
-            if dist > max {
-                continue;
-            }
-            if best.is_some_and(|b| dist >= b.dist) {
-                continue;
-            }
-            let (s0, s1) = (path.cum.get(seg).copied().unwrap_or(0.0), path.cum.get(seg + 1).copied().unwrap_or(path.len));
-            let h = path.alt[seg] as f64 * (1.0 - t as f64) + path.alt[seg + 1] as f64 * t as f64;
-            let sidewalk = dist > path.drive_half;
-            best = Some(RoadHit {
-                path: pi,
-                s: s0 + (s1 - s0) * t,
-                dist,
-                h,
-                kind: if sidewalk { crate::surface::Surface::Concrete } else { crate::surface::Surface::Asphalt },
-                sidewalk,
-                bridge: path.bridge,
-                hidden: path.hidden,
-            });
         }
         best
+    }
+
+    /// The road under a body at altitude `alt`: among the ribbons that could
+    /// be the one under it, the nearest. A deck more than
+    /// [`BRIDGE_CLEARANCE`] above the body is a bridge it is passing under; a
+    /// road on the ground counts up to [`ROAD_CLEARANCE`] above it, so a body
+    /// that has sunk into a seam or a ribbon sits a little proud of the
+    /// terrain still finds the street and climbs out instead of staying under
+    /// it.
+    ///
+    /// This matters where ribbons overlap in plan: a switchback, an overpass
+    /// with a street beneath it, or two roads at a steep junction. Picking the
+    /// nearest centreline alone could take the other road's height, which is
+    /// how a car ends up under the street.
+    pub fn query_for_body(&self, net: &RoadNet, p: [f32; 2], alt: f64) -> Option<RoadHit> {
+        let q = Vec2::from(p);
+        let cx = ((p[0] / self.cell).floor().max(0.0) as usize).min(Self::N - 1);
+        let cy = ((p[1] / self.cell).floor().max(0.0) as usize).min(Self::N - 1);
+        let mut best: Option<(RoadHit, f64)> = None;
+        for &pi in &self.cells[cy * Self::N + cx] {
+            let Some(hit) = self.path_hit(net, pi, q) else { continue };
+            // A tunnel is not an enterable street in v1: its ribbon is not
+            // drawn and it must not stand in for the road above it.
+            if hit.hidden {
+                continue;
+            }
+            let above = hit.h - alt;
+            let limit = if hit.bridge { BRIDGE_CLEARANCE } else { ROAD_CLEARANCE };
+            if above > limit {
+                continue;
+            }
+            // Nearest in plan, with a metre of height error counting as a
+            // couple of metres sideways: where a deck and the street under it
+            // overlap, the body's own level wins; where a lower street is a
+            // few metres to the side, it still wins over a bank above it.
+            let rank = hit.dist as f64 + above.abs() * 2.0;
+            if best.is_none_or(|(_, br)| rank < br) {
+                best = Some((hit, rank));
+            }
+        }
+        best.map(|(hit, _)| hit)
+    }
+
+    /// The nearest point on one path's ribbon to `q`. `None` when `q` lies
+    /// outside the carriageway and its sidewalk band.
+    fn path_hit(&self, net: &RoadNet, pi: u32, q: Vec2) -> Option<RoadHit> {
+        let path = &net.paths[pi as usize];
+        let n = path.local.len().min(path.alt.len());
+        if n < 2 {
+            return None;
+        }
+        let (mut d2, mut t, mut seg) = (f32::INFINITY, 0.0f32, 0usize);
+        for (k, w) in path.local[..n].windows(2).enumerate() {
+            let (a, b) = (Vec2::from(w[0]), Vec2::from(w[1]));
+            let d = b - a;
+            let dd = d.length_squared().max(1e-9);
+            let u = ((q - a).dot(d) / dd).clamp(0.0, 1.0);
+            let dist = (a + d * u - q).length_squared();
+            if dist < d2 {
+                (d2, t, seg) = (dist, u, k);
+            }
+        }
+        let dist = d2.sqrt() * self.unit_m;
+        let max = path.drive_half + if path.walk { SIDEWALK_W } else { 0.0 };
+        if dist > max {
+            return None;
+        }
+        let (s0, s1) = (path.cum.get(seg).copied().unwrap_or(0.0), path.cum.get(seg + 1).copied().unwrap_or(path.len));
+        let h = path.alt[seg] as f64 * (1.0 - t as f64) + path.alt[seg + 1] as f64 * t as f64;
+        let sidewalk = dist > path.drive_half;
+        Some(RoadHit {
+            path: pi,
+            s: s0 + (s1 - s0) * t,
+            dist,
+            h,
+            kind: if sidewalk { crate::surface::Surface::Concrete } else { crate::surface::Surface::Asphalt },
+            sidewalk,
+            bridge: path.bridge,
+            hidden: path.hidden,
+        })
     }
 
     /// Candidate paths in a grid cell (test aid: the grid is not drawn).
@@ -402,14 +459,27 @@ fn water_spans(piece: Vec<[f32; 2]>, vt: &VecTile, um: f32) -> Vec<(Vec<[f32; 2]
 
 /// Remove terrain sampling noise and cap grades on ordinary roads. Both passes
 /// are constrained by distance so sparse map vertices cannot create ramps.
+///
+/// The ends of a piece stay on the ground they were sampled at: a road is cut
+/// into pieces at tile borders and junctions, and each piece that meets the
+/// same node (the continuation in the next tile, the side street, the
+/// opposite arm) must meet it at the same height. Otherwise every join is a
+/// small step in the ribbon that a car feels as a jolt (or, where the step is
+/// bigger, as being buried under the next piece).
 fn grade_profile(ground: &[f32], cum: &[f32], max_grade: f32) -> Vec<f32> {
     let mut z = ground.to_vec();
-    if z.len() < 3 { return z; }
-    let mut smooth = z.clone();
-    for i in 1..z.len() - 1 {
-        smooth[i] = (z[i - 1] + 2.0 * z[i] + z[i + 1]) * 0.25;
+    if z.len() < 3 {
+        return z;
     }
-    z = smooth;
+    // Two light passes: one leaves the terrain's own noise on a street, and
+    // the wheel track feels every bump of it.
+    for _ in 0..2 {
+        let mut smooth = z.clone();
+        for i in 1..z.len() - 1 {
+            smooth[i] = (z[i - 1] + 2.0 * z[i] + z[i + 1]) * 0.25;
+        }
+        z = smooth;
+    }
     for i in 1..z.len() {
         let rise = max_grade * (cum[i] - cum[i - 1]);
         z[i] = z[i].clamp(z[i - 1] - rise, z[i - 1] + rise);
@@ -418,6 +488,25 @@ fn grade_profile(ground: &[f32], cum: &[f32], max_grade: f32) -> Vec<f32> {
         let rise = max_grade * (cum[i + 1] - cum[i]);
         z[i] = z[i].clamp(z[i + 1] - rise, z[i + 1] + rise);
     }
+    // Ease back to the sampled ends over the last few tens of metres, so two
+    // pieces sharing a node meet exactly.
+    let n = z.len();
+    let (a, b) = (ground[0], ground[n - 1]);
+    let len = (cum[n - 1] - cum[0]).max(1.0);
+    let taper = GRADE_END.min(len * 0.5).max(1.0);
+    for i in 0..n {
+        let wa = ((cum[i] - cum[0]) / taper).clamp(0.0, 1.0);
+        let wb = ((cum[n - 1] - cum[i]) / taper).clamp(0.0, 1.0);
+        let (ea, eb) = (1.0 - wa, 1.0 - wb);
+        let s = ea + eb;
+        if s > 1e-6 {
+            let end = (a * ea + b * eb) / s;
+            let k = s.min(1.0);
+            z[i] = z[i] * (1.0 - k) + end * k;
+        }
+    }
+    z[0] = a;
+    z[n - 1] = b;
     z
 }
 
@@ -578,6 +667,10 @@ fn junctions(vt: &VecTile, urban: bool, um: f32) -> Vec<Vec<([f32; 2], NodeInfo)
         out
     }).collect()
 }
+
+/// How far in from a road piece's ends its height eases back to the ground at
+/// the shared node (m).
+const GRADE_END: f32 = 30.0;
 
 /// Spacing, mounting height, pole inset from the ribbon edge and arm length of
 /// the street lights on a road. Must match `lamp_pool` in the shaders.
@@ -1246,6 +1339,8 @@ mod tests {
         assert!(t.hidden);
         assert!(!t.bridge);
         assert_eq!(t.kind, crate::surface::Surface::Asphalt);
+        // A tunnel is not an enterable street in v1: the ground query skips it.
+        assert!(idx.query_for_body(&n, [250.0, 801.0], 0.0).is_none());
     }
 
     #[test]
@@ -1270,5 +1365,49 @@ mod tests {
         assert!((b.dist - 3.0).abs() < 1e-4);
         assert!((b.s - 150.0).abs() < 1e-4);
         assert!((b.h - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn road_index_takes_the_road_at_the_body_height() {
+        // A ground street with a deck directly over it. The diagnostic query
+        // takes the nearest centreline, but a body at street level must find
+        // the street and a body on the deck must find the deck.
+        let n = net(vec![
+            road(&[[100.0, 500.0], [400.0, 500.0]], &[0.0, 0.0], 5.0, false, false, false),
+            road(&[[100.0, 500.0], [400.0, 500.0]], &[8.0, 8.0], 5.0, false, true, false),
+        ]);
+        let idx = RoadIndex::build(&n, 1024.0, 1.0);
+        let low = idx.query_for_body(&n, [250.0, 501.0], 0.0).unwrap();
+        assert!((low.h - 0.0).abs() < 1e-9 && !low.bridge, "under the deck: {low:?}");
+        let high = idx.query_for_body(&n, [250.0, 501.0], 8.0).unwrap();
+        assert!((high.h - 8.0).abs() < 1e-9 && high.bridge, "on the deck: {high:?}");
+
+        // A street on a bank five metres to the side, well above the body,
+        // gives way to the street the body is actually on.
+        let n = net(vec![road(&[[100.0, 500.0], [400.0, 500.0]], &[0.0, 0.0], 5.0, false, false, false), road(&[[100.0, 503.0], [400.0, 503.0]], &[5.0, 5.0], 5.0, false, false, false)]);
+        let idx = RoadIndex::build(&n, 1024.0, 1.0);
+        let hit = idx.query_for_body(&n, [250.0, 503.0], 0.0).unwrap();
+        assert!((hit.h - 0.0).abs() < 1e-9, "the street below the bank: {hit:?}");
+
+        // A car that has sunk under a ribbon still finds it and is lifted out;
+        // a road far overhead (an overpass the map did not mark as one) is not
+        // mistaken for its street.
+        let n = net(vec![road(&[[100.0, 600.0], [400.0, 600.0]], &[3.0, 3.0], 5.0, false, false, false)]);
+        let idx = RoadIndex::build(&n, 1024.0, 1.0);
+        assert!(idx.query_for_body(&n, [250.0, 600.0], 0.0).is_some(), "the sunk body climbs out");
+        assert!(idx.query_for_body(&n, [250.0, 600.0], -4.0).is_none(), "a road seven metres up is not its street");
+    }
+
+    #[test]
+    fn a_road_piece_meets_its_neighbours_at_the_sampled_ground() {
+        // Terrain noise and the grade limit must not move the height at a
+        // node that another piece shares: that is what makes a step at a tile
+        // border or a junction. The old backward pass sank this start by 4 m.
+        let ground = [10.0, 10.0, 10.0, 10.0, 20.0];
+        let cum = [0.0, 9.0, 18.0, 27.0, 36.0];
+        let z = grade_profile(&ground, &cum, 0.12);
+        assert_eq!(z[0], ground[0], "start pinned to the shared node");
+        assert_eq!(z[4], ground[4], "end pinned to the shared node");
+        assert!(z[2] < 15.0, "the interior still smooths the noise: {z:?}");
     }
 }

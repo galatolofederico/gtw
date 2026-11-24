@@ -451,6 +451,20 @@ impl ColMesh {
         self.surfaces(p, f64::MAX, f64::MAX).0
     }
 
+    /// The surface on the vertical through `p` nearest `h` (our frame, before
+    /// the datum): the street at our road's level, not a roof or a bridge deck
+    /// over it. `below` and `above` are how far down and up the mesh surface
+    /// may be and still count as that street (m).
+    fn street(&self, p: DVec3, h: f64, below: f64, above: f64) -> Option<f64> {
+        let (low, high) = self.surfaces(p, h, h + above);
+        let low = low.filter(|b| h - b <= below);
+        let high = high.filter(|a| a - h <= above);
+        match (low, high) {
+            (Some(b), Some(a)) => Some(if h - b <= a - h { b } else { a }),
+            (b, a) => b.or(a),
+        }
+    }
+
     /// The surfaces on the vertical through `p` (heights above our sphere,
     /// before the datum): the highest at or below `ceil`, and the lowest above
     /// it up to `hi`.
@@ -1876,6 +1890,45 @@ impl Photo {
         Some(Streets { photo: self, boxes, tiles, datum })
     }
 
+    /// Height (m above our sphere, datum applied) of the mesh's street at
+    /// lat/lon where our own road is at `road`: the mesh surface nearest the
+    /// road's level, so a roof, a tree or a deck over the street is passed by.
+    /// `None` outside the zone, in a destroyed building's cut, or where the
+    /// mesh has no surface near that level (so our own road stays in charge).
+    ///
+    /// This is the ground query's way of knowing where the street that is
+    /// actually drawn is: inside a photorealistic zone our ribbons are hidden
+    /// under the mesh, and standing on the ribbon's height could leave the
+    /// player buried in the visible street. A bridge deck (`bridge`) only
+    /// matches a surface at its own level: the street under the bridge must
+    /// not pull the deck, and anything driving on it, down.
+    pub fn street(&self, lat: f64, lon: f64, road: f64, bridge: bool) -> Option<f64> {
+        if self.col.is_empty() {
+            return None;
+        }
+        let p = geo::lla_to_pos(lat, lon, 0.0);
+        if !self.covers(p) {
+            return None;
+        }
+        let datum = self.datum?;
+        // A destroyed building is not there any more: our own ground is.
+        if self.cuts.iter().any(|c| c.contains(p)) {
+            return None;
+        }
+        let h = road - datum;
+        let (below, above) = if bridge { (2.0, 3.0) } else { (4.0, 3.0) };
+        let mut best: Option<(f64, f64)> = None;
+        for &i in &self.col {
+            let State::Ready(l) = &self.nodes[i as usize].state else { continue };
+            let Some(z) = l.col.street(p, h, below, above) else { continue };
+            let err = (z - h).abs();
+            if best.is_none_or(|(e, _)| err < e) {
+                best = Some((err, z));
+            }
+        }
+        best.map(|(_, z)| z + datum)
+    }
+
     /// Whether our own scenery at lat/lon is hidden under the mesh.
     pub fn hides(&self, lat: f64, lon: f64) -> bool {
         self.ground(lat, lon, None).is_some()
@@ -2266,6 +2319,30 @@ mod tests {
         let h = m.top(o + e * 1.0 + n * 2.0).unwrap();
         assert!((h - 3.0).abs() < 0.01, "{h}");
         assert!(m.top(o + e * 7.0).is_none());
+    }
+
+    #[test]
+    fn street_height_is_the_surface_near_the_road() {
+        // A mesh with a street at 0, an awning 2 m over it and a roof 30 m up.
+        let o = geo::lla_to_pos(0.6, -2.1, 0.0);
+        let (e, n, u) = geo::enu(o);
+        let (mut pos, mut idx) = (Vec::new(), Vec::new());
+        for z in [0.0, 2.0, 30.0] {
+            let base = pos.len() as u32;
+            for &(x, y) in &[(-8.0, -8.0), (8.0, -8.0), (8.0, 8.0), (-8.0, 8.0)] {
+                pos.push((e * x + n * y + u * z).as_vec3());
+            }
+            idx.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        let m = ColMesh::build(o, &pos, &idx);
+        let at = o + e * 1.0 + n * 2.0;
+        assert!((m.street(at, 0.0, 4.0, 3.0).unwrap() - 0.0).abs() < 0.01, "the street, not the awning");
+        assert!((m.street(at, 2.4, 4.0, 3.0).unwrap() - 2.0).abs() < 0.01, "the nearest surface to the road");
+        assert!((m.street(at, 30.0, 4.0, 3.0).unwrap() - 30.0).abs() < 0.01, "on the roof, the roof");
+        assert!(m.street(at, 60.0, 4.0, 3.0).is_none(), "nothing near that level");
+        // A bridge deck only matches the mesh at its own level, not the
+        // street five metres below it.
+        assert!(m.street(at, 5.0, 2.0, 3.0).is_none(), "the street below is not the deck");
     }
 
     /// Decodes a tile saved by hand (TILE3D=path.glb); never part of a normal run.

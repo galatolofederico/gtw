@@ -11,6 +11,13 @@
 //! synthetic flat, slope, water and wall worlds. The tuning table covers the
 //! eight existing traffic models (`cars::N_MODELS`), and damage is persistent
 //! for the life of the car.
+//!
+//! The ground itself is noisy geometry: a ribbon seam, a junction pad, a kerb,
+//! photogrammetry in the 3D tiles. The body rides on the sample under its own
+//! centre, wheel samples only shade the slope, street slopes are held to a
+//! plausible grade there, and the ride height follows the surface like a
+//! suspension rather than snapping to it. A wheel over a hole or a seam
+//! therefore cannot bury or beach the car.
 
 use crate::cars::{self, CAR_LEN};
 use crate::character;
@@ -45,6 +52,14 @@ pub const CAR_HEALTH_ENABLED: bool = false;
 const RESTITUTION: f64 = 0.15;
 /// The steepest slope the tyres hold (degrees); beyond it the body slides.
 pub const SLOPE_LIMIT: f64 = 55.0;
+/// The fastest the body rises onto the street (m/s): a kerb, a seam in a
+/// ribbon or a junction pad is a short ramp rather than a teleport.
+const RIDE_UP: f64 = 4.0;
+/// … and settles into a dip (m/s).
+const RIDE_DOWN: f64 = 7.0;
+/// The steepest grade a street is built to (~19°). Driving may rise along it
+/// as fast as the wheels cover ground; anything steeper is local geometry.
+const STREET_GRADE: f64 = 0.35;
 /// Top gear.
 const TOP_GEAR: i8 = 5;
 /// Engine speed to change up (rpm).
@@ -542,7 +557,17 @@ impl Vehicle {
                 // The ground fell away: carry on through the air.
                 self.grounded = false;
             } else {
-                self.pos = up2 * (geo::R + new_h);
+                // Follow the street, but as a suspension, not a snap: a kerb,
+                // a junction pad, a paved seam or the 3D mesh's own noise is a
+                // short ramp instead of a jolt. A body that has sunk into a
+                // seam (the sample is above it) is lifted back out. A grade
+                // the car is driving along is followed as fast as it covers
+                // ground, so it never trails below a climb.
+                let now = self.pos.length();
+                let grade = step.length() * STREET_GRADE;
+                let rise = RIDE_UP * h + grade;
+                let sink = RIDE_DOWN * h + grade;
+                self.pos = up2 * (now + (geo::R + new_h - now).clamp(-sink, rise));
                 self.vel = fwd * v_long + right * v_lat;
                 self.grounded = true;
             }
@@ -708,20 +733,31 @@ impl Vehicle {
         }
     }
 
-    /// Ground at the four wheel contact points: average height, normal, water.
+    /// Ground under the body and at the four wheel contact points: height,
+    /// normal, water.
+    ///
+    /// The body's own point is the anchor: the wheels report how the street
+    /// tilts, but a wheel hanging over a kerb, a gutter, a hole in the mesh or
+    /// a seam in the ribbon cannot drag the body down or tilt it into the
+    /// "too steep" state. A wheel whose sample is missing (a tile not in yet)
+    /// takes the centre's height rather than throwing the whole sample away.
     fn sample<W: WorldQuery>(&self, world: &W) -> Option<GroundSample> {
         let up = self.up();
         let fwd = self.forward();
         let right = fwd.cross(up).normalize_or_zero();
+        let centre = world.surface_at(self.pos)?;
         let hl = self.len() * 0.36;
         let hw = self.width() * 0.42;
         let pts = [self.pos + fwd * hl + right * hw, self.pos + fwd * hl - right * hw, self.pos - fwd * hl + right * hw, self.pos - fwd * hl - right * hw];
-        let mut hs = [0.0f64; 4];
+        // The most a wheel may sit above or below the body's own point before
+        // its sample is treated as geometry noise rather than a slope (m).
+        const EDGE: f64 = 1.25;
+        let mut hs = [centre.h; 4];
         let mut water_wheels = 0u8;
-        let mut kind = Surface::Grass;
+        let mut kind = centre.kind;
         for (i, p) in pts.iter().enumerate() {
-            let s = world.surface_at(*p)?;
-            hs[i] = s.h;
+            let Some(s) = world.surface_at(*p) else { continue };
+            hs[i] = s.h.clamp(centre.h - EDGE, centre.h + EDGE);
             if s.blocked() {
                 water_wheels += 1;
             }
@@ -729,11 +765,21 @@ impl Vehicle {
                 kind = s.kind;
             }
         }
-        let center_water = world.surface_at(self.pos).is_some_and(|s| s.blocked());
-        let water = water_wheels >= 2 || center_water;
-        let h = hs.iter().sum::<f64>() * 0.25;
-        let dh_f = (hs[0] + hs[1] - hs[2] - hs[3]) * 0.5;
-        let dh_r = (hs[0] + hs[2] - hs[1] - hs[3]) * 0.5;
+        let water = centre.blocked() || water_wheels >= 2;
+        // On a street, trust the point under the body: a ribbon seam, a kerb,
+        // a gutter or a hole in the 3D mesh at one wheel must not sink the
+        // body or tilt it into the "too steep to drive" state. Off it, blend
+        // the body point with the wheel plane so a real slope is followed.
+        let wheel_mean = hs.iter().sum::<f64>() * 0.25;
+        let h = if centre.road { centre.h } else { 0.5 * centre.h + 0.5 * wheel_mean };
+        let mut dh_f = (hs[0] + hs[1] - hs[2] - hs[3]) * 0.5;
+        let mut dh_r = (hs[0] + hs[2] - hs[1] - hs[3]) * 0.5;
+        if centre.road {
+            // The steepest grade a street is built to (~19°). Rails, kerbs
+            // and mesh noise beyond that are local geometry, not the street.
+            dh_f = dh_f.clamp(-STREET_GRADE * 2.0 * hl, STREET_GRADE * 2.0 * hl);
+            dh_r = dh_r.clamp(-STREET_GRADE * 2.0 * hw, STREET_GRADE * 2.0 * hw);
+        }
         let normal = (up - fwd * (dh_f / (2.0 * hl).max(0.1)) - right * (dh_r / (2.0 * hw).max(0.1))).normalize_or(up);
         Some(GroundSample { h, normal, water, kind })
     }
@@ -838,6 +884,30 @@ mod tests {
     impl WorldQuery for FlatWorld {
         fn surface_at(&self, _p: DVec3) -> Option<SurfaceHit> {
             Some(SurfaceHit { h: 0.0, kind: self.0, water: self.0 == Surface::Water, road: false, sidewalk: false, bridge: false })
+        }
+        fn building_push_sphere(&self, _p: DVec3, _r: f64) -> Option<DVec3> {
+            None
+        }
+        fn building_push_box(&self, _p: DVec3, _h: [f64; 2], _y: f64) -> Option<DVec3> {
+            None
+        }
+        fn tree_push_sphere(&self, _p: DVec3, _r: f64) -> Option<DVec3> {
+            None
+        }
+        fn tree_push_box(&self, _p: DVec3, _h: [f64; 2], _y: f64) -> Option<DVec3> {
+            None
+        }
+    }
+
+    /// A street whose height varies with east (x) and north (z) metres from
+    /// the origin: steps, holes and kerbs for the ground-sampling tests.
+    struct ShapeWorld(fn(f64, f64) -> f64);
+
+    impl WorldQuery for ShapeWorld {
+        fn surface_at(&self, p: DVec3) -> Option<SurfaceHit> {
+            let (east, north, _) = geo::enu(origin());
+            let d = p - origin();
+            Some(SurfaceHit { h: (self.0)(d.dot(east), d.dot(north)), kind: Surface::Asphalt, water: false, road: true, sidewalk: false, bridge: false })
         }
         fn building_push_sphere(&self, _p: DVec3, _r: f64) -> Option<DVec3> {
             None
@@ -1086,6 +1156,79 @@ mod tests {
         assert!(s.water, "the car is in water");
         assert!(s.speed < 2.0, "water drag stops it: {:.2}", s.speed);
         assert_eq!(boat.damage.engine, 0.0);
+    }
+
+    #[test]
+    fn a_street_step_is_a_ramp_not_a_teleport() {
+        // A half-metre rise across the street, as a junction pad or a seam in
+        // the ribbons can make. The car must climb it smoothly, keep its
+        // speed and stay grounded instead of being left under it.
+        let w = ShapeWorld(|x, _| if x > 6.0 { 0.5 } else { 0.0 });
+        let mut v = Vehicle::spawn(0, [0.5; 3], origin(), std::f64::consts::FRAC_PI_2);
+        v.grounded = true;
+        v.spawn_grace = 0.0;
+        let (east, _, _) = geo::enu(origin());
+        let c = VehicleControls { throttle: 0.7, ..Default::default() };
+        let mut last = v.pos.length() - geo::R;
+        let mut max_rise = 0.0f64;
+        let mut lowest = 0.0f64;
+        let mut air = 0;
+        for _ in 0..360 {
+            let s = v.step(1.0 / 120.0, &c, &w, &SurfaceWeather::default(), &[]);
+            let feet = v.pos.length() - geo::R;
+            let ground = if (v.pos - origin()).dot(east) > 6.0 { 0.5 } else { 0.0 };
+            max_rise = max_rise.max(feet - last);
+            lowest = lowest.min(feet - ground);
+            air += usize::from(!s.grounded);
+            last = feet;
+        }
+        assert!(v.speed() > 6.0, "the step does not stop it: {:.1} m/s", v.speed());
+        assert!(air <= 2, "it stays on the street: {air} airborne steps");
+        assert!(max_rise < 0.15, "no vertical snap: {max_rise:.3} m in a step");
+        assert!(lowest > -0.6, "it never disappears under the street: {lowest:.2} m");
+    }
+
+    #[test]
+    fn one_wheel_over_a_hole_does_not_sink_or_stall_the_car() {
+        // A four-metre drop under the right-hand wheels only. The body rides
+        // on the street under its own centre; the hole must not pull it down
+        // or tilt it past the slope limit, which used to cut the engine.
+        let w = ShapeWorld(|_, z| if z < -0.4 { -4.0 } else { 0.0 });
+        let mut v = Vehicle::spawn(0, [0.5; 3], origin(), std::f64::consts::FRAC_PI_2);
+        v.grounded = true;
+        v.spawn_grace = 0.0;
+        let c = VehicleControls { throttle: 0.7, ..Default::default() };
+        let mut lowest = 0.0f64;
+        let mut air = 0;
+        for _ in 0..360 {
+            let s = v.step(1.0 / 120.0, &c, &w, &SurfaceWeather::default(), &[]);
+            lowest = lowest.min(v.pos.length() - geo::R);
+            air += usize::from(!s.grounded);
+        }
+        assert!(air == 0, "the hole does not throw it into the air: {air}");
+        assert!(v.speed() > 6.0, "it keeps driving: {:.1} m/s", v.speed());
+        assert!(lowest > -0.1, "the body stays on the street: {lowest:.2} m");
+    }
+
+    #[test]
+    fn a_body_below_the_street_climbs_back_out() {
+        // The car has sunk under a ribbon (a seam or a bad tile): the ground
+        // query still finds the street above it, and the ride brings it back
+        // up instead of leaving it buried.
+        let w = ShapeWorld(|_, _| 0.0);
+        let mut v = Vehicle::spawn(0, [0.5; 3], origin(), std::f64::consts::FRAC_PI_2);
+        v.pos -= v.up() * 2.0;
+        v.grounded = true;
+        v.spawn_grace = 0.0;
+        let c = VehicleControls::default();
+        let mut lowest = 0.0f64;
+        for _ in 0..240 {
+            v.step(1.0 / 120.0, &c, &w, &SurfaceWeather::default(), &[]);
+            lowest = lowest.min(v.pos.length() - geo::R);
+        }
+        assert!(lowest > -2.001, "it never falls further: {lowest:.2} m");
+        assert!(v.pos.length() - geo::R > -0.01, "it is back on the street: {:.2} m", v.pos.length() - geo::R);
+        assert!(v.grounded);
     }
 
     #[test]
