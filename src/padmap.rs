@@ -189,6 +189,22 @@ const LAYOUT: &[(&str, Chord)] = {
 /// On a rocket these do something else (and are not listed on their own).
 const ROCKET: [(&str, &str); 3] = [("ap", "autoland"), ("master_arm", "engines"), ("target_lock", "stage")];
 
+/// The pad on foot: both sticks, and a button for each foot action. Shown in
+/// Settings › Controls › On foot; the pad's flying layout is unchanged.
+pub const FOOT_LAYOUT: &[(&str, Chord)] = {
+    use PadBtn::*;
+    &[("sprint", b(RB)), ("jump", b(A)), ("interact", b(X)), ("first_person", b(R3))]
+};
+
+/// What the pad does on foot, as the controls list shows it: (input, does).
+pub fn foot_rows() -> Vec<(String, &'static str)> {
+    let mut rows = vec![("LS".to_string(), "move"), ("RS".to_string(), "look around")];
+    for &(id, c) in FOOT_LAYOUT {
+        rows.push((c.spec(), label(id)));
+    }
+    rows
+}
+
 /// Keys left off the pad: the stick and pedals are axes on it, and Menu pauses.
 const NOT_ON_PAD: [&str; 7] = ["pitch_down", "pitch_up", "roll_left", "roll_right", "rudder_left", "rudder_right", "pause_menu"];
 
@@ -245,7 +261,7 @@ pub fn label(id: &str) -> &'static str {
         "master_arm" => t!("gamepad.master_arm_rocket_engines"),
         "target_lock" => t!("gamepad.lock_target_rocket_staging"),
         "fire_missile" => t!("gamepad.fire_missile"),
-        _ => crate::bind::ACTIONS.iter().find(|a| a.id == id).map(|a| a.label()).unwrap_or("?"),
+        _ => crate::bind::every().find(|a| a.id == id).map(|a| a.label()).unwrap_or("?"),
     }
 }
 
@@ -869,8 +885,29 @@ mod tests {
     }
 
     #[test]
-    fn moving_bindings() {
-        let mut m = PadMap::default();
+    fn the_foot_layout_has_its_own_buttons() {
+        // Every foot action is on a different button, and none takes the pause.
+        let mut seen = Vec::new();
+        for &(id, c) in FOOT_LAYOUT {
+            assert!(!seen.contains(&c), "{id} shares {c:?}");
+            assert_ne!(c, PAUSE);
+            seen.push(c);
+            assert!(crate::bind::FOOT_ACTIONS.iter().any(|a| a.id == id), "{id} is a foot action");
+            assert_ne!(label(id), "?", "{id} has a label");
+        }
+        // Flying and walking do not take the same button for their own.
+        for &(id, c) in FOOT_LAYOUT {
+            let flying = crate::bind::ACTIONS.iter().any(|a| a.id == id);
+            assert!(!flying, "the flight layout leaves {id} to the foot layout");
+            assert_ne!(PadMap::default().chord(id), Some(c), "{id} differs from the pad's flight layout");
+        }
+        let rows = foot_rows();
+        assert_eq!(rows[0], ("LS".to_string(), "move"));
+        assert!(rows.iter().any(|(k, what)| k == "A" && *what == label("jump")));
+    }
+
+    #[test]
+    fn moving_bindings() {        let mut m = PadMap::default();
         // Gear onto Y + LB takes it from the speedbrake.
         let lost = m.set("gear", y(LB));
         assert_eq!(lost.len(), 1);

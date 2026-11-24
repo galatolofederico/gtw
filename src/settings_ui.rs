@@ -15,7 +15,7 @@
 //! Google key (gmaps.rs).
 use crate::menu::{self, ACCENT, DIM, TEXT};
 use crate::padui::{self, Hint};
-use crate::{bind, geo, gmaps, i18n, mp, mp_proto, padmap, t, tiles3d, Game};
+use crate::{avatar, bind, geo, gmaps, i18n, mp, mp_proto, padmap, t, tiles3d, Game};
 use egui::{pos2, vec2, Align, Align2, Color32, Layout, Painter, Pos2, Rect, RichText, Sense, Stroke, Ui};
 
 /// The widest the content column gets, however wide the window.
@@ -381,6 +381,19 @@ impl Game {
             row(ui, t!("settings.arcade_mode"), t!("settings.missiles_boost_on_any_aircraft"), |ui| {
                 menu::switch(ui, &mut self.arcade);
             });
+            row(ui, t!("settings.ground_first_person"), t!("settings.the_view_on_foot_starts"), |ui| {
+                menu::switch(ui, &mut self.ground_first_person);
+            });
+            row(ui, t!("settings.avatar_style"), "", |ui| {
+                menu::segments(ui, |ui| {
+                    for style in 0..avatar::STYLES as u8 {
+                        menu::seg(ui, &mut self.avatar_style, style, &format!("{}", style + 1));
+                    }
+                });
+            });
+            row(ui, t!("settings.autosave"), t!("settings.save_your_place_in_the"), |ui| {
+                menu::switch(ui, &mut self.autosave);
+            });
         });
         card(ui, t!("settings.air_traffic"), |ui| {
             row(ui, t!("settings.live_air_traffic"), t!("settings.real_aircraft_around_you_from"), |ui| {
@@ -466,6 +479,27 @@ impl Game {
             row(ui, t!("settings.mouse_look_speed"), t!("settings.dragging_to_look_around"), |ui| {
                 ui.add(egui::Slider::new(&mut self.look_sens, 0.25..=3.0).logarithmic(true).custom_formatter(|v, _| format!("{v:.2}×")));
             });
+        });
+        // Which controller's keys are being edited: the same physical key
+        // means different things on foot, in a car and in flight.
+        card(ui, t!("settings.controls_context"), |ui| {
+            menu::segments(ui, |ui| {
+                for ctx in bind::Context::ALL {
+                    menu::seg(ui, &mut self.bind_ctx, ctx, ctx.label());
+                }
+            });
+            note(ui, t!("settings.controls_context_hint"));
+            if self.bind_ctx == bind::Context::Foot {
+                ui.add_space(6.0);
+                // The pad's own on-foot layout.
+                bind_grid(ui, "pad_foot", |ui| {
+                    for (k, w) in padmap::foot_rows() {
+                        ui.label(RichText::new(k).font(menu::bold(12.0)).color(ACCENT));
+                        ui.label(RichText::new(w).font(menu::caption()).color(TEXT));
+                        ui.end_row();
+                    }
+                });
+            }
         });
         card(ui, t!("settings.connected_devices"), |ui| self.binds_devices(ui));
         // One search over every bindings table below (and the key reference).
@@ -1019,11 +1053,12 @@ impl Game {
     }
 
     fn binds_buttons(&mut self, ui: &mut Ui, words: &[String]) {
-        use bind::{Capture, ACTIONS};
+        use bind::Capture;
         let busy = self.binds.capture.is_some();
         let cw = ui.available_width();
+        let ctx = self.bind_ctx;
+        let shown: Vec<_> = bind::actions_in(ctx).filter(|a| menu::matches(words, &[a.label(), a.id, &self.binds.describe_button(a.id).unwrap_or_default()])).collect();
         bind_grid(ui, "bind_buttons", |ui| {
-            let shown: Vec<_> = ACTIONS.iter().filter(|a| menu::matches(words, &[a.label(), a.id, &self.binds.describe_button(a.id).unwrap_or_default()])).collect();
             for a in shown {
                 grid_label(ui, a.label(), cw);
                 binding_cell(ui, self.binds.describe_button(a.id), false);
@@ -1042,16 +1077,18 @@ impl Game {
     }
 
     fn binds_keys(&mut self, ui: &mut Ui, words: &[String]) {
-        use bind::{Capture, ACTIONS};
+        use bind::Capture;
         let busy = self.binds.capture.is_some();
         let cw = ui.available_width();
+        let ctx = self.bind_ctx;
+        let shown: Vec<_> = bind::actions_in(ctx).filter(|a| a.keyboard).collect();
         bind_grid(ui, "bind_keys", |ui| {
-            for a in ACTIONS.iter().filter(|a| a.keyboard) {
+            for a in shown {
                 let moved = self.binds.keys.contains_key(a.id);
-                let keys = if a.id == "tail_view" && !moved && self.binds.map_key(winit::keyboard::KeyCode::IntlBackslash) == Some(a.key) {
+                let keys = if a.id == "tail_view" && !moved && self.binds.map_key(ctx, winit::keyboard::KeyCode::IntlBackslash) == Some(a.key) {
                     Some(i18n::tr("text.controls.f6_iso_key").to_string())
                 } else {
-                    self.binds.key_of(a).map(bind::key_name)
+                    self.binds.key_of(ctx, a).map(bind::key_name)
                 };
                 if !menu::matches(words, &[a.label(), a.id, keys.as_deref().unwrap_or_default()]) {
                     continue;
@@ -1064,7 +1101,7 @@ impl Game {
                         self.keys.clear();
                     }
                     if moved && ui.button(t!("settings.default")).clicked() {
-                        self.binds.reset_key(a.id);
+                        self.binds.reset_key(ctx, a.id);
                         self.keys.clear();
                     }
                 });
@@ -1265,7 +1302,7 @@ mod tests {
                             bind_grid(ui, "bind_keys", |ui| {
                                 for a in bind::ACTIONS.iter().filter(|a| a.keyboard) {
                                     grid_label(ui, a.label(), cw);
-                                    let keys = binds.key_of(a).map(bind::key_name);
+                                    let keys = binds.key_of(bind::Context::Flight, a).map(bind::key_name);
                                     binding_cell(ui, keys, false);
                                     ui.horizontal(|ui| {
                                         let _ = ui.button(t!("settings.change"));

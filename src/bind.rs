@@ -95,6 +95,42 @@ impl Action {
     }
 }
 
+/// Which controller the player is using. A key can mean different things in
+/// each: W pitches down in flight, walks forward on foot and opens the
+/// throttle in a car.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub enum Context {
+    Foot,
+    Car,
+    Flight,
+}
+
+impl Context {
+    pub const ALL: [Context; 3] = [Context::Foot, Context::Car, Context::Flight];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Context::Foot => "foot",
+            Context::Car => "car",
+            Context::Flight => "flight",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        use crate::i18n::t;
+        match self {
+            Context::Foot => t!("settings.controls_foot"),
+            Context::Car => t!("settings.controls_car"),
+            Context::Flight => t!("settings.controls_flight"),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn parse(s: &str) -> Option<Context> {
+        Context::ALL.into_iter().find(|c| c.name() == s.trim().to_lowercase())
+    }
+}
+
 const fn act(id: &'static str, key: KeyCode) -> Action {
     Action { id, key, keyboard: true }
 }
@@ -163,8 +199,78 @@ pub const ACTIONS: &[Action] = &[
     Action { id: "flight_panel", key: KeyCode::Tab, keyboard: false },
 ];
 
-fn action(id: &str) -> Option<&'static Action> {
+/// On foot: move, look, sprint, jump, interact and the first-person toggle.
+/// Camera, HUD, minimap, pause and the rest are global and work here too.
+pub const FOOT_ACTIONS: &[Action] = &[
+    act("move_forward", KeyCode::KeyW),
+    act("move_back", KeyCode::KeyS),
+    act("move_left", KeyCode::KeyA),
+    act("move_right", KeyCode::KeyD),
+    act("look_up", KeyCode::ArrowUp),
+    act("look_down", KeyCode::ArrowDown),
+    act("look_left", KeyCode::ArrowLeft),
+    act("look_right", KeyCode::ArrowRight),
+    act("sprint", KeyCode::ShiftLeft),
+    act("jump", KeyCode::Space),
+    act("interact", KeyCode::KeyE),
+    act("first_person", KeyCode::KeyV),
+];
+
+/// In a car: the groundwork for phase 3's drivable vehicles. The same keys as
+/// walking and flying, but a different action in this context.
+pub const CAR_ACTIONS: &[Action] = &[
+    act("car_throttle", KeyCode::KeyW),
+    act("car_brake", KeyCode::KeyS),
+    act("car_steer_left", KeyCode::KeyA),
+    act("car_steer_right", KeyCode::KeyD),
+    act("car_handbrake", KeyCode::Space),
+    act("car_enter_exit", KeyCode::KeyE),
+];
+
+/// Actions available in every context (camera, HUD, pause, screenshots…).
+pub const GLOBAL: &[&str] = &[
+    "camera", "hud", "minimap", "full_map", "pause", "pause_menu", "screenshot", "sound", "respawn", "goto", "time_forward", "time_back", "clouds_more", "clouds_less", "taa",
+];
+
+/// The actions of one context (before the global ones).
+pub fn context_actions(ctx: Context) -> &'static [Action] {
+    match ctx {
+        Context::Foot => FOOT_ACTIONS,
+        Context::Car => CAR_ACTIONS,
+        Context::Flight => ACTIONS,
+    }
+}
+
+/// Every flight, foot and car action, once each.
+pub fn every() -> impl Iterator<Item = &'static Action> {
+    ACTIONS.iter().chain(FOOT_ACTIONS).chain(CAR_ACTIONS)
+}
+
+pub fn is_global(id: &str) -> bool {
+    GLOBAL.contains(&id)
+}
+
+/// Every action that can be used in `ctx`: the context's own, then the global
+/// ones from the flight table.
+pub fn actions_in(ctx: Context) -> impl Iterator<Item = &'static Action> {
+    let own = context_actions(ctx).iter().filter(move |a| ctx == Context::Flight || !is_global(a.id));
+    let globals = ACTIONS.iter().filter(move |a| ctx != Context::Flight && is_global(a.id));
+    own.chain(globals)
+}
+
+/// The action with this id in `ctx`, if it is available there.
+pub fn action_in(ctx: Context, id: &str) -> Option<&'static Action> {
+    actions_in(ctx).find(|a| a.id == id)
+}
+
+/// The flight action with this id (the cockpit code's table).
+pub fn action(id: &str) -> Option<&'static Action> {
     ACTIONS.iter().find(|a| a.id == id)
+}
+
+/// The flight action with this id, or any table's, for loading saved keys.
+fn any_action(id: &str) -> Option<&'static Action> {
+    every().find(|a| a.id == id)
 }
 
 /// A device: gilrs's UUID (stable across runs and ports) and its name.
@@ -215,8 +321,8 @@ pub struct Bindings {
     pub buttons: HashMap<&'static str, ButtonBind>,
     /// action id -> the key it has moved to (None: no key)
     pub keys: HashMap<&'static str, Option<KeyCode>>,
-    /// incoming key -> the key it stands for (None: does nothing now)
-    remap: HashMap<KeyCode, Option<KeyCode>>,
+    /// incoming key -> the key it stands for (None: does nothing now), per context
+    remap: [HashMap<KeyCode, Option<KeyCode>>; 3],
     /// the devices' axes and buttons as they are now
     axis_now: HashMap<(Uuid, u32), f32>,
     button_now: HashMap<(Uuid, u32), bool>,
@@ -236,54 +342,69 @@ pub struct Bindings {
 impl Bindings {
     // ------------------------------------------------------------ the keyboard
 
-    /// The key an action is on now.
-    pub fn key_of(&self, a: &Action) -> Option<KeyCode> {
+    /// The key an action is on now, in `ctx`.
+    pub fn key_of(&self, ctx: Context, a: &Action) -> Option<KeyCode> {
+        if !is_global(a.id) && !context_actions(ctx).iter().any(|x| x.id == a.id) {
+            return None;
+        }
         self.keys.get(a.id).copied().unwrap_or(Some(a.key))
     }
 
-    /// An incoming key as the game should see it: the key it stands for,
-    /// itself when it has not been touched, None when it does nothing now.
-    pub fn map_key(&self, k: KeyCode) -> Option<KeyCode> {
-        if let Some(mapped) = self.remap.get(&k) {
+    /// The action a physical key does in `ctx`, if any.
+    #[allow(dead_code)]
+    pub fn action_at(&self, ctx: Context, k: KeyCode) -> Option<&'static Action> {
+        actions_in(ctx).find(|a| self.key_of(ctx, a) == Some(k))
+    }
+
+    /// An incoming key as the game should see it in `ctx`: the key it stands
+    /// for, itself when it has not been touched, None when it does nothing.
+    pub fn map_key(&self, ctx: Context, k: KeyCode) -> Option<KeyCode> {
+        if let Some(mapped) = self.remap[ctx as usize].get(&k) {
             return *mapped;
         }
         // The extra key beside left Shift on ISO keyboards is within reach of ZQSD.
-        if k == KeyCode::IntlBackslash && !self.keys.contains_key("tail_view") {
+        if ctx == Context::Flight && k == KeyCode::IntlBackslash && !self.keys.contains_key("tail_view") {
             return Some(KeyCode::F6);
         }
         Some(k)
     }
 
-    /// Moves an action to a key; any other action on that key loses it.
-    pub fn set_key(&mut self, id: &'static str, k: KeyCode) {
-        for a in ACTIONS.iter().filter(|a| a.keyboard && a.id != id) {
-            if self.key_of(a) == Some(k) {
+    /// Moves an action to a key in `ctx`; any other action on that key loses it.
+    pub fn set_key(&mut self, ctx: Context, id: &'static str, k: KeyCode) {
+        for a in actions_in(ctx).filter(|a| a.keyboard && a.id != id) {
+            if self.keys.get(a.id).copied().flatten().unwrap_or(a.key) == k {
                 self.keys.insert(a.id, None);
             }
         }
         self.keys.insert(id, Some(k));
-        self.tidy();
+        for c in Context::ALL {
+            self.tidy(c);
+        }
     }
 
-    pub fn reset_key(&mut self, id: &str) {
+    pub fn reset_key(&mut self, _ctx: Context, id: &str) {
         self.keys.remove(id);
-        self.tidy();
+        for c in Context::ALL {
+            self.tidy(c);
+        }
     }
 
     /// Drops what is back to its default, and works the translation out again.
-    fn tidy(&mut self) {
-        self.keys.retain(|id, k| action(id).is_some_and(|a| *k != Some(a.key)));
-        self.remap.clear();
-        for a in ACTIONS.iter().filter(|a| a.keyboard) {
+    fn tidy(&mut self, ctx: Context) {
+        self.keys.retain(|id, k| any_action(id).is_some_and(|a| *k != Some(a.key)));
+        let map = &mut self.remap[ctx as usize];
+        map.clear();
+        let own: Vec<&'static Action> = actions_in(ctx).filter(|a| a.keyboard).collect();
+        for a in &own {
+            // Its own key no longer does it…
             if self.keys.contains_key(a.id) {
-                // Its own key no longer does it…
-                self.remap.entry(a.key).or_insert(None);
+                map.entry(a.key).or_insert(None);
             }
         }
-        for a in ACTIONS.iter().filter(|a| a.keyboard) {
+        for a in &own {
             if let Some(Some(k)) = self.keys.get(a.id) {
                 // …the new one does.
-                self.remap.insert(*k, Some(a.key));
+                map.insert(*k, Some(a.key));
             }
         }
     }
@@ -377,7 +498,7 @@ impl Bindings {
     fn read(&mut self, j: &serde_json::Value) {
         if let Some(m) = j["keys"].as_object() {
             for (id, k) in m {
-                if let Some(a) = action(id).filter(|a| a.keyboard) {
+                if let Some(a) = any_action(id).filter(|a| a.keyboard) {
                     self.keys.insert(a.id, k.as_str().and_then(key_from_name));
                 }
             }
@@ -393,7 +514,7 @@ impl Bindings {
             }
         }
         for v in j["buttons"].as_array().into_iter().flatten() {
-            if let (Some(a), Some((dev, name, code))) = (v["action"].as_str().and_then(action), dev(v)) {
+            if let (Some(a), Some((dev, name, code))) = (v["action"].as_str().and_then(any_action), dev(v)) {
                 self.buttons.insert(a.id, ButtonBind { dev, name, code });
             }
         }
@@ -403,7 +524,9 @@ impl Bindings {
                 self.auto_done.insert(u);
             }
         }
-        self.tidy();
+        for ctx in Context::ALL {
+            self.tidy(ctx);
+        }
     }
 
     fn json(&self) -> serde_json::Value {
@@ -648,53 +771,56 @@ mod tests {
     #[test]
     fn canopy_and_master_arm_rebind_independently() {
         let mut b = Bindings::default();
+        let f = Context::Flight;
         let canopy = action("canopy").unwrap();
         let arm = action("master_arm").unwrap();
-        assert_ne!(b.key_of(canopy), b.key_of(arm));
-        b.set_key("canopy", KeyCode::Digit7);
-        assert_eq!(b.map_key(KeyCode::Digit7), Some(canopy.key));
-        assert_eq!(b.key_of(arm), Some(arm.key));
-        assert_eq!(b.map_key(arm.key), Some(arm.key));
-        b.set_key("master_arm", KeyCode::Digit8);
-        assert_eq!(b.map_key(KeyCode::Digit8), Some(arm.key));
-        assert_eq!(b.map_key(KeyCode::Digit7), Some(canopy.key));
+        assert_ne!(b.key_of(f, canopy), b.key_of(f, arm));
+        b.set_key(f, "canopy", KeyCode::Digit7);
+        assert_eq!(b.map_key(f, KeyCode::Digit7), Some(canopy.key));
+        assert_eq!(b.key_of(f, arm), Some(arm.key));
+        assert_eq!(b.map_key(f, arm.key), Some(arm.key));
+        b.set_key(f, "master_arm", KeyCode::Digit8);
+        assert_eq!(b.map_key(f, KeyCode::Digit8), Some(arm.key));
+        assert_eq!(b.map_key(f, KeyCode::Digit7), Some(canopy.key));
     }
 
     #[test]
     fn rear_camera_iso_shortcut_respects_custom_bindings() {
         use KeyCode::{F6, F9, IntlBackslash, KeyL};
+        let f = Context::Flight;
         let mut b = Bindings::default();
-        assert_eq!(b.map_key(F6), Some(F6));
-        assert_eq!(b.map_key(IntlBackslash), Some(F6));
-        b.set_key("gear", IntlBackslash);
-        assert_eq!(b.map_key(IntlBackslash), Some(KeyL));
-        b.reset_key("gear");
-        b.set_key("tail_view", F9);
-        assert_eq!(b.map_key(IntlBackslash), Some(IntlBackslash));
-        assert_eq!(b.map_key(F6), None);
-        assert_eq!(b.map_key(F9), Some(F6));
+        assert_eq!(b.map_key(f, F6), Some(F6));
+        assert_eq!(b.map_key(f, IntlBackslash), Some(F6));
+        b.set_key(f, "gear", IntlBackslash);
+        assert_eq!(b.map_key(f, IntlBackslash), Some(KeyL));
+        b.reset_key(f, "gear");
+        b.set_key(f, "tail_view", F9);
+        assert_eq!(b.map_key(f, IntlBackslash), Some(IntlBackslash));
+        assert_eq!(b.map_key(f, F6), None);
+        assert_eq!(b.map_key(f, F9), Some(F6));
     }
 
     #[test]
     fn moving_keys() {
+        let f = Context::Flight;
         let mut b = Bindings::default();
         let pitch_down = action("pitch_down").unwrap();
         let pitch_up = action("pitch_up").unwrap();
-        assert_eq!(b.map_key(KeyCode::KeyW), Some(KeyCode::KeyW));
+        assert_eq!(b.map_key(f, KeyCode::KeyW), Some(KeyCode::KeyW));
         // Pitch down onto F9: F9 now pitches down, W does nothing.
-        b.set_key("pitch_down", KeyCode::F9);
-        assert_eq!(b.map_key(KeyCode::F9), Some(KeyCode::KeyW));
-        assert_eq!(b.map_key(KeyCode::KeyW), None);
+        b.set_key(f, "pitch_down", KeyCode::F9);
+        assert_eq!(b.map_key(f, KeyCode::F9), Some(KeyCode::KeyW));
+        assert_eq!(b.map_key(f, KeyCode::KeyW), None);
         // Pitch down onto S takes it from pitch up, which is left without a key.
-        b.set_key("pitch_down", KeyCode::KeyS);
-        assert_eq!(b.map_key(KeyCode::KeyS), Some(KeyCode::KeyW));
-        assert_eq!(b.key_of(pitch_up), None);
-        assert_eq!(b.map_key(KeyCode::F9), Some(KeyCode::F9));
+        b.set_key(f, "pitch_down", KeyCode::KeyS);
+        assert_eq!(b.map_key(f, KeyCode::KeyS), Some(KeyCode::KeyW));
+        assert_eq!(b.key_of(f, pitch_up), None);
+        assert_eq!(b.map_key(f, KeyCode::F9), Some(KeyCode::F9));
         // Back to the defaults.
-        b.reset_key("pitch_down");
-        b.reset_key("pitch_up");
-        assert_eq!((b.key_of(pitch_down), b.key_of(pitch_up)), (Some(KeyCode::KeyW), Some(KeyCode::KeyS)));
-        assert_eq!(b.map_key(KeyCode::KeyS), Some(KeyCode::KeyS));
+        b.reset_key(f, "pitch_down");
+        b.reset_key(f, "pitch_up");
+        assert_eq!((b.key_of(f, pitch_down), b.key_of(f, pitch_up)), (Some(KeyCode::KeyW), Some(KeyCode::KeyS)));
+        assert_eq!(b.map_key(f, KeyCode::KeyS), Some(KeyCode::KeyS));
         assert!(b.keys.is_empty());
     }
 
@@ -721,6 +847,7 @@ mod tests {
 
     #[test]
     fn buttons_and_file() {
+        let f = Context::Flight;
         let mut b = Bindings::default();
         let dev = [0xab; 16];
         b.start_capture(Capture::Button("gear"));
@@ -728,15 +855,47 @@ mod tests {
         b.button_event(dev, "Throttle quadrant", 290, false);
         b.button_event(dev, "Throttle quadrant", 290, true);
         assert_eq!(b.take_edges(), vec![("gear", false), ("gear", true)]);
-        b.set_key("gear", KeyCode::KeyJ);
+        b.set_key(f, "gear", KeyCode::KeyJ);
         b.axes.insert(AxisAct::Yaw, AxisBind { dev, name: "Pedals".into(), code: 5, sign: -1.0, dead: 0.1 });
         let mut c = Bindings::default();
         c.read(&b.json());
         assert_eq!(c.buttons, b.buttons);
         assert_eq!(c.axes, b.axes);
-        assert_eq!(c.map_key(KeyCode::KeyJ), Some(KeyCode::KeyL));
+        assert_eq!(c.map_key(f, KeyCode::KeyJ), Some(KeyCode::KeyL));
         assert!(c.uses(&dev));
         assert_eq!((axis_name(ABS_Y), axis_name(ABS_RZ), button_name(BTN_TRIGGER), button_name(BTN + 0x2c5)), ("Y".into(), "Rz".into(), "1".into(), "22".into()));
+    }
+
+    #[test]
+    fn contexts_share_keys_but_not_actions() {
+        // W pitches down in flight, walks forward on foot and opens the
+        // throttle in a car; the same physical key, three actions.
+        let b = Bindings::default();
+        assert_eq!(b.action_at(Context::Flight, KeyCode::KeyW).map(|a| a.id), Some("pitch_down"));
+        assert_eq!(b.action_at(Context::Foot, KeyCode::KeyW).map(|a| a.id), Some("move_forward"));
+        assert_eq!(b.action_at(Context::Car, KeyCode::KeyW).map(|a| a.id), Some("car_throttle"));
+        // Global actions are in every context.
+        for ctx in Context::ALL {
+            assert_eq!(b.action_at(ctx, KeyCode::KeyC).map(|a| a.id), Some("camera"));
+            assert_eq!(b.action_at(ctx, KeyCode::KeyH).map(|a| a.id), Some("hud"));
+            assert_eq!(b.action_at(ctx, KeyCode::Escape).map(|a| a.id), Some("pause_menu"));
+        }
+        // A key moved on foot leaves the flight and car contexts alone.
+        let mut b = b;
+        b.set_key(Context::Foot, "move_forward", KeyCode::F9);
+        assert_eq!(b.map_key(Context::Foot, KeyCode::F9), Some(KeyCode::KeyW));
+        assert_eq!(b.map_key(Context::Foot, KeyCode::KeyW), None);
+        assert_eq!(b.map_key(Context::Flight, KeyCode::F9), Some(KeyCode::F9));
+        assert_eq!(b.action_at(Context::Flight, KeyCode::KeyW).map(|a| a.id), Some("pitch_down"));
+        assert_eq!(b.action_at(Context::Car, KeyCode::KeyW).map(|a| a.id), Some("car_throttle"));
+        // Actions that were there still are: every table's keys load back.
+        let mut c = Bindings::default();
+        c.read(&b.json());
+        assert_eq!(c.map_key(Context::Foot, KeyCode::F9), Some(KeyCode::KeyW));
+        // The flight table is unchanged by the new contexts.
+        assert!(actions_in(Context::Flight).all(|a| ACTIONS.iter().any(|f| f.id == a.id)));
+        assert_eq!(actions_in(Context::Flight).count(), ACTIONS.len());
+        assert!(actions_in(Context::Foot).any(|a| a.id == "move_forward") && actions_in(Context::Foot).any(|a| a.id == "camera"));
     }
 
     #[test]
