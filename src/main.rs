@@ -3983,11 +3983,11 @@ impl Game {
         }
         if let Some(a) = &self.audio {
             for hit in &s.traffic_hits {
-                if hit.speed > vehicle::SAFE_IMPACT {
+                if hit.notify && hit.speed > vehicle::SAFE_IMPACT {
                     a.event(audio::Event::Crash((hit.speed / 9.0).clamp(0.3, 2.0) as f32));
                 }
             }
-            if s.traffic_hits.is_empty() && impact > vehicle::SAFE_IMPACT {
+            if !s.traffic_hits.iter().any(|h| h.notify) && impact > vehicle::SAFE_IMPACT {
                 a.event(audio::Event::Crash((impact / 12.0).clamp(0.4, 2.0) as f32));
             }
             if water && !was_water {
@@ -4002,7 +4002,7 @@ impl Game {
         self.character.vel = DVec3::ZERO;
         self.character.grounded = true;
         self.character.last_safe = pos;
-        if s.traffic_hits.iter().any(|h| h.speed > vehicle::SAFE_IMPACT) {
+        if s.traffic_hits.iter().any(|h| h.notify && h.speed > vehicle::SAFE_IMPACT) {
             self.flash.push((t!("ground.traffic_collision").to_string(), self.real));
             self.status = t!("ground.traffic_collision").into();
             self.status_until = self.real + 2.0;

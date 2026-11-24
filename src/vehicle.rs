@@ -44,7 +44,7 @@ pub const CAR_HEALTH_ENABLED: bool = false;
 /// How much of the closing speed two cars give back when they part (0..1).
 const RESTITUTION: f64 = 0.15;
 /// The steepest slope the tyres hold (degrees); beyond it the body slides.
-pub const SLOPE_LIMIT: f64 = 45.0;
+pub const SLOPE_LIMIT: f64 = 55.0;
 /// Top gear.
 const TOP_GEAR: i8 = 5;
 /// Engine speed to change up (rpm).
@@ -213,6 +213,8 @@ pub struct TrafficHit {
     pub velocity: DVec3,
     /// How far the traffic car is shoved clear of the overlap (m).
     pub shove: DVec3,
+    /// Whether this hit should trigger HUD flash and crash sound.
+    pub notify: bool,
 }
 
 /// What one step did.
@@ -427,6 +429,8 @@ impl Vehicle {
         if water {
             // A car in water is not buoyant: the engine drowns and it drags to a stop.
             self.damage.engine = 0.0;
+        } else if !CAR_HEALTH_ENABLED && !self.damage.wrecked() {
+            self.damage.engine = 1.0;
         }
         let mu = (surface.grip().max(0.05) as f64) * wx.grip_factor(surface).max(0.05) as f64 * self.tuning.grip;
         let slope = normal.dot(up).clamp(-1.0, 1.0).acos().to_degrees();
@@ -576,35 +580,47 @@ impl Vehicle {
             }
         }
 
-        // Solid things: buildings and tree trunks push the body out. The push
-        // becomes an impulse and damage.
+        // Solid things: buildings and tree trunks push the body out. Resolve
+        // both separately (two passes) so a corner or tree beside a wall
+        // never gets skipped, and let grazing contacts slide instead of sticking.
         let up = self.up();
-        let centre = self.pos + up * 0.7;
         let half = self.half();
-        let mut push = world.building_push_box(centre, half, self.yaw);
-        if let Some(p) = world.tree_push_box(centre, half, self.yaw) {
-            push = Some(push.filter(|q| q.length() >= p.length()).unwrap_or(p));
-        }
-        if let Some(push) = push {
-            let n = push.normalize_or_zero();
-            if n.length_squared() > 0.5 {
-                self.pos += push;
-                let into = -self.vel.dot(n);
-                if into > 0.0 {
-                    // Slide along the wall, losing the closing speed.
-                    self.vel += n * into;
-                    if into > SAFE_IMPACT {
-                        let dmg = if CAR_HEALTH_ENABLED { ((into - SAFE_IMPACT) * IMPACT_DAMAGE as f64).min(40.0) as f32 } else { 0.0 };
-                        let side = if n.dot(self.right()) >= 0.0 { 1.0 } else { -1.0 };
-                        if CAR_HEALTH_ENABLED {
-                            self.damage.hurt(dmg, side);
-                            out.damage += dmg;
+        for _ in 0..2 {
+            let mut moved = false;
+            for pass in 0..2 {
+                let centre = self.pos + up * 0.7;
+                let push = if pass == 0 {
+                    world.building_push_box(centre, half, self.yaw)
+                } else {
+                    world.tree_push_box(centre, half, self.yaw)
+                };
+                if let Some(push) = push {
+                    let n = push.normalize_or_zero();
+                    if n.length_squared() > 0.5 {
+                        self.pos += push;
+                        moved = true;
+                        let into = -self.vel.dot(n);
+                        if into > 0.0 {
+                            // Cancel inward velocity and slide smoothly along the surface.
+                            let bounce = if into > SAFE_IMPACT { RESTITUTION } else { 0.0 };
+                            self.vel += n * (into * (1.0 + bounce));
+                            let tangent = self.vel - n * self.vel.dot(n);
+                            self.vel -= tangent * (1.8 * h).min(0.25);
+                            if into > SAFE_IMPACT {
+                                let dmg = if CAR_HEALTH_ENABLED { ((into - SAFE_IMPACT) * IMPACT_DAMAGE as f64).min(40.0) as f32 } else { 0.0 };
+                                let side = if n.dot(self.right()) >= 0.0 { 1.0 } else { -1.0 };
+                                if CAR_HEALTH_ENABLED {
+                                    self.damage.hurt(dmg, side);
+                                    out.damage += dmg;
+                                }
+                                out.impacts.push(Impact { point: centre + push, normal: n, speed: into, damage: dmg });
+                            }
                         }
-                        out.impacts.push(Impact { point: centre + push, normal: n, speed: into, damage: dmg });
-                    } else {
-                        self.vel *= 0.5;
                     }
                 }
+            }
+            if !moved {
+                break;
             }
         }
 
@@ -612,7 +628,8 @@ impl Vehicle {
         // goes into both cars, and a real impact damages both.
         self.collide_traffic(traffic, out);
 
-        // Wheels turn with the road speed; the body leans and squats.        let v_long = self.longitudinal();
+        // Wheels turn with the road speed; the body leans and squats.
+        let v_long = self.longitudinal();
         self.wheel_spin = (self.wheel_spin + v_long / self.tuning.wheel_r.max(0.1) * h).rem_euclid(std::f64::consts::TAU);
         let roll_target = (-self.lateral() * 0.035).clamp(-0.12, 0.12) as f32;
         let pitch_target = (-a_long * 0.006).clamp(-0.06, 0.06) as f32;
@@ -651,42 +668,43 @@ impl Vehicle {
                 continue;
             }
             let Some((n, overlap)) = box_push(centre, self.yaw, half, t_centre, body.yaw, body.half) else { continue };
-            // Move the body clear of the box; the vertical pass next substep puts
-            // the wheels back on the ground.
-            self.pos += n * (overlap.min(1.5) + 0.01);
+            let inv_other = 1.0 / tuning(body.model).mass.max(1.0);
+            let inv_total = inv_self + inv_other;
+            let sep = overlap.min(1.5) + 0.01;
+            // Share the position separation by inverse mass, so a heavy truck
+            // moves the player while a light car gives way.
+            self.pos += n * (sep * inv_self / inv_total + 0.005);
+            let shove = -n * (sep * inv_other / inv_total + 0.005);
             let rel = self.vel - body.velocity;
             let closing = -rel.dot(n);
             if closing <= 0.0 {
                 continue;
             }
-            // Momentum exchange, shared by mass. The contact normal points
-            // from the traffic car to us, so the player takes the impulse
-            // along `n` and the other car the opposite way.
-            let inv_other = 1.0 / tuning(body.model).mass.max(1.0);
-            let inv_total = inv_self + inv_other;
             let impulse = (1.0 + RESTITUTION) * closing / inv_total;
             self.vel += n * (impulse * inv_self);
             let other_velocity = -n * (impulse * inv_other);
-            // The overlap itself is shared the same way, so a light car is
-            // pushed clear while a heavy one leaves the player to move.
-            let shove = -n * ((overlap.min(1.5) + 0.01) * inv_other / inv_total);
-            if closing <= SAFE_IMPACT {
-                // A gentle shunt still nudges the other car, but is not a crash.
-                self.vel *= 0.75;
-            }
-            if closing < 0.1 || self.traffic_cool > 0.0 || self.spawn_grace > 0.0 {
+            if closing < 0.05 {
                 continue;
             }
-            self.traffic_cool = 0.35;
-            let dmg = if CAR_HEALTH_ENABLED && closing > SAFE_IMPACT { ((closing - SAFE_IMPACT) * IMPACT_DAMAGE as f64).min(40.0) as f32 } else { 0.0 };
-            let side = if n.dot(self.right()) >= 0.0 { 1.0 } else { -1.0 };
-            if CAR_HEALTH_ENABLED {
-                self.damage.hurt(dmg, side);
-                out.damage += dmg;
+            let notify = self.traffic_cool <= 0.0 && self.spawn_grace <= 0.0;
+            let dmg = if notify && CAR_HEALTH_ENABLED && closing > SAFE_IMPACT {
+                ((closing - SAFE_IMPACT) * IMPACT_DAMAGE as f64).min(40.0) as f32
+            } else {
+                0.0
+            };
+            if notify {
+                self.traffic_cool = 0.35;
+                if CAR_HEALTH_ENABLED && dmg > 0.0 {
+                    let side = if n.dot(self.right()) >= 0.0 { 1.0 } else { -1.0 };
+                    self.damage.hurt(dmg, side);
+                    out.damage += dmg;
+                }
             }
             let point = t_centre - n * overlap * 0.5;
-            out.impacts.push(Impact { point, normal: n, speed: closing, damage: dmg });
-            out.traffic_hits.push(TrafficHit { body: *body, point, speed: closing, damage: dmg, velocity: other_velocity, shove });
+            if notify {
+                out.impacts.push(Impact { point, normal: n, speed: closing, damage: dmg });
+            }
+            out.traffic_hits.push(TrafficHit { body: *body, point, speed: closing, damage: dmg, velocity: other_velocity, shove, notify });
         }
     }
 
@@ -699,16 +717,20 @@ impl Vehicle {
         let hw = self.width() * 0.42;
         let pts = [self.pos + fwd * hl + right * hw, self.pos + fwd * hl - right * hw, self.pos - fwd * hl + right * hw, self.pos - fwd * hl - right * hw];
         let mut hs = [0.0f64; 4];
-        let mut water = false;
+        let mut water_wheels = 0u8;
         let mut kind = Surface::Grass;
         for (i, p) in pts.iter().enumerate() {
             let s = world.surface_at(*p)?;
             hs[i] = s.h;
-            water |= s.blocked();
+            if s.blocked() {
+                water_wheels += 1;
+            }
             if i == 0 || s.kind != Surface::Grass {
                 kind = s.kind;
             }
         }
+        let center_water = world.surface_at(self.pos).is_some_and(|s| s.blocked());
+        let water = water_wheels >= 2 || center_water;
         let h = hs.iter().sum::<f64>() * 0.25;
         let dh_f = (hs[0] + hs[1] - hs[2] - hs[3]) * 0.5;
         let dh_r = (hs[0] + hs[2] - hs[1] - hs[3]) * 0.5;

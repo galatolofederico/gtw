@@ -2413,7 +2413,8 @@ impl WorldQuery for World {
             }
             let d = t.pos - p;
             let (x, z) = (d.dot(e), d.dot(n));
-            let (bx, bz) = (c * x + s * z, -s * x + c * z);
+            // `right = e*c - n*s`, `fwd = e*s + n*c` for clockwise bearing `yaw`.
+            let (bx, bz) = (c * x - s * z, s * x + c * z);
             let (qx, qz) = (bx.clamp(-hx, hx), bz.clamp(-hz, hz));
             let (dx, dz) = (qx - bx, qz - bz);
             let dist = dx.hypot(dz);
@@ -2428,8 +2429,8 @@ impl WorldQuery for World {
                 (ux, uz) = (ux / ul, uz / ul);
             }
             let amount = t.trunk_r - dist;
-            let wx = c * ux - s * uz;
-            let wz = s * ux + c * uz;
+            let wx = c * ux + s * uz;
+            let wz = -s * ux + c * uz;
             let push = (e * wx + n * wz) * amount;
             if best.is_none_or(|b| push.length() > b.length()) {
                 best = Some(push);
@@ -2488,8 +2489,149 @@ fn push_circle(ring: &[DVec3], p: DVec3, radius: f64, e: DVec3, n: DVec3) -> Opt
     Some((e * dir.x + n * dir.y) * amount)
 }
 
-/// Push an oriented box at `p` out of the horizontal polygon `ring` with the
-/// minimum translation over the box axes and the ring's edge normals.
+/// Whether a simple 2D polygon is convex.
+#[allow(dead_code)]
+fn ring_is_convex(r: &[glam::DVec2]) -> bool {
+    let n = r.len();
+    if n < 3 {
+        return false;
+    }
+    let mut sign = 0.0f64;
+    for i in 0..n {
+        let a = r[i];
+        let b = r[(i + 1) % n];
+        let c = r[(i + 2) % n];
+        let cr = (b - a).perp_dot(c - b);
+        if cr.abs() > 1e-9 {
+            if sign == 0.0 {
+                sign = cr.signum();
+            } else if cr * sign < 0.0 {
+                return false;
+            }
+        }
+    }
+    sign != 0.0
+}
+
+#[allow(dead_code)]
+fn point_in_poly_2d(r: &[glam::DVec2], p: glam::DVec2) -> bool {
+    let mut inside = false;
+    let mut j = r.len() - 1;
+    for i in 0..r.len() {
+        let (a, b) = (r[i], r[j]);
+        if (a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+#[allow(dead_code)]
+fn seg_intersects_aabb(a: glam::DVec2, b: glam::DVec2, hx: f64, hz: f64) -> bool {
+    let d = b - a;
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    for (p, q) in [(-d.x, a.x + hx), (d.x, hx - a.x), (-d.y, a.y + hz), (d.y, hz - a.y)] {
+        if p.abs() < 1e-12 {
+            if q < 0.0 {
+                return false;
+            }
+        } else {
+            let r = q / p;
+            if p < 0.0 {
+                if r > t1 { return false; }
+                t0 = t0.max(r);
+            } else {
+                if r < t0 { return false; }
+                t1 = t1.min(r);
+            }
+        }
+    }
+    t0 <= t1
+}
+
+#[allow(dead_code)]
+fn nearest_on_ring(r: &[glam::DVec2], p: glam::DVec2) -> glam::DVec2 {
+    let mut best_d2 = f64::INFINITY;
+    let mut best_q = p;
+    for i in 0..r.len() {
+        let (a, b) = (r[i], r[(i + 1) % r.len()]);
+        let d = b - a;
+        let t = ((p - a).dot(d) / d.length_squared().max(1e-12)).clamp(0.0, 1.0);
+        let q = a + d * t;
+        let d2 = (q - p).length_squared();
+        if d2 < best_d2 {
+            best_d2 = d2;
+            best_q = q;
+        }
+    }
+    best_q
+}
+
+/// Push an axis-aligned box `[-hx, hx] x [-hz, hz]` out of a concave 2D polygon `r`.
+#[allow(dead_code)]
+fn concave_aabb_push(r: &[glam::DVec2], hx: f64, hz: f64) -> Option<glam::DVec2> {
+    let edge_hit = (0..r.len()).any(|i| seg_intersects_aabb(r[i], r[(i + 1) % r.len()], hx, hz));
+    if !edge_hit && !point_in_poly_2d(r, glam::DVec2::ZERO) {
+        return None;
+    }
+    let samples = [
+        glam::DVec2::ZERO,
+        glam::DVec2::new(-hx, -hz),
+        glam::DVec2::new(hx, -hz),
+        glam::DVec2::new(hx, hz),
+        glam::DVec2::new(-hx, hz),
+        glam::DVec2::new(-hx, 0.0),
+        glam::DVec2::new(hx, 0.0),
+        glam::DVec2::new(0.0, -hz),
+        glam::DVec2::new(0.0, hz),
+        glam::DVec2::new(-hx, -hz * 0.5),
+        glam::DVec2::new(hx, -hz * 0.5),
+        glam::DVec2::new(-hx, hz * 0.5),
+        glam::DVec2::new(hx, hz * 0.5),
+    ];
+    let mut best = glam::DVec2::ZERO;
+    let mut best_len = 0.0f64;
+    for s in samples {
+        if point_in_poly_2d(r, s) {
+            let q = nearest_on_ring(r, s);
+            let v = q - s;
+            let l = v.length();
+            if l > best_len {
+                best_len = l;
+                best = v;
+            }
+        }
+    }
+    if best_len > 1e-6 {
+        return Some(best + best / best_len * 0.01);
+    }
+    // A sharp building corner poked into the side of the car between samples.
+    let mut corner_push = None;
+    let mut corner_d = f64::INFINITY;
+    for &v in r {
+        if v.x.abs() < hx && v.y.abs() < hz {
+            let cands = [
+                glam::DVec2::new(v.x - hx - 0.01, 0.0),
+                glam::DVec2::new(v.x + hx + 0.01, 0.0),
+                glam::DVec2::new(0.0, v.y - hz - 0.01),
+                glam::DVec2::new(0.0, v.y + hz + 0.01),
+            ];
+            for cand in cands {
+                let l = cand.length();
+                if l < corner_d {
+                    corner_d = l;
+                    corner_push = Some(cand);
+                }
+            }
+        }
+    }
+    corner_push
+}
+
+/// Push an oriented box at `p` out of the horizontal polygon `ring`.
+/// Convex polygons use exact SAT; concave polygons (courtyards, L-shapes)
+/// test against the real polygon boundary so empty notches stay driveable.
 #[allow(dead_code)]
 fn obb_ring_push(ring: &[DVec3], p: DVec3, half: [f64; 2], yaw: f64, e: DVec3, n: DVec3) -> Option<DVec3> {
     if ring.len() < 3 {
@@ -2497,42 +2639,56 @@ fn obb_ring_push(ring: &[DVec3], p: DVec3, half: [f64; 2], yaw: f64, e: DVec3, n
     }
     let (c, s) = (yaw.cos(), yaw.sin());
     let (hx, hz) = (half[0].max(0.0), half[1].max(0.0));
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
     let local: Vec<glam::DVec2> = ring.iter().map(|q| {
         let d = *q - p;
         let (x, z) = (d.dot(e), d.dot(n));
-        glam::DVec2::new(c * x + s * z, -s * x + c * z)
+        let lp = glam::DVec2::new(c * x - s * z, s * x + c * z);
+        min_x = min_x.min(lp.x);
+        max_x = max_x.max(lp.x);
+        min_y = min_y.min(lp.y);
+        max_y = max_y.max(lp.y);
+        lp
     }).collect();
-    let mut axes: Vec<glam::DVec2> = vec![glam::DVec2::X, glam::DVec2::Y];
-    for i in 0..local.len() {
-        let (a, b) = (local[i], local[(i + 1) % local.len()]);
-        let d = b - a;
-        if d.length_squared() > 1e-12 {
-            axes.push(glam::DVec2::new(-d.y, d.x).normalize());
-        }
+    if max_x <= -hx || min_x >= hx || max_y <= -hz || min_y >= hz {
+        return None;
     }
-    let centre = local.iter().fold(glam::DVec2::ZERO, |a, q| a + *q) / local.len() as f64;
-    let (mut overlap, mut axis_out) = (f64::INFINITY, glam::DVec2::X);
-    for axis in axes {
-        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
-        for q in &local {
-            let d = q.dot(axis);
-            lo = lo.min(d);
-            hi = hi.max(d);
+    let out_local = if ring_is_convex(&local) {
+        let mut axes: Vec<glam::DVec2> = vec![glam::DVec2::X, glam::DVec2::Y];
+        for i in 0..local.len() {
+            let (a, b) = (local[i], local[(i + 1) % local.len()]);
+            let d = b - a;
+            if d.length_squared() > 1e-12 {
+                axes.push(glam::DVec2::new(-d.y, d.x).normalize());
+            }
         }
-        let be = hx * axis.x.abs() + hz * axis.y.abs();
-        let o = hi.min(be) - lo.max(-be);
-        if o <= 0.0 {
-            return None;
+        let centre = local.iter().fold(glam::DVec2::ZERO, |a, q| a + *q) / local.len() as f64;
+        let (mut overlap, mut axis_out) = (f64::INFINITY, glam::DVec2::X);
+        for axis in axes {
+            let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+            for q in &local {
+                let d = q.dot(axis);
+                lo = lo.min(d);
+                hi = hi.max(d);
+            }
+            let be = hx * axis.x.abs() + hz * axis.y.abs();
+            let o = hi.min(be) - lo.max(-be);
+            if o <= 0.0 {
+                return None;
+            }
+            if o < overlap {
+                overlap = o;
+                let sign = if (-centre).dot(axis) >= 0.0 { 1.0 } else { -1.0 };
+                axis_out = axis * sign;
+            }
         }
-        if o < overlap {
-            overlap = o;
-            let sign = if (-centre).dot(axis) >= 0.0 { 1.0 } else { -1.0 };
-            axis_out = axis * sign;
-        }
-    }
-    let wx = c * axis_out.x - s * axis_out.y;
-    let wz = s * axis_out.x + c * axis_out.y;
-    Some((e * wx + n * wz) * overlap)
+        axis_out * overlap
+    } else {
+        concave_aabb_push(&local, hx, hz)?
+    };
+    let wx = c * out_local.x + s * out_local.y;
+    let wz = -s * out_local.x + c * out_local.y;
+    Some(e * wx + n * wz)
 }
 
 /// Model the second shadow cascade draws trees with, at the least: 20-triangle
@@ -2893,5 +3049,41 @@ mod tests {
         out.clear();
         w.traffic_bodies_near(p + east() * 400.0, 10.0, &mut out);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn obb_and_tree_collisions_respect_45_deg_yaw_and_concave_notches() {
+        let p = origin();
+        let (e, n, _) = geo::enu(p);
+        let yaw = std::f64::consts::FRAC_PI_4; // facing NE
+        let fwd = e * yaw.sin() + n * yaw.cos();
+        let right = e * yaw.cos() - n * yaw.sin();
+        let half = [1.0, 2.5]; // 2m wide, 5m long
+
+        // A small box directly ahead at +2.0m along `fwd` must collide;
+        // a box at +2.0m along `right` (beyond half-width 1.0m) must NOT collide.
+        let mk_box = |c: DVec3, r: f64| vec![
+            c - e * r - n * r,
+            c + e * r - n * r,
+            c + e * r + n * r,
+            c - e * r + n * r,
+        ];
+        assert!(obb_ring_push(&mk_box(p + fwd * 2.0, 0.2), p, half, yaw, e, n).is_some(), "nose hits at 45 deg");
+        assert!(obb_ring_push(&mk_box(p + right * 2.0, 0.2), p, half, yaw, e, n).is_none(), "side is clear at 45 deg");
+
+        // Concave L-shaped building: notch in (+e, +n) quadrant [2..12, 2..12].
+        let l_ring = vec![
+            p + e * 0.0 + n * 0.0,
+            p + e * 12.0 + n * 0.0,
+            p + e * 12.0 + n * 2.0,
+            p + e * 2.0 + n * 2.0,
+            p + e * 2.0 + n * 12.0,
+            p + e * 0.0 + n * 12.0,
+        ];
+        // Parked in the open courtyard notch at (6, 6): must NOT collide!
+        assert!(obb_ring_push(&l_ring, p + e * 6.0 + n * 6.0, half, 0.0, e, n).is_none(), "courtyard notch is open");
+        // Touching the actual wing wall at (1.5, 6): MUST push out east!
+        let push = obb_ring_push(&l_ring, p + e * 1.5 + n * 6.0, half, 0.0, e, n).expect("wing wall pushes");
+        assert!(push.dot(e) > 0.4, "pushed out of wing toward courtyard: {:?}", push);
     }
 }
