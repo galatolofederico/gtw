@@ -9,7 +9,7 @@
 
 use crate::geo;
 use crate::surface::{Surface, SurfaceHit, SurfaceWeather};
-use crate::world::WorldQuery;
+use crate::world::{TrafficBody, WorldQuery};
 use glam::DVec3;
 
 /// Capsule radius (m).
@@ -48,6 +48,11 @@ pub const STRIDE: f64 = 0.9;
 const GROUND_ACCEL: f64 = 22.0;
 /// …and in the air.
 const AIR_ACCEL: f64 = 3.5;
+
+/// How hard a car knocks the body back (m/s per m/s of closing speed).
+pub const TRAFFIC_KNOCKBACK: f64 = 1.4;
+/// Hit points lost per m/s of closing speed past [`SAFE_IMPACT`].
+pub const TRAFFIC_DAMAGE: f32 = 6.0;
 
 /// What the player is asking the body to do this step. `forward` and `right`
 /// are -1..1; `sprint` is held; `jump` is the press edge.
@@ -121,6 +126,15 @@ pub struct CharacterStep {
     pub footsteps: Vec<Surface>,
 }
 
+/// A bump from traffic, for the HUD and (in a later phase) the sound queue.
+#[derive(Copy, Clone, Debug)]
+pub struct TrafficContact {
+    pub body: TrafficBody,
+    /// Closing speed along the contact normal (m/s).
+    pub speed: f64,
+    pub damage: f32,
+}
+
 impl Character {
     /// Standing at `pos` (feet), facing `yaw` (bearing radians).
     pub fn spawn(pos: DVec3, yaw: f64) -> Self {
@@ -168,6 +182,44 @@ impl Character {
         self.since_hurt = REGEN_DELAY;
         self.spawn_grace = 2.0;
         self.respawns += 1;
+    }
+
+    /// Resolve the capsule against the traffic boxes: push the body out of any
+    /// overlap, and let a moving car knock it away and hurt it. Returns the
+    /// worst contact, which `Game` uses for the status line, the screen flash
+    /// and the traffic brake event.
+    pub fn hit_traffic(&mut self, traffic: &[TrafficBody]) -> Option<TrafficContact> {
+        let mut worst: Option<TrafficContact> = None;
+        let up = self.pos.normalize();
+        let centre = self.pos + up * (HEIGHT * 0.5);
+        for body in traffic {
+            if !body.pos.is_finite() || !body.yaw.is_finite() {
+                continue;
+            }
+            let b_up = body.pos.normalize();
+            let b_centre = body.pos + b_up * (HEIGHT * 0.5);
+            if (b_centre - centre).length() > RADIUS + body.half[0].hypot(body.half[1]) + HEIGHT {
+                continue;
+            }
+            let Some((n, overlap)) = circle_box_push(centre, RADIUS, b_centre, body.yaw, body.half) else { continue };
+            self.pos += n * (overlap + 0.005);
+            let closing = -(self.vel - body.velocity).dot(n);
+            if closing <= 0.0 {
+                continue;
+            }
+            // Knocked away, losing the closing speed and a little more.
+            self.vel += n * (closing * TRAFFIC_KNOCKBACK);
+            if closing <= SAFE_IMPACT || self.spawn_grace > 0.0 {
+                continue;
+            }
+            let dmg = ((closing - SAFE_IMPACT) * TRAFFIC_DAMAGE as f64).min(70.0) as f32;
+            self.hurt(dmg);
+            self.since_hurt = 0.0;
+            if worst.is_none_or(|w| closing > w.speed) {
+                worst = Some(TrafficContact { body: *body, speed: closing, damage: dmg });
+            }
+        }
+        worst
     }
 
     /// Advance the body by `dt` (s).
@@ -343,6 +395,40 @@ impl Character {
             self.vel = DVec3::ZERO;
         }
     }
+}
+
+/// The push that takes a circle of `radius` at `c` out of a ground-plane box at
+/// `b` with bearing `yaw`, and the push normal (from the box to the circle).
+fn circle_box_push(c: DVec3, radius: f64, b: DVec3, yaw: f64, half: [f64; 2]) -> Option<(DVec3, f64)> {
+    if !c.is_finite() || !b.is_finite() || !yaw.is_finite() {
+        return None;
+    }
+    let up = (c + b).normalize_or_zero();
+    if up.length_squared() < 0.5 {
+        return None;
+    }
+    let (east, north, _) = geo::enu(b);
+    let fwd = east * yaw.sin() + north * yaw.cos();
+    let right = fwd.cross(up).normalize_or_zero();
+    if right.length_squared() < 0.5 {
+        return None;
+    }
+    let d = c - b;
+    let (lx, lz) = (d.dot(right), d.dot(fwd));
+    let (cx, cz) = (lx.clamp(-half[0], half[0]), lz.clamp(-half[1], half[1]));
+    let delta = d - (right * cx + fwd * cz);
+    let dist = delta.length();
+    if dist >= radius {
+        return None;
+    }
+    if dist > 1e-6 {
+        return Some((delta / dist, radius - dist));
+    }
+    // The centre is inside the box: leave by the nearest face.
+    let px = half[0] - lx.abs();
+    let pz = half[1] - lz.abs();
+    let n = if px < pz { right * if lx >= 0.0 { 1.0 } else { -1.0 } } else { fwd * if lz >= 0.0 { 1.0 } else { -1.0 } };
+    Some((n, px.min(pz) + radius))
 }
 
 /// Outward unit normal of the surface under `p`, from four one-metre samples.
@@ -666,6 +752,30 @@ mod tests {
             let s = c.step(1.0 / 60.0, &CharacterControls { forward: 1.0, ..Default::default() }, &w, &SurfaceWeather::default());
             assert!(s.pos.is_finite() && s.vel.is_finite(), "{lat},{lon}");
         }
+    }
+
+    #[test]
+    fn traffic_knocks_the_body_back_and_hurts() {
+        let (east, _, _) = geo::enu(origin());
+        let body = |pos: DVec3, velocity: DVec3| TrafficBody { kind: crate::world::TrafficKind::Moving, tile: crate::geo::TileId::new(14, 0, 0), index: 0, model: 0, colour: [0.4; 3], pos, yaw: std::f64::consts::FRAC_PI_2, half: crate::cars::player_geom(0).half, velocity };
+        let mut c = at_origin();
+        c.spawn_grace = 0.0;
+        // A car sliding into the body: pushed clear, knocked back, hurt.
+        let hit = c.hit_traffic(&[body(origin() + east * 1.6, -east * 10.0)]).expect("a contact");
+        assert!(hit.damage > 0.0 && hit.speed > 4.0, "a real blow: {:.1} m/s, {:.0} damage", hit.speed, hit.damage);
+        assert!(c.health < MAX_HEALTH, "health {:.0}", c.health);
+        assert!((c.pos - origin()).dot(east) < -0.2, "pushed clear: {:.2} m", (c.pos - origin()).dot(east));
+        assert!(c.vel.dot(east) < 0.0, "knocked back: {:.2} m/s", c.vel.dot(east));
+        assert_eq!(c.since_hurt, 0.0);
+
+        // A parked car is solid but does not hurt.
+        let mut c = at_origin();
+        c.spawn_grace = 0.0;
+        assert!(c.hit_traffic(&[body(origin() + east * 1.6, DVec3::ZERO)]).is_none());
+        assert_eq!(c.health, MAX_HEALTH);
+        assert!((c.pos - origin()).dot(east) < -0.2, "still pushed clear");
+        // With no traffic there is nothing to resolve.
+        assert!(at_origin().hit_traffic(&[]).is_none());
     }
 
     #[test]

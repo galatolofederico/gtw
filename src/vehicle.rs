@@ -16,7 +16,7 @@ use crate::cars::{self, CAR_LEN};
 use crate::character;
 use crate::geo;
 use crate::surface::{Surface, SurfaceWeather};
-use crate::world::WorldQuery;
+use crate::world::{TrafficBody, WorldQuery};
 use glam::DVec3;
 
 /// Downward acceleration (m/s²).
@@ -191,6 +191,19 @@ pub struct Impact {
     pub damage: f32,
 }
 
+/// A collision with a traffic car: the source body, so the traffic state can be
+/// slowed and damaged too, and what the HUD and (in a later phase) the sound
+/// queue need. The player's step owns the queue; `Game` drains it.
+#[derive(Copy, Clone, Debug)]
+#[allow(dead_code)]
+pub struct TrafficHit {
+    pub body: TrafficBody,
+    pub point: DVec3,
+    /// Closing speed along the contact normal (m/s).
+    pub speed: f64,
+    pub damage: f32,
+}
+
 /// What one step did.
 #[derive(Clone, Debug, Default)]
 pub struct VehicleStep {
@@ -214,6 +227,8 @@ pub struct VehicleStep {
     pub damage: f32,
     pub wrecked: bool,
     pub impacts: Vec<Impact>,
+    /// Traffic hit this step, for the HUD, the screen flash and the audio queue.
+    pub traffic_hits: Vec<TrafficHit>,
 }
 
 /// The car: one body in the planet frame.
@@ -248,6 +263,9 @@ pub struct Vehicle {
     cda: f64,
     /// Landing damage is forgiven while the car has just appeared.
     spawn_grace: f64,
+    /// A short pause after a traffic impact, so a car shunting the player does
+    /// not deal damage every substep.
+    traffic_cool: f64,
 }
 
 impl Vehicle {
@@ -260,7 +278,7 @@ impl Vehicle {
         let yaw = if yaw.is_finite() { yaw } else { 0.0 };
         let cda = drag_area(&tuning);
         let g = cars::player_geom(model);
-        Self { model, colour, pos, vel: DVec3::ZERO, yaw, gear: 1, damage: VehicleDamage::intact(), steer: 0.0, grounded: false, water: false, wheel_spin: 0.0, roll: 0.0, pitch: 0.0, distance: 0.0, extent: g.half, length: CAR_LEN[model as usize] as f64, width_m: g.half[0] * 2.0, tuning, cda, spawn_grace: 1.0 }
+        Self { model, colour, pos, vel: DVec3::ZERO, yaw, gear: 1, damage: VehicleDamage::intact(), steer: 0.0, grounded: false, water: false, wheel_spin: 0.0, roll: 0.0, pitch: 0.0, distance: 0.0, extent: g.half, length: CAR_LEN[model as usize] as f64, width_m: g.half[0] * 2.0, tuning, cda, spawn_grace: 1.0, traffic_cool: 0.0 }
     }
 
     /// Length and width for the collision box and the drawn meshes (m).
@@ -325,15 +343,16 @@ impl Vehicle {
         (v.abs() / self.tuning.wheel_r.max(0.1) * self.tuning.final_drive * ratio * 60.0 / std::f64::consts::TAU).clamp(0.0, 7200.0)
     }
 
-    /// Advance the car by `dt` seconds.
-    pub fn step<W: WorldQuery>(&mut self, dt: f64, c: &VehicleControls, world: &W, wx: &SurfaceWeather) -> VehicleStep {
+    /// Advance the car by `dt` seconds. `traffic` are the cars within reach of
+    /// it, as solid oriented boxes.
+    pub fn step<W: WorldQuery>(&mut self, dt: f64, c: &VehicleControls, world: &W, wx: &SurfaceWeather, traffic: &[TrafficBody]) -> VehicleStep {
         let mut out = VehicleStep { gear: self.gear, ..Default::default() };
         let total = if dt.is_finite() { dt.clamp(0.0, MAX_DT) } else { 0.0 };
         if total > 0.0 {
             let n = ((total / SUBSTEP).ceil() as usize).clamp(1, 32);
             let h = total / n as f64;
             for _ in 0..n {
-                self.substep(h, c, world, wx, &mut out);
+                self.substep(h, c, world, wx, traffic, &mut out);
             }
         } else {
             self.settle(world);
@@ -366,8 +385,9 @@ impl Vehicle {
     }
 
     /// One substep of at most 1/120 s.
-    fn substep<W: WorldQuery>(&mut self, h: f64, c: &VehicleControls, world: &W, wx: &SurfaceWeather, out: &mut VehicleStep) {
+    fn substep<W: WorldQuery>(&mut self, h: f64, c: &VehicleControls, world: &W, wx: &SurfaceWeather, traffic: &[TrafficBody], out: &mut VehicleStep) {
         self.spawn_grace = (self.spawn_grace - h).max(0.0);
+        self.traffic_cool = (self.traffic_cool - h).max(0.0);
         if !self.pos.is_finite() {
             self.pos = geo::lla_to_pos(0.0, 0.0, 0.0);
             self.vel = DVec3::ZERO;
@@ -560,6 +580,10 @@ impl Vehicle {
             }
         }
 
+        // Traffic: solid boxes too. The player is pushed out, the closing speed
+        // goes into both cars, and a real impact damages both.
+        self.collide_traffic(traffic, out);
+
         // Wheels turn with the road speed; the body leans and squats.        let v_long = self.longitudinal();
         self.wheel_spin = (self.wheel_spin + v_long / self.tuning.wheel_r.max(0.1) * h).rem_euclid(std::f64::consts::TAU);
         let roll_target = (-self.lateral() * 0.035).clamp(-0.12, 0.12) as f32;
@@ -573,6 +597,56 @@ impl Vehicle {
             self.yaw = 0.0;
             self.roll = 0.0;
             self.pitch = 0.0;
+        }
+    }
+
+    /// Separate the body from every traffic box it overlaps, and turn the
+    /// closing speed into an impulse, damage and a [`TrafficHit`].
+    fn collide_traffic(&mut self, traffic: &[TrafficBody], out: &mut VehicleStep) {
+        if traffic.is_empty() {
+            return;
+        }
+        let up = self.up();
+        let centre = self.pos + up * 0.7;
+        let half = self.half();
+        let reach = half[0].hypot(half[1]);
+        for body in traffic {
+            if !body.pos.is_finite() || !body.yaw.is_finite() {
+                continue;
+            }
+            let t_up = body.pos.normalize();
+            let t_centre = body.pos + t_up * 0.7;
+            let t_reach = body.half[0].hypot(body.half[1]);
+            if (t_centre - centre).length() > reach + t_reach {
+                continue;
+            }
+            let Some((n, overlap)) = box_push(centre, self.yaw, half, t_centre, body.yaw, body.half) else { continue };
+            // Move the body clear of the box; the vertical pass next substep puts
+            // the wheels back on the ground.
+            self.pos += n * (overlap.min(1.5) + 0.01);
+            let rel = self.vel - body.velocity;
+            let closing = -rel.dot(n);
+            if closing <= 0.0 {
+                continue;
+            }
+            // Stop closing, and shove back at a little less than the closing
+            // speed, so a shunt pushes the player along rather than through.
+            self.vel += n * (closing * 0.85);
+            if closing <= SAFE_IMPACT {
+                self.vel *= 0.75;
+                continue;
+            }
+            if self.traffic_cool > 0.0 || self.spawn_grace > 0.0 {
+                continue;
+            }
+            self.traffic_cool = 0.35;
+            let dmg = ((closing - SAFE_IMPACT) * IMPACT_DAMAGE as f64).min(40.0) as f32;
+            let side = if n.dot(self.right()) >= 0.0 { 1.0 } else { -1.0 };
+            self.damage.hurt(dmg, side);
+            out.damage += dmg;
+            let point = t_centre - n * overlap * 0.5;
+            out.impacts.push(Impact { point, normal: n, speed: closing, damage: dmg });
+            out.traffic_hits.push(TrafficHit { body: *body, point, speed: closing, damage: dmg });
         }
     }
 
@@ -608,6 +682,47 @@ struct GroundSample {
     normal: DVec3,
     water: bool,
     kind: Surface,
+}
+
+/// The push that takes ground-plane box A out of box B, with the contact
+/// normal pointing from B to A, and how far they overlap. `ya`/`yb` are
+/// bearings and `ha`/`hb` half width and half length. Separating-axis test over
+/// the four box axes; the least overlap is the push.
+fn box_push(a: DVec3, ya: f64, ha: [f64; 2], b: DVec3, yb: f64, hb: [f64; 2]) -> Option<(DVec3, f64)> {
+    if !a.is_finite() || !b.is_finite() || !ya.is_finite() || !yb.is_finite() {
+        return None;
+    }
+    let up = (a + b).normalize_or_zero();
+    if up.length_squared() < 0.5 {
+        return None;
+    }
+    let dir = |yaw: f64| {
+        let (e, n, _) = geo::enu(a);
+        e * yaw.sin() + n * yaw.cos()
+    };
+    let (fa, fb) = (dir(ya), dir(yb));
+    let ra = fa.cross(up).normalize_or_zero();
+    let rb = fb.cross(up).normalize_or_zero();
+    if ra.length_squared() < 0.5 || rb.length_squared() < 0.5 {
+        return None;
+    }
+    let d = a - b;
+    let mut best = f64::MAX;
+    let mut best_n = DVec3::ZERO;
+    for n in [ra, fa, rb, fb] {
+        let pa = ha[0] * ra.dot(n).abs() + ha[1] * fa.dot(n).abs();
+        let pb = hb[0] * rb.dot(n).abs() + hb[1] * fb.dot(n).abs();
+        let along = d.dot(n);
+        let overlap = pa + pb - along.abs();
+        if overlap <= 0.0 {
+            return None;
+        }
+        if overlap < best {
+            best = overlap;
+            best_n = if along >= 0.0 { n } else { -n };
+        }
+    }
+    (best.is_finite() && best_n.length_squared() > 0.5).then_some((best_n.normalize_or_zero(), best))
 }
 
 /// Fraction of peak torque at `rpm`: a broad arcade curve, strongest around
@@ -769,7 +884,7 @@ mod tests {
         let mut last = VehicleStep::default();
         let n = (secs * 120.0).round() as usize;
         for _ in 0..n {
-            last = v.step(1.0 / 120.0, &c, w, &SurfaceWeather::default());
+            last = v.step(1.0 / 120.0, &c, w, &SurfaceWeather::default(), &[]);
         }
         last
     }
@@ -806,7 +921,7 @@ mod tests {
         let c = VehicleControls { brake: 0.8, ..Default::default() };
         let mut n = 0;
         while brake.speed() > 0.6 && n < 600 {
-            brake.step(1.0 / 120.0, &c, &w, &SurfaceWeather::default());
+            brake.step(1.0 / 120.0, &c, &w, &SurfaceWeather::default(), &[]);
             n += 1;
         }
         assert!(brake.speed() < 1.0, "brakes stopped it: {:.2}", brake.speed());
@@ -818,7 +933,7 @@ mod tests {
         brake.vel = DVec3::ZERO;
         brake.gear = 1;
         for _ in 0..1200 {
-            brake.step(1.0 / 120.0, &VehicleControls::default(), &w, &SurfaceWeather::default());
+            brake.step(1.0 / 120.0, &VehicleControls::default(), &w, &SurfaceWeather::default(), &[]);
         }
         assert_eq!(brake.gear, 1);
     }
@@ -885,11 +1000,11 @@ mod tests {
         let mut air = Vehicle::spawn(0, [0.5; 3], origin() + origin().normalize() * 6.0, std::f64::consts::FRAC_PI_2);
         air.grounded = false;
         air.spawn_grace = 0.0;
-        let first = air.step(1.0 / 120.0, &VehicleControls::default(), &w, &SurfaceWeather::default());
+        let first = air.step(1.0 / 120.0, &VehicleControls::default(), &w, &SurfaceWeather::default(), &[]);
         assert!(!first.grounded);
         let mut landed = None;
         for _ in 0..600 {
-            let s = air.step(1.0 / 120.0, &VehicleControls::default(), &w, &SurfaceWeather::default());
+            let s = air.step(1.0 / 120.0, &VehicleControls::default(), &w, &SurfaceWeather::default(), &[]);
             if s.grounded {
                 landed = Some(s);
                 break;
@@ -919,7 +1034,7 @@ mod tests {
         let mut damage = 0.0;
         let mut impacts = 0;
         for _ in 0..360 {
-            let s = v.step(1.0 / 120.0, &c, &w, &SurfaceWeather::default());
+            let s = v.step(1.0 / 120.0, &c, &w, &SurfaceWeather::default(), &[]);
             damage += s.damage;
             impacts += s.impacts.len();
         }
@@ -980,7 +1095,7 @@ mod tests {
         let w = FlatWorld(Surface::Asphalt);
         let (mut v, _) = car(5, Surface::Asphalt);
         for dt in [1e9, f64::NAN, f64::INFINITY, -1.0, 0.0] {
-            let s = v.step(dt, &VehicleControls { throttle: 1.0, brake: 1.0, steer: 1.0, handbrake: true }, &w, &SurfaceWeather::default());
+            let s = v.step(dt, &VehicleControls { throttle: 1.0, brake: 1.0, steer: 1.0, handbrake: true }, &w, &SurfaceWeather::default(), &[]);
             assert!(s.pos.is_finite() && s.yaw.is_finite() && s.speed.is_finite(), "dt {dt}");
             assert!(v.pos.is_finite() && v.vel.is_finite() && v.damage.health.is_finite());
         }
@@ -1001,6 +1116,57 @@ mod tests {
             let s = drive(&mut v, &w, VehicleControls { throttle: 1.0, steer: 1.0, ..Default::default() }, 0.5);
             assert!(s.pos.is_finite() && s.yaw.is_finite(), "{lat},{lon}");
         }
+    }
+
+    #[test]
+    fn traffic_is_solid_and_hurts_both_cars() {
+        let w = FlatWorld(Surface::Asphalt);
+        let wx = SurfaceWeather::default();
+        let (east, _, _) = geo::enu(origin());
+        let body = |pos: DVec3, velocity: DVec3| crate::world::TrafficBody {
+            kind: crate::world::TrafficKind::Moving,
+            tile: crate::geo::TileId::new(14, 0, 0),
+            index: 0,
+            model: 0,
+            colour: [0.4, 0.4, 0.4],
+            pos,
+            yaw: std::f64::consts::FRAC_PI_2,
+            half: cars::player_geom(0).half,
+            velocity,
+        };
+
+        // Driving into a stopped car: the body is kept out of its box, both
+        // cars take the blow, and the impact is reported as a traffic hit.
+        let (mut v, _) = car(0, Surface::Asphalt);
+        let ahead = body(origin() + east * 9.0, DVec3::ZERO);
+        let c = VehicleControls { throttle: 1.0, ..Default::default() };
+        let (mut hits, mut damage) = (0, 0.0);
+        for _ in 0..300 {
+            let s = v.step(1.0 / 120.0, &c, &w, &wx, &[ahead]);
+            hits += s.traffic_hits.len();
+            damage += s.damage;
+            assert!(s.traffic_hits.iter().all(|h| h.body.index == 0 && h.speed > 0.0));
+        }
+        assert!(hits > 0, "the traffic hit is reported");
+        assert!(damage > 0.0 && v.damage.health < MAX_HEALTH, "the player's car is hurt: {damage:.1}");
+        let along = (v.pos - origin()).dot(east);
+        assert!(along < 6.5, "kept out of the traffic box: centre {along:.2} m along");
+
+        // A car running into the player's stationary car: the player is pushed
+        // clear and hurt, without the box ever overlapping.
+        let (mut still, _) = car(0, Surface::Asphalt);
+        let shunt = body(origin() + east * 4.0, -east * 8.0);
+        let s = still.step(1.0 / 120.0, &VehicleControls::default(), &w, &wx, &[shunt]);
+        assert!(!s.traffic_hits.is_empty(), "a shunting car is reported");
+        assert!(still.damage.health < MAX_HEALTH, "and hurts");
+        assert!((still.pos - origin()).dot(east) < -0.2, "pushed back clear: {:.2}", (still.pos - origin()).dot(east));
+
+        // Nothing within reach: no hits, no damage.
+        let (mut clear, _) = car(0, Surface::Asphalt);
+        let far = body(origin() + east * 40.0, DVec3::ZERO);
+        let s = clear.step(1.0 / 120.0, &VehicleControls::default(), &w, &wx, &[far]);
+        assert!(s.traffic_hits.is_empty() && s.damage == 0.0);
+        assert_eq!(clear.damage.health, MAX_HEALTH);
     }
 
     #[test]
