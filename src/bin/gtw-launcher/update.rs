@@ -1,5 +1,5 @@
 //! Updates from the project's GitHub releases. Each release carries one
-//! archive per platform, `fableflight-<tag>-<os>-<arch>.zip` (Windows) or
+//! archive per platform, `gtw-<tag>-<os>-<arch>.zip` (Windows) or
 //! `.tar.gz`, holding a folder with the executables, the README and the
 //! licence (.github/workflows/release.yml), and `SHA256SUMS.txt`.
 //!
@@ -12,10 +12,10 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-pub const REPO: &str = "Rolandjg/fableflight";
-pub const REPO_URL: &str = "https://github.com/Rolandjg/fableflight";
+pub const REPO: &str = "galatolofederico/gtw";
+pub const REPO_URL: &str = "https://github.com/galatolofederico/gtw";
 pub const DISCORD_URL: &str = "https://discord.gg/9akYzMRBc6";
-const USER_AGENT: &str = concat!("fableflight-launcher/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("gtw-launcher/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Clone, Debug)]
 pub struct Release {
@@ -117,6 +117,7 @@ pub enum Phase {
 }
 
 /// What an update did.
+#[derive(Debug)]
 pub struct Installed {
     pub tag: String,
     /// the launcher itself was replaced: restart it to run the new one
@@ -126,7 +127,7 @@ pub struct Installed {
 /// Downloads `rel`'s archive for this machine and puts its files in `dir`.
 pub fn install(rel: &Release, dir: &Path, progress: &dyn Fn(Phase, u64, u64)) -> Result<Installed, String> {
     let asset = rel.archive().ok_or_else(|| format!("{} has no download for {}", rel.tag, platform().unwrap_or(std::env::consts::OS)))?;
-    let staging = dir.join(".fableflight-update");
+    let staging = dir.join(".gtw-update");
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).map_err(|e| format!("can't write to {}: {e}", dir.display()))?;
     let result = (|| {
@@ -192,11 +193,11 @@ fn download(url: &str, size: u64, to: &Path, progress: &dyn Fn(u64, u64)) -> Res
 }
 
 pub fn game_name() -> &'static str {
-    if cfg!(windows) { "fablegame.exe" } else { "fablegame" }
+    if cfg!(windows) { "gtw.exe" } else { "gtw" }
 }
 
 pub fn launcher_name() -> &'static str {
-    if cfg!(windows) { "fableflight-launcher.exe" } else { "fableflight-launcher" }
+    if cfg!(windows) { "gtw-launcher.exe" } else { "gtw-launcher" }
 }
 
 /// A file of the archive's top folder: just its name, nothing deeper and
@@ -322,11 +323,11 @@ fn old_name(dest: &Path, k: u32) -> PathBuf {
 
 /// Deletes what the last update left behind.
 pub fn clean_up(dir: &Path) {
-    let _ = std::fs::remove_dir_all(dir.join(".fableflight-update"));
+    let _ = std::fs::remove_dir_all(dir.join(".gtw-update"));
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let n = e.file_name().to_string_lossy().to_string();
-            let ours = n.starts_with("fablegame") || n.starts_with("fableflight") || n.starts_with("README") || n.starts_with("LICENSE");
+            let ours = n.starts_with("gtw") || n.starts_with("README") || n.starts_with("LICENSE");
             if ours && (n.ends_with(".old") || n.rsplit_once(".old").is_some_and(|(_, k)| !k.is_empty() && k.chars().all(|c| c.is_ascii_digit()))) {
                 let _ = std::fs::remove_file(e.path());
             }
@@ -334,7 +335,7 @@ pub fn clean_up(dir: &Path) {
     }
 }
 
-/// The installed game's version (`fablegame --version`; games before 1.0.2
+/// The installed game's version (`gtw --version`; games before 1.0.2
 /// don't answer it).
 pub fn game_version(exe: &Path) -> Option<String> {
     let mut cmd = std::process::Command::new(exe);
@@ -346,7 +347,7 @@ pub fn game_version(exe: &Path) -> Option<String> {
     }
     let out = cmd.output().ok()?;
     let s = String::from_utf8_lossy(&out.stdout);
-    let v = s.trim().strip_prefix("fablegame ")?;
+    let v = s.trim().strip_prefix("gtw ")?;
     (out.status.success() && version(v).is_some()).then(|| format!("v{v}"))
 }
 
@@ -365,22 +366,22 @@ mod tests {
 
     #[test]
     fn archive_paths() {
-        assert_eq!(top_file("fableflight-v1.0.1-linux-x86_64/fablegame").as_deref(), Some("fablegame"));
-        assert_eq!(top_file("./fableflight-v1/README.md").as_deref(), Some("README.md"));
+        assert_eq!(top_file("gtw-v1.0.1-linux-x86_64/gtw").as_deref(), Some("gtw"));
+        assert_eq!(top_file("./gtw-v1/README.md").as_deref(), Some("README.md"));
         assert_eq!(top_file("a/b/c"), None);
         assert_eq!(top_file("a/.."), None);
-        assert_eq!(top_file("dir\\fablegame.exe").as_deref(), Some("fablegame.exe"));
+        assert_eq!(top_file("dir\\gtw.exe").as_deref(), Some("gtw.exe"));
     }
 
     #[test]
     fn unpacks_a_tarball() {
         // a tarball as the release workflow makes it (tar czf)
-        let dir = std::env::temp_dir().join(format!("ff-launcher-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("gtw-launcher-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("src/fableflight-v9.9.9-test")).unwrap();
-        std::fs::write(dir.join("src/fableflight-v9.9.9-test/fablegame"), b"#!/bin/sh\necho hi\n").unwrap();
-        std::fs::write(dir.join("src/fableflight-v9.9.9-test/README.md"), vec![b'x'; 1500]).unwrap();
-        let ok = std::process::Command::new("tar").args(["czf", "../a.tar.gz", "fableflight-v9.9.9-test"]).current_dir(dir.join("src")).status().is_ok_and(|s| s.success());
+        std::fs::create_dir_all(dir.join("src/gtw-v9.9.9-test")).unwrap();
+        std::fs::write(dir.join("src/gtw-v9.9.9-test/gtw"), b"#!/bin/sh\necho hi\n").unwrap();
+        std::fs::write(dir.join("src/gtw-v9.9.9-test/README.md"), vec![b'x'; 1500]).unwrap();
+        let ok = std::process::Command::new("tar").args(["czf", "../a.tar.gz", "gtw-v9.9.9-test"]).current_dir(dir.join("src")).status().is_ok_and(|s| s.success());
         if !ok {
             return; // no tar here
         }
@@ -388,15 +389,34 @@ mod tests {
         std::fs::create_dir_all(&out).unwrap();
         let mut files = unpack(&dir.join("a.tar.gz"), &out).unwrap();
         files.sort();
-        assert_eq!(files, ["README.md", "fablegame"]);
+        assert_eq!(files, ["README.md", "gtw"]);
         assert_eq!(std::fs::read(out.join("README.md")).unwrap().len(), 1500);
-        assert_eq!(std::fs::read(out.join("fablegame")).unwrap(), b"#!/bin/sh\necho hi\n");
+        assert_eq!(std::fs::read(out.join("gtw")).unwrap(), b"#!/bin/sh\necho hi\n");
         // and swapping a file in keeps the old one beside it until the clean-up
-        std::fs::write(dir.join("fablegame"), b"old").unwrap();
-        swap_in(&out.join("fablegame"), &dir.join("fablegame")).unwrap();
-        assert_eq!(std::fs::read(dir.join("fablegame.old")).unwrap(), b"old");
+        std::fs::write(dir.join("gtw"), b"old").unwrap();
+        swap_in(&out.join("gtw"), &dir.join("gtw")).unwrap();
+        assert_eq!(std::fs::read(dir.join("gtw.old")).unwrap(), b"old");
         clean_up(&dir);
-        assert!(!dir.join("fablegame.old").exists());
+        assert!(!dir.join("gtw.old").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gtw_identity_and_no_release_is_graceful() {
+        assert_eq!(REPO, "galatolofederico/gtw");
+        assert!(REPO_URL.ends_with("galatolofederico/gtw"));
+        assert!(game_name().starts_with("gtw"));
+        assert!(launcher_name().starts_with("gtw-launcher"));
+        // A repository with no published release offers nothing to install,
+        // and says so instead of touching the files.
+        let rel = Release { tag: "v9.9.9".into(), name: "empty".into(), body: String::new(), date: String::new(), url: REPO_URL.into(), assets: Vec::new() };
+        assert!(rel.archive().is_none());
+        let dir = std::env::temp_dir().join(format!("gtw-launcher-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = install(&rel, &dir, &|_, _, _| {}).unwrap_err();
+        assert!(err.contains("has no download"), "{err}");
+        assert!(!dir.join(game_name()).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,10 +1,10 @@
-//! FableFlight Launcher: a small window that opens at once and gets the game
+//! GTW Launcher: a small window that opens at once and gets the game
 //! going. It shows how far the game's (slow, shader-compiling) start has got,
 //! keeps the game up to date from the GitHub releases with their changelog,
 //! sets the graphics before the game loads (with a suggestion for the GPU),
 //! and runs a short graphics test to show whether a preset flies smoothly.
 //!
-//! It lives beside `fablegame` (the release archives hold both) and works on
+//! It lives beside `gtw` (the release archives hold both) and works on
 //! the files in that folder; the graphics settings are the game's own
 //! `graphics.json` (src/graphics_core.rs, shared with the game).
 //!
@@ -28,6 +28,7 @@ use config::{BenchResult, Config, Verdict};
 use crossbeam_channel::Receiver;
 use egui::{Color32, Rect, RichText, pos2, vec2};
 use graphics_core::{Graphics, Level, Preset, Upscaler};
+use gtw::paths;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -47,6 +48,10 @@ const BENCH_SETTLE: f64 = 16.0;
 const BENCH_FLIGHT: [&str; 21] = ["--no-menu", "--start", "plane", "--no-save", "--mute", "--no-mcp", "--aircraft", "c172", "--lat", "37.735", "--lon", "-122.43", "--alt", "650", "--heading", "20", "--time", "15", "--clouds", "0.35", "--no-vsync"];
 
 fn main() -> eframe::Result {
+    let migration = paths::prepare();
+    if !migration.copied.is_empty() {
+        println!("GTW imported {} file(s) from the old FableFlight settings folder.", migration.copied.len());
+    }
     // FABLE_LAUNCHER_SHOT=out.png: a picture of a page drawn off screen (shot.rs)
     if let Some(path) = std::env::var_os("FABLE_LAUNCHER_SHOT") {
         let page = match std::env::var("FABLE_LAUNCHER_PAGE").as_deref() {
@@ -66,8 +71,8 @@ fn main() -> eframe::Result {
         egui::IconData { width: i.width(), height: i.height(), rgba: i.into_raw() }
     });
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("FableFlight Launcher")
-        .with_app_id("fableflight-launcher")
+        .with_title("GTW Launcher")
+        .with_app_id("gtw-launcher")
         .with_inner_size([1140.0, 720.0])
         .with_min_inner_size([940.0, 620.0]);
     if let Some(i) = icon {
@@ -78,7 +83,7 @@ fn main() -> eframe::Result {
     // repaints only while something is under way, so this costs nothing idle)
     let mut options = eframe::NativeOptions { viewport, centered: true, ..Default::default() };
     options.wgpu_options.surface.present_mode = egui_wgpu::wgpu::PresentMode::AutoNoVsync;
-    eframe::run_native("FableFlight Launcher", options, Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx, cc.wgpu_render_state.as_ref().map(|rs| rs.adapter.get_info()))))))
+    eframe::run_native("GTW Launcher", options, Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx, cc.wgpu_render_state.as_ref().map(|rs| rs.adapter.get_info()))))))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -194,7 +199,7 @@ impl App {
         update::clean_up(&dir);
         let game = dir.join(update::game_name());
         let writable = {
-            let probe = dir.join(".fableflight-write-test");
+            let probe = dir.join(".gtw-write-test");
             let ok = std::fs::write(&probe, b"").is_ok();
             let _ = std::fs::remove_file(&probe);
             ok
@@ -237,8 +242,14 @@ impl App {
             me,
             writable,
         };
-        if app.cfg.check_updates || !app.game.exists() {
+        // Automatic checks are off by default: the fork must never replace
+        // itself with an upstream FableFlight release on its own.
+        if app.cfg.check_updates {
             app.check_updates(ctx);
+        }
+        let copied = paths::migration().copied.len();
+        if copied > 0 {
+            app.ended = Some((format!("Imported {copied} setting file(s) from FableFlight."), false));
         }
         app
     }
@@ -622,7 +633,7 @@ impl App {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("FABLE FLIGHT").font(style::bold(30.0)).color(Color32::WHITE).extra_letter_spacing(2.0));
+                    ui.label(RichText::new("GTW").font(style::bold(30.0)).color(Color32::WHITE).extra_letter_spacing(2.0));
                     ui.add_space(4.0);
                     ui.label(RichText::new("LAUNCHER").font(style::bold(14.0)).color(ACCENT).extra_letter_spacing(3.0));
                 });
@@ -783,8 +794,10 @@ impl App {
                     } else {
                         match &self.releases {
                             Releases::Ready(r) if r.first().and_then(|r| r.archive()).is_some() => format!("Install {} ({})", r[0].tag, style::bytes(r[0].archive().map_or(0, |a| a.size))),
+                            Releases::Ready(_) => "No GTW release is available to install yet: build it with cargo build --release, or check again later.".into(),
                             Releases::Failed(e) => format!("Can't reach GitHub: {e}"),
-                            _ => "Looking for the latest release…".into(),
+                            Releases::Checking(_) => "Checking GitHub for a GTW release…".into(),
+                            Releases::Unknown => "Check for updates, or build the game with cargo build --release.".into(),
                         }
                     };
                     return (format!("{} not found", update::game_name()), why, None, matches!(self.releases, Releases::Checking(_)), ACCENT);
@@ -802,7 +815,7 @@ impl App {
     fn home(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         ui.add_space(18.0);
-        ui.label(RichText::new("An open-world flight simulator with real weather, live traffic and the whole planet to fly over.").size(17.0).color(DIM));
+        ui.label(RichText::new("An open-world sandbox on the real Earth: walk, drive and fly, with real weather and the whole planet to explore.").size(17.0).color(DIM));
         ui.add_space(14.0);
         if let Some(rel) = self.update_available().cloned() {
             if self.game.exists() {
@@ -1186,7 +1199,7 @@ impl App {
     fn updates_page(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         ui.add_space(14.0);
-        style::page_title(ui, "Updates", "New versions come straight from the FableFlight releases on GitHub: no need to download anything by hand.");
+        style::page_title(ui, "Updates", "New versions come from the GTW releases on GitHub. Automatic updates are off: nothing here installs unless you press the button.");
         style::card(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {

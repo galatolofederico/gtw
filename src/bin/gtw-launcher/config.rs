@@ -1,4 +1,4 @@
-//! What the launcher keeps between runs, in `<config>/fablegame/launcher.json`
+//! What the launcher keeps between runs, in `<config>/gtw/launcher.json`
 //! beside the game's own settings: how long each stage of the last start
 //! took (for the progress bar), the graphics test results and a few options.
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,8 @@ pub struct Config {
     pub stage_ms: Vec<(String, u64)>,
     /// minimise the launcher once the game's window is drawing
     pub minimize_on_ready: bool,
-    /// look for a new release when the launcher opens
+    /// look for a new release when the launcher opens (off by default: the
+    /// fork must not update itself from an upstream release)
     pub check_updates: bool,
     /// the release this launcher last installed into its folder
     pub installed_tag: Option<String>,
@@ -21,7 +22,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { stage_ms: Vec::new(), minimize_on_ready: true, check_updates: true, installed_tag: None, bench: Vec::new() }
+        Config { stage_ms: Vec::new(), minimize_on_ready: true, check_updates: false, installed_tag: None, bench: Vec::new() }
     }
 }
 
@@ -95,7 +96,7 @@ impl Verdict {
 }
 
 fn path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("fablegame").join("launcher.json"))
+    crate::paths::config().map(|d| d.join("launcher.json"))
 }
 
 impl Config {
@@ -113,5 +114,17 @@ impl Config {
         if std::fs::write(&tmp, serde_json::to_vec_pretty(self).unwrap_or_default()).is_ok() {
             let _ = std::fs::rename(&tmp, &p);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gtw_defaults_never_update_on_their_own() {
+        let c = Config::default();
+        assert!(!c.check_updates);
+        assert_eq!(c.installed_tag, None);
     }
 }

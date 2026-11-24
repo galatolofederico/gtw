@@ -2,7 +2,7 @@
 //! The game is started with `FABLE_PROGRESS=1`, so it prints each stage of
 //! its start on stdout (src/progress.rs); the graphics test also prints its
 //! result there (`@fable-bench {json}`). Its log (stderr) is kept in
-//! `<cache>/fablegame/last-run.log` and the last lines shown if it fails.
+//! `<cache>/gtw/last-run.log` and the last lines shown if it fails.
 //!
 //! The stages go into the start's `Timeline` on the reading thread itself,
 //! not when the window next draws: a window the game's covers (Wayland) may
@@ -43,7 +43,7 @@ impl Running {
 
 /// The game's log of the last run.
 pub fn log_path() -> PathBuf {
-    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("fablegame").join("last-run.log")
+    crate::paths::cache().unwrap_or_else(std::env::temp_dir).join("last-run.log")
 }
 
 /// Starts the game with these arguments; `history` is the last start's
@@ -52,7 +52,7 @@ pub fn spawn(exe: &Path, args: &[String], history: &[(String, u64)], ctx: Option
     let mut cmd = Command::new(exe);
     cmd.args(args).env("FABLE_PROGRESS", "1").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if std::env::var_os("RUST_LOG").is_none() {
-        cmd.env("RUST_LOG", "warn,fablegame=info");
+        cmd.env("RUST_LOG", "warn,gtw=info");
     }
     if let Some(dir) = exe.parent().filter(|d| !d.as_os_str().is_empty()) {
         cmd.current_dir(dir);
