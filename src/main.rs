@@ -29,6 +29,7 @@ mod hangar_ui;
 mod bind;
 mod i18n;
 mod jsbsim;
+mod landcover;
 mod live;
 mod radar;
 mod livewx;
@@ -71,6 +72,7 @@ mod roads;
 mod scenery;
 mod skin;
 mod sources;
+mod surface;
 mod traffic;
 mod trees;
 mod upscale;
@@ -312,6 +314,9 @@ struct Args {
     live_weather: bool,
     /// print where it is storming now (weather radar) and quit
     find_storms: bool,
+    /// --surface-probe LAT,LON: print the point's elevation, OSM class,
+    /// WorldCover class and merged surface, then quit
+    surface_probe: Option<(f64, f64)>,
     vsync: bool,
     taa: bool,
     /// graphics preset and render resolution for this run (not saved; on a
@@ -430,7 +435,7 @@ struct Args {
     mcp_port: u16,
 }
 
-const CLI_USAGE: &str = "fablegame [--version] [--menu | --no-menu] [--menu-screen main|fly|aircraft|settings] [--menu-view LAT,LON,ALT_M] [--hangar mine|download[:FOLDER]] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--speed KT] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--rain 0..1] [--rain-at KM,BEARING] [--wet 0..1] [--birds off|low|medium|high] [--flock gull|crow|starling|buzzard|goose,KM[,BEARING[,AGL_M]]] [--snow auto|off|always] [--weather [clear|fair|hazy|overcast|windy|storm]] [--storm-at KM,BEARING[,RADIUS_KM][,shower|thunder|severe|supercell]] [--squall-at KM,BEARING[,LENGTH_KM]] [--strike cg|ic,KM,BEARING@SECONDS] [--flight-menu SECONDS] [--pause-menu flight|places|radio|weather|game|settings[:SECTION]|controls|failures[@SECONDS]] [--settings general|graphics|sound|camera|controls|map] [--airport CODE [--runway 28L] [--approach]] [--aircraft KEY] [--max-zoom 8..19] [--cockpit | --tail-view] [--fov DEG] [--no-vsync] [--no-taa] [--graphics very-low|low|medium|high|ultra] [--storm-quality low|medium|high|ultra] [--contrails | --no-contrails] [--dynamic FPS] [--render-scale 0.35..2] [--upscaler bilinear|fsr1|fsr3|fsr4] [--fsr4-install] [--headless] [--minimap plan|satellite] [--minimap-up north|heading] [--full-map] [--fps-log] [--bench SECONDS] [--mute] [--lang CODE] [--fuel 0..1] [--cold] [--arcade] [--mcp | --no-mcp] [--mcp-port PORT] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--no-scenery] [--livery N] [--still] [--boost-at SECONDS] [--stage-at SECONDS] [--engines GROUP] [--ship] [--damage ...]";
+const CLI_USAGE: &str = "fablegame [--version] [--menu | --no-menu] [--menu-screen main|fly|aircraft|settings] [--menu-view LAT,LON,ALT_M] [--hangar mine|download[:FOLDER]] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--speed KT] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--rain 0..1] [--rain-at KM,BEARING] [--wet 0..1] [--birds off|low|medium|high] [--flock gull|crow|starling|buzzard|goose,KM[,BEARING[,AGL_M]]] [--snow auto|off|always] [--weather [clear|fair|hazy|overcast|windy|storm]] [--storm-at KM,BEARING[,RADIUS_KM][,shower|thunder|severe|supercell]] [--squall-at KM,BEARING[,LENGTH_KM]] [--strike cg|ic,KM,BEARING@SECONDS] [--flight-menu SECONDS] [--pause-menu flight|places|radio|weather|game|settings[:SECTION]|controls|failures[@SECONDS]] [--settings general|graphics|sound|camera|controls|map] [--airport CODE [--runway 28L] [--approach]] [--aircraft KEY] [--max-zoom 8..19] [--cockpit | --tail-view] [--fov DEG] [--no-vsync] [--no-taa] [--graphics very-low|low|medium|high|ultra] [--storm-quality low|medium|high|ultra] [--contrails | --no-contrails] [--dynamic FPS] [--render-scale 0.35..2] [--upscaler bilinear|fsr1|fsr3|fsr4] [--fsr4-install] [--headless] [--minimap plan|satellite] [--minimap-up north|heading] [--full-map] [--fps-log] [--bench SECONDS] [--mute] [--lang CODE] [--fuel 0..1] [--cold] [--arcade] [--mcp | --no-mcp] [--mcp-port PORT] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--no-scenery] [--surface-probe LAT,LON] [--livery N] [--still] [--boost-at SECONDS] [--stage-at SECONDS] [--engines GROUP] [--ship] [--damage ...]";
 
 fn parse_args() -> Args {
     let v: Vec<String> = std::env::args().skip(1).collect();
@@ -472,6 +477,7 @@ fn parse_args_from(v: &[String]) -> Result<Args, String> {
         weather_panel: false,
         live_weather: false,
         find_storms: false,
+        surface_probe: None,
         vsync: true,
         taa: true,
         graphics: None,
@@ -930,6 +936,13 @@ fn parse_args_from(v: &[String]) -> Result<Args, String> {
             "--find-storms" => {
                 a.find_storms = true;
                 used = 1;
+            }
+            "--surface-probe" => {
+                let p = req_nums(flag, i, 2, 2)?;
+                if !(-90.0..=90.0).contains(&p[0]) || !(-180.0..=180.0).contains(&p[1]) {
+                    return Err(format!("{flag}: latitude must be within -90..=90 and longitude within -180..=180"));
+                }
+                a.surface_probe = Some((p[0], p[1]));
             }
             "--bench" => a.bench = Some(req_num(flag, i)?.clamp(3.0, 120.0)),
             "--fps-log" => {
@@ -8905,6 +8918,38 @@ fn fly_check(key: Option<&String>) -> i32 {
     0
 }
 
+/// `--surface-probe LAT,LON`: report the elevation and every surface source at
+/// a point, then exit. Needs no window or GPU.
+fn surface_probe(lat: f64, lon: f64, offline: bool, imagery: String) -> anyhow::Result<()> {
+    let cache = dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")).join("fablegame");
+    let src = sources::Sources::new(fetch::Fetcher::new(cache, offline), imagery);
+    let (la, lo) = (lat.to_radians(), lon.to_radians());
+    let id = geo::TileId::at(la, lo, sources::DATA_ZOOM);
+    let (u, v) = id.frac(la, lo);
+    let elev = src.elev(id).ok().map(|e| e.sample(u, v) as f64).unwrap_or(0.0);
+    let (mx, my) = (((u * sources::MASK as f64) as usize).min(sources::MASK - 1), ((v * sources::MASK as f64) as usize).min(sources::MASK - 1));
+    let landcover = src.landcover(id).ok();
+    let worldcover = landcover.as_ref().map(|lc| lc[my * sources::MASK + mx]).filter(|c| *c != 0);
+    let (osm, water) = match src.vector(id) {
+        Ok(vt) => {
+            let mask = sources::ground_mask(&vt, 0.0, 0.0, 1.0, id.width_m());
+            let i = (my * sources::MASK + mx) * 4;
+            (Some(mask[i + 2] & 0x0f), mask[i] > 127)
+        }
+        Err(e) => {
+            eprintln!("OSM tile unavailable: {e}");
+            (None, false)
+        }
+    };
+    let merged = surface::merge(osm.unwrap_or(0), water, worldcover);
+    println!("surface probe {lat:.5}, {lon:.5}");
+    println!("  elevation   {elev:.1} m");
+    println!("  OSM class   {}", osm.map(surface::osm_name).unwrap_or("unavailable"));
+    println!("  WorldCover  {}", worldcover.map(surface::worldcover_name).unwrap_or("unavailable"));
+    println!("  surface     {} ({:?})", merged.name(), merged);
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     if std::env::args().skip(1).any(|a| a == "--version" || a == "-V") {
         println!("fablegame {}", env!("CARGO_PKG_VERSION"));
@@ -8951,6 +8996,9 @@ fn main() -> anyhow::Result<()> {
     // Downloaded JSBSim aircraft join the list before `--aircraft` is read.
     hangar::load_installed();
     let args = parse_args();
+    if let Some((lat, lon)) = args.surface_probe {
+        return surface_probe(lat, lon, args.offline, args.imagery.clone());
+    }
     if args.find_storms {
         let cache = dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")).join("fablegame");
         match livewx::find_storms(&fetch::Fetcher::new(cache, false)) {
@@ -9140,5 +9188,16 @@ mod cli_tests {
         assert_eq!(a.lang.map(|lang| lang.code()), Some("ko"));
         assert!(a.weather_panel);
         assert!(!a.mcp);
+    }
+
+    #[test]
+    fn surface_probe_parses_a_point() {
+        let a = parse_args_from(&s(&["--surface-probe", "-34.6037,-58.3816"])).unwrap();
+        let (lat, lon) = a.surface_probe.unwrap();
+        assert!((lat + 34.6037).abs() < 1e-9);
+        assert!((lon + 58.3816).abs() < 1e-9);
+        assert!(parse_args_from(&s(&["--surface-probe", "91,0"])).is_err());
+        assert!(parse_args_from(&s(&["--surface-probe", "0,181"])).is_err());
+        assert!(parse_args_from(&s(&["--surface-probe", "0"])).is_err());
     }
 }
