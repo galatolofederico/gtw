@@ -1327,6 +1327,10 @@ ground.re_enter_car = "Remonter"
 ground.leave_car = "Descendre"
 ground.hood_view = "Vue capot"
 ground.chase_view = "Vue poursuite"
+ground.damage = "Dégâts"
+ground.enter_aircraft = "Monter dans cet avion"
+ground.re_enter_aircraft = "Remonter dans l’avion"
+ground.airport_start = "Démarrer un avion ici"
 
 # ---- resume save
 save.resumed_on_foot = "Reprise à pied"

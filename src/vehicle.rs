@@ -252,6 +252,11 @@ pub struct Vehicle {
     pub wheel_spin: f64,
     pub roll: f32,
     pub pitch: f32,
+    /// Engine speed (rpm) and the driver's inputs, kept for the sound mix.
+    pub rpm: f64,
+    pub load: f32,
+    pub brake: f32,
+    pub handbrake: bool,
     /// Distance driven this life (m).
     pub distance: f64,
     /// Collision box (half width, half length) and drawn size (m).
@@ -278,7 +283,7 @@ impl Vehicle {
         let yaw = if yaw.is_finite() { yaw } else { 0.0 };
         let cda = drag_area(&tuning);
         let g = cars::player_geom(model);
-        Self { model, colour, pos, vel: DVec3::ZERO, yaw, gear: 1, damage: VehicleDamage::intact(), steer: 0.0, grounded: false, water: false, wheel_spin: 0.0, roll: 0.0, pitch: 0.0, distance: 0.0, extent: g.half, length: CAR_LEN[model as usize] as f64, width_m: g.half[0] * 2.0, tuning, cda, spawn_grace: 1.0, traffic_cool: 0.0 }
+        Self { model, colour, pos, vel: DVec3::ZERO, yaw, gear: 1, damage: VehicleDamage::intact(), steer: 0.0, grounded: false, water: false, wheel_spin: 0.0, roll: 0.0, pitch: 0.0, rpm: 0.0, load: 0.0, brake: 0.0, handbrake: false, distance: 0.0, extent: g.half, length: CAR_LEN[model as usize] as f64, width_m: g.half[0] * 2.0, tuning, cda, spawn_grace: 1.0, traffic_cool: 0.0 }
     }
 
     /// Length and width for the collision box and the drawn meshes (m).
@@ -331,6 +336,10 @@ impl Vehicle {
         self.gear = 1;
         self.roll = 0.0;
         self.pitch = 0.0;
+        self.rpm = 0.0;
+        self.load = 0.0;
+        self.brake = 0.0;
+        self.handbrake = false;
     }
 
     /// How fast the engine should be turning in `gear` at `v` m/s.
@@ -363,6 +372,10 @@ impl Vehicle {
         out.lateral = self.lateral();
         out.gear = self.gear;
         out.rpm = self.rpm_for(self.gear, out.speed);
+        self.rpm = out.rpm;
+        self.load = (if self.gear < 0 { c.brake } else { c.throttle }).clamp(0.0, 1.0) as f32;
+        self.brake = (if self.gear < 0 { c.throttle } else { c.brake }).clamp(0.0, 1.0) as f32;
+        self.handbrake = c.handbrake;
         out.steer = self.steer;
         out.grounded = self.grounded;
         out.water = self.water;

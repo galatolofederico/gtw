@@ -181,6 +181,23 @@ fn health_bar(health: f32) -> (f32, String) {
     (h / character::MAX_HEALTH, format!("{:.0}", h))
 }
 
+/// The aircraft's liveness and the synth's master volume for this frame. Flight
+/// keeps exactly the level it had before ground play existed; the menus are
+/// silent. (The ground mix has its own liveness in `audio::WorldAudio`.)
+fn audio_levels(mode: Mode, crashed: bool, in_menu: bool, dt: f64, sound_on: bool, volume: f32) -> (f32, f32) {
+    if in_menu || mode == Mode::Menu {
+        return (0.0, 0.0);
+    }
+    let live = !crashed && dt > 0.0 && mode == Mode::Fly;
+    (if live { 1.0 } else { 0.0 }, if sound_on { volume } else { 0.0 })
+}
+
+/// The car HUD's body damage, as a percentage.
+fn drive_damage_text(crumple: f32) -> String {
+    let c = if crumple.is_finite() { crumple.clamp(0.0, 1.0) } else { 0.0 };
+    format!("{:.0}%", c * 100.0)
+}
+
 /// The car HUD's speed, in km/h, as a whole number.
 fn drive_speed_text(speed_mps: f64) -> String {
     let v = if speed_mps.is_finite() { speed_mps.abs() * 3.6 } else { 0.0 };
@@ -1579,6 +1596,8 @@ struct Game {
     prev_vs: f64,
     prev_gear: f64,
     prev_flaps: f64,
+    /// when the car last scraped or skidded hard (s)
+    last_skid: f64,
     quit: bool,
     mode: Mode,
     /// the character on foot, and whether the aircraft is out in the world
@@ -2104,7 +2123,7 @@ impl Game {
             status, status_until: 8.0, shots: args.shots.clone(), crash_at: args.crash_at, boost_at: args.boost_at, stage_at: args.stage_at, engines: args.engines, hold: args.hold, gilrs: open_gamepads(), pad: Controls::default(), pad_id: None, pad_fixed: Vec::new(), pad_events: Vec::new(), pad_move: None, pad_skip: None, pad_rep: None, pad_home: false, pad_y: false, pad_y_combo: false, pad_held: Vec::new(), pad_note: (String::new(), 0.0), pad_aim: false, pad_live: None, ap: autopilot::Autopilot::default(), ap_off_t: -100.0, ap_script: args.ap_script.clone(), cam_home: (cam_yaw0, cam_pitch0), rng: crash::Rng(secs.to_bits() | 1),
             audio: if args.record.is_some() { Some(audio::Audio::offline()) } else if args.mute { None } else { audio::Audio::new() },
             record: args.record.clone(), rec_audio: Vec::new(), rec_n: 0, rec_t0: Instant::now(), sound_on: prefs.sound_on, volume: prefs.volume, snow: args.snow.unwrap_or(prefs.snow), info_open: args.weather_panel, radial: Default::default(), info_page: if args.weather_panel { menu::Page::Weather } else { menu::Page::Flight }, pause_open: false, pause_page: menu::Page::Game, pause_at: args.pause_menu, radial_at: args.flight_menu, settings_sec: args.settings.unwrap_or(settings_ui::Section::General), look_sens: prefs.look_sens, invert_look_cockpit: prefs.invert_look_cockpit, invert_look_outside_x: prefs.invert_look_outside_x, invert_look_outside_y: prefs.invert_look_outside_y, head: cockpit::Head::new(cam_yaw0, cam_pitch0), cockpit_fov: args.fov.unwrap_or(prefs.cockpit_fov).clamp(30.0, 90.0), head_live: false, warn: audio::Warn::default(), warn_t: [-10.0; 4],
-            g_slow: 1.0, last_bump: 0.0, was_ground: false, prev_vs: 0.0, prev_gear: plane.gear, prev_flaps: plane.flaps, quit: false,
+            g_slow: 1.0, last_bump: 0.0, was_ground: false, prev_vs: 0.0, prev_gear: plane.gear, prev_flaps: plane.flaps, last_skid: 0.0, quit: false,
             mode,
             plane_visible: mode == Mode::Fly,
             vehicle: start_vehicle,
@@ -2369,6 +2388,15 @@ impl Game {
     /// Whether a moving car is close enough to flag down.
     fn traffic_in_reach(&self, radius: f64) -> bool {
         self.world.nearest_traffic_car(self.character.pos, radius).is_some()
+    }
+
+    /// Sound the car's horn, and say so on the HUD.
+    fn honk(&mut self) {
+        self.status = t!("ground.horn").into();
+        self.status_until = self.real + 1.0;
+        if let Some(a) = &self.audio {
+            a.event(audio::Event::Horn(1.0));
+        }
     }
 
     /// `--carjack`: the scripted take-and-exit the headless smoke run drives.
@@ -3907,6 +3935,17 @@ impl Game {
         let c = character::CharacterControls { heading: Some(self.cam_yaw), ..c };
         let s = self.character.step(dt, &c, &self.world, &wx);
         self.pad_jump = false;
+        // Footsteps: one sound per step, placed at the body and timed by the
+        // stride phase in the character (surface class included).
+        if !s.footsteps.is_empty() {
+            if let Some(a) = &self.audio {
+                let right = self.audio_right(self.cam_pos);
+                let (gain, pan) = audio::emitter_gain_pan(self.cam_pos, right, self.character.pos);
+                for surface in &s.footsteps {
+                    a.event(audio::Event::Footstep { surface: *surface, gain, pan });
+                }
+            }
+        }
         // Traffic is solid: a car that runs into the body knocks it away, hurts
         // it, and brakes for a few seconds afterwards.
         let mut traffic = Vec::new();
@@ -3914,10 +3953,13 @@ impl Game {
         let hit = self.character.hit_traffic(&traffic);
         if let Some(hit) = hit {
             self.world.brake_traffic(&hit.body);
-            // Drained here by the HUD and the screen flash; audio follows later.
+            // Drained here by the HUD and the screen flash.
             self.flash.push((t!("ground.hit_by_car", hit.damage), self.real));
             self.status = t!("ground.hit_by_car", hit.damage).into();
             self.status_until = self.real + 2.5;
+            if let Some(a) = &self.audio {
+                a.event(audio::Event::Crash((hit.speed / 12.0).clamp(0.3, 1.2) as f32));
+            }
         }
         if s.died {
             self.status = t!("ground.you_died_respawning").into();
@@ -3946,6 +3988,24 @@ impl Game {
         for hit in &s.traffic_hits {
             self.world.hurt_traffic(&hit.body, hit.speed);
         }
+        let skid = c.handbrake && speed.abs() > 4.0 && self.real - self.last_skid > 0.55;
+        if skid {
+            self.last_skid = self.real;
+        }
+        if let Some(a) = &self.audio {
+            for hit in &s.traffic_hits {
+                a.event(audio::Event::Crash((hit.speed / 9.0).clamp(0.3, 2.0) as f32));
+            }
+            if dmg > 1.5 && s.traffic_hits.is_empty() {
+                a.event(audio::Event::Crash((dmg / 8.0).clamp(0.4, 2.0)));
+            }
+            if water && !was_water {
+                a.event(audio::Event::Splash(1.2));
+            }
+            if skid {
+                a.event(audio::Event::Scrape((speed.abs() / 20.0).clamp(0.2, 1.2) as f32));
+            }
+        }
         self.character.pos = pos;
         self.character.yaw = yaw;
         self.character.vel = DVec3::ZERO;
@@ -3956,6 +4016,7 @@ impl Game {
             self.status = t!("ground.traffic_hit", hit.damage).into();
             self.status_until = self.real + 2.0;
         } else if dmg > 1.5 {
+            self.flash.push((t!("ground.crash_damage", dmg), self.real));
             self.status = t!("ground.crash_damage", dmg).into();
             self.status_until = self.real + 2.0;
         } else if water && !was_water {
@@ -4320,8 +4381,7 @@ impl Game {
                     self.toggle_ground_view();
                 }
                 if pressed.contains(&PadBtn::L3.gilrs()) {
-                    self.status = t!("ground.horn").into();
-                    self.status_until = self.real + 1.0;
+                    self.honk();
                 }
             } else {
                 self.pad_car_handbrake = false;
@@ -5395,10 +5455,7 @@ impl Game {
             }
             KeyCode::KeyR if self.arcade || self.crashed => self.respawn_here(),
             KeyCode::KeyR => self.arcade_only(t!("game.respawning_in_flight")),
-            KeyCode::KeyB if self.mode == Mode::Drive => {
-                self.status = t!("ground.horn").into();
-                self.status_until = self.real + 1.0;
-            }
+            KeyCode::KeyB if self.mode == Mode::Drive => self.honk(),
             KeyCode::KeyC if self.mode.ground() => self.toggle_ground_view(),
             KeyCode::KeyC => self.next_view(),
             KeyCode::F6 if self.mode == Mode::Fly && !self.crashed => self.toggle_tail_view(),
@@ -6287,10 +6344,17 @@ impl Game {
         w
     }
 
+    /// The camera's right vector, for placing world sounds in the stereo field.
+    fn audio_right(&self, cam: DVec3) -> DVec3 {
+        let up = cam.normalize_or_zero();
+        self.cam_dir.cross(up).normalize_or_zero()
+    }
+
     /// Tell the sound what the aircraft and the camera are doing.
     fn update_audio(&mut self, cam: DVec3, fire: f32, in_menu: bool, c: &Controls, dt: f64, scrape: f32) {
         self.warn = if dt > 0.0 { self.warnings() } else { audio::Warn::default() };
-        let live = !self.crashed && !in_menu && dt > 0.0 && self.mode == Mode::Fly;
+        let (aircraft_live, master) = audio_levels(self.mode, self.crashed, in_menu, dt, self.sound_on, self.volume);
+        let live = aircraft_live > 0.5;
         if live {
             self.warn.seeker = self.weapons.seeker_tone;
             self.warn.ap_off = self.real - self.ap_off_t < 1.5;
@@ -6332,7 +6396,7 @@ impl Game {
         let sk = if jet { 0.45 } else { 1.0 };
         let params = audio::Params {
             live: if live { 1.0 } else { 0.0 },
-            master: if self.sound_on { self.volume } else { 0.0 },
+            master,
             rpm: (p.prop_rate * 60.0 / std::f64::consts::TAU) as f32,
             power: p.power as f32,
             throttle: p.throttle as f32,
@@ -6373,6 +6437,36 @@ impl Game {
                 a.event(e);
             }
             a.set(params);
+            // The ground mix: the player's car and the nearest traffic, panned
+            // around the camera. Silent in flight and in the menus.
+            let ground_live = !self.crashed && !in_menu && dt > 0.0 && self.mode.ground();
+            let car = if ground_live {
+                self.vehicle.as_ref().map(|v| audio::CarAudio {
+                    pos: v.pos,
+                    speed: v.speed() as f32,
+                    rpm: v.rpm as f32,
+                    load: v.load,
+                    braking: v.brake,
+                    handbrake: v.handbrake,
+                    health: v.damage.health / vehicle::MAX_HEALTH,
+                    surface: self.world.surface_at(v.pos).map_or(surface::Surface::Asphalt, |s| s.kind),
+                })
+            } else {
+                None
+            };
+            let mut traffic = Vec::new();
+            if ground_live {
+                let focus = car.as_ref().map_or(self.character.pos, |c| c.pos);
+                let mut bodies = Vec::new();
+                self.world.traffic_bodies_near(focus, 140.0, &mut bodies);
+                for b in &bodies {
+                    let speed = b.velocity.length() as f32;
+                    if b.kind == world::TrafficKind::Moving && speed > 0.4 {
+                        traffic.push(audio::Emitter { pos: b.pos, kind: audio::EmitterKind::Traffic, speed, load: (speed / 22.0).min(1.0) });
+                    }
+                }
+            }
+            a.set_world(audio::WorldAudio { cam, right: self.audio_right(cam), car, traffic, live: if ground_live { 1.0 } else { 0.0 } });
         }
     }
 
@@ -8587,7 +8681,7 @@ impl Game {
             });
         });
         if self.mode == Mode::Drive {
-            let (speed, gear, health) = self.vehicle.as_ref().map_or((0.0, 1, vehicle::MAX_HEALTH), |v| (v.speed(), v.gear, v.damage.health));
+            let (speed, gear, health, damage) = self.vehicle.as_ref().map_or((0.0, 1, vehicle::MAX_HEALTH, 0.0), |v| (v.speed(), v.gear, v.damage.health, v.damage.crumple));
             let (car_fill, car_value) = health_bar(health);
             egui::Area::new(egui::Id::unique("car hud")).anchor(Align2::LEFT_BOTTOM, [24.0, -126.0]).interactable(false).show(ctx, |ui| {
                 egui::Frame::new().fill(Color32::from_black_alpha(150)).corner_radius(menu::R_WIDGET).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
@@ -8612,6 +8706,12 @@ impl Game {
                     let mut bar = r;
                     bar.set_width(r.width() * car_fill);
                     p.rect_filled(bar, 3.0, if car_fill < 0.3 { menu::BAD } else { menu::ACCENT });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(t!("ground.damage")).font(menu::caption()).color(menu::DIM));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(drive_damage_text(damage)).font(menu::semibold(12.0)).color(if damage > 0.6 { menu::BAD } else { Color32::WHITE }));
+                        });
+                    });
                 });
             });
         }
@@ -8620,12 +8720,19 @@ impl Game {
             Mode::Drive => Some(t!("ground.leave_car")),
             Mode::Walk => {
                 let in_reach = self.last_car.as_ref().is_some_and(|v| (v.pos - self.character.pos).length() < 4.0);
+                let own_aircraft = self.plane_visible && self.plane.on_ground && (self.plane.pos - self.character.pos).length() < AIRCRAFT_REACH;
                 if in_reach {
                     Some(t!("ground.re_enter_car"))
                 } else if self.traffic_in_reach(TALK_RADIUS) {
                     Some(t!("ground.take_moving_car"))
                 } else if self.world.nearest_parked_car(self.character.pos, TALK_RADIUS).is_some() {
                     Some(t!("ground.take_car"))
+                } else if own_aircraft {
+                    Some(t!("ground.re_enter_aircraft"))
+                } else if self.world.parked_aircraft_near(self.character.pos, AIRCRAFT_REACH).is_some() {
+                    Some(t!("ground.enter_aircraft"))
+                } else if self.world.airfield_near(self.character.pos, AIRPORT_REACH).is_some() {
+                    Some(t!("ground.airport_start"))
                 } else {
                     None
                 }
@@ -10430,7 +10537,7 @@ fn car_instances(cam: DVec3, v: &vehicle::Vehicle, geom: &cars::CarGeom, out: &m
     let rot = basis * Mat3::from_rotation_x(v.pitch) * Mat3::from_rotation_z(v.roll);
     let o = (v.pos - cam).as_vec3();
     let body = Mat4::from_cols(rot.x_axis.extend(0.0), rot.y_axis.extend(0.0), rot.z_axis.extend(0.0), o.extend(1.0));
-    out.push((cars::player_body_mesh(v.model), Inst { m: inst_rows(body), tint: [v.colour[0], v.colour[1], v.colour[2], 0.0], ext: [0.0, 0.0, 0.0, -v.damage.crumple] }));
+    out.push((cars::player_body_mesh(v.model), Inst { m: inst_rows(body), tint: [v.colour[0], v.colour[1], v.colour[2], 0.0], ext: [0.0, 0.0, v.brake.clamp(0.0, 1.0), -v.damage.crumple] }));
     for (i, w) in geom.wheels.iter().enumerate() {
         let local = Vec3::from_array(*w);
         let steer = if i < 2 { -v.steer as f32 * 0.42 } else { 0.0 };
@@ -10539,6 +10646,7 @@ mod cli_tests {
         v.wheel_spin = 1.2;
         v.steer = 0.5;
         v.damage.crumple = 0.4;
+        v.brake = 0.75;
         v.roll = 0.05;
         v.pitch = -0.03;
         let g = cars::player_geom(0);
@@ -10547,6 +10655,7 @@ mod cli_tests {
         assert_eq!(out.len(), 5, "the body and four wheels");
         assert_eq!(out[0].0, cars::player_body_mesh(0));
         assert!((out[0].1.ext[3] + 0.4).abs() < 1e-6, "the body carries the crumple");
+        assert!((out[0].1.ext[2] - 0.75).abs() < 1e-6, "and the brake light level");
         assert!(out[1..].iter().all(|(id, i)| *id == cars::player_wheel_mesh(0) && i.ext[3] == 0.0));
         assert!(out.iter().all(|(_, i)| i.m.iter().flatten().all(|f| f.is_finite())));
     }
@@ -10566,6 +10675,11 @@ mod cli_tests {
         // The camera: chase unless the near view is on.
         assert_eq!(car_view(false), CarView::Chase);
         assert_eq!(car_view(true), CarView::Hood);
+        // Body damage reads as a percentage, clamped.
+        assert_eq!(drive_damage_text(0.0), "0%");
+        assert_eq!(drive_damage_text(0.256), "26%");
+        assert_eq!(drive_damage_text(1.5), "100%");
+        assert_eq!(drive_damage_text(f32::NAN), "0%");
         // The minimap is for Walk and Drive only.
         assert!(ground_minimap_shown(Mode::Walk, true));
         assert!(ground_minimap_shown(Mode::Drive, true));
@@ -10574,6 +10688,23 @@ mod cli_tests {
         assert!(!ground_minimap_shown(Mode::Menu, true));
         // Looking round wraps the short way.
         assert!((angle_diff(0.1, 6.2) + 0.183).abs() < 0.01);
+    }
+
+    #[test]
+    fn flight_audio_is_live_and_the_menu_is_muted() {
+        // Flight keeps the aircraft live at the player's volume: the ground
+        // additions do not touch it.
+        assert_eq!(audio_levels(Mode::Fly, false, false, 0.016, true, 0.7), (1.0, 0.7));
+        // Menus are silent.
+        assert_eq!(audio_levels(Mode::Menu, false, true, 0.016, true, 0.7), (0.0, 0.0));
+        // On the ground the aircraft is silent, but its master still passes the
+        // player's volume to the ground mix.
+        assert_eq!(audio_levels(Mode::Walk, false, false, 0.016, true, 0.7), (0.0, 0.7));
+        assert_eq!(audio_levels(Mode::Drive, false, false, 0.016, true, 0.7), (0.0, 0.7));
+        // Muted, and with no time passing, nothing sounds.
+        assert_eq!(audio_levels(Mode::Fly, false, false, 0.016, false, 0.7), (1.0, 0.0));
+        assert_eq!(audio_levels(Mode::Fly, false, false, 0.0, true, 0.7), (0.0, 0.7));
+        assert_eq!(audio_levels(Mode::Fly, true, false, 0.016, true, 0.7), (0.0, 0.7));
     }
 
     #[test]

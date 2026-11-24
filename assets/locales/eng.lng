@@ -79,6 +79,10 @@ ground.re_enter_car = "Get back in"
 ground.leave_car = "Get out"
 ground.hood_view = "Bonnet view"
 ground.chase_view = "Chase view"
+ground.damage = "Damage"
+ground.enter_aircraft = "Enter this aircraft"
+ground.re_enter_aircraft = "Get back in the aircraft"
+ground.airport_start = "Start an aircraft here"
 
 # ---- resume save
 save.resumed_on_foot = "Resumed on foot"
