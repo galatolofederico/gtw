@@ -594,6 +594,47 @@ impl Page {
 
 /// Keyboard and mouse: (keys, what they do). Shown on F1 and the Controls page.
 pub const CONTROLS: &[(&str, &[(&str, &str)])] = &[
+    ("ON FOOT", &[
+        ("W / A / S / D", "move"),
+        ("Shift", "sprint"),
+        ("Space", "jump"),
+        ("E", "enter car / board aircraft"),
+        ("C / V", "first person / third person"),
+        ("R", "respawn nearby"),
+    ]),
+    ("IN A CAR", &[
+        ("W / S", "throttle / brake & reverse"),
+        ("A / D", "steer left / right"),
+        ("Space", "handbrake"),
+        ("E", "get out"),
+        ("B", "horn"),
+        ("C / V", "bonnet / chase camera"),
+        ("R", "back on the road"),
+    ]),
+    ("VIEW", &[
+        ("C", "chase / cockpit camera"),
+        ("F6 / ISO key", "toggle fixed rear view"),
+        ("Mouse drag", "look around"),
+        ("Click / wheel", "cockpit: work a switch, turn a knob"),
+        ("Mouse wheel", "camera distance / cockpit zoom"),
+        ("H", "hide / show the HUD"),
+        ("`", "hide / show the minimap"),
+        ("J", "full-size map: drag to move, wheel to zoom"),
+        ("F12", "screenshot"),
+    ]),
+    ("WORLD", &[
+        ("T / Y", "time of day forward / back"),
+        ("N / M", "more / fewer clouds"),
+        ("F3", "weather & time window"),
+    ]),
+    ("GAME", &[
+        ("Esc", "pause menu: settings, map, quit"),
+        ("P", "pause without the menu"),
+        ("G", "go to a place or address"),
+        ("U", "sound on / off"),
+        ("F2", "anti-aliasing (TAA) on / off"),
+        ("F1", "quick key reference"),
+    ]),
     ("FLYING", &[
         ("W / S", "pitch down / up"),
         ("A / D", "roll left / right"),
@@ -616,32 +657,8 @@ pub const CONTROLS: &[(&str, &[(&str, &str)])] = &[
         ("[ / ]", "OBS course left / right"),
         ("X", "altimeter to the QNH"),
         (".", "parking brake"),
-    ]),
-    ("VIEW", &[
-        ("C", "chase / cockpit camera"),
-        ("F6 / ISO key", "toggle fixed rear view"),
-        ("Mouse drag", "look around"),
-        ("Click / wheel", "cockpit: work a switch, turn a knob (Cessna)"),
-        ("Mouse wheel", "camera distance / cockpit zoom"),
-        ("H", "hide / show the HUD"),
-        ("`", "hide / show the minimap"),
-        ("J", "full-size map: drag to move, wheel to zoom"),
-        ("F12", "screenshot"),
-    ]),
-    ("WORLD", &[
-        ("T / Y", "time of day forward / back"),
-        ("N / M", "more / fewer clouds"),
-        ("F3", "weather & time window"),
-    ]),
-    ("GAME", &[
         ("Tab", "flight panel: instruments, places, weather"),
-        ("Esc", "pause menu: settings, globe, quit"),
-        ("P", "pause without the menu"),
-        ("G", "go to a place or address"),
         ("R", "respawn in the air"),
-        ("U", "sound on / off"),
-        ("F2", "anti-aliasing (TAA) on / off"),
-        ("F1", "quick key reference"),
     ]),
 ];
 
@@ -930,7 +947,7 @@ pub fn pad_row(ui: &mut egui::Ui, spec: &str, what: &str) {
     ui.end_row();
 }
 
-/// The gamepad, in the menus and on the globe.
+/// The gamepad, in the menus and on the map.
 pub const PAD_MENUS: &[(&str, &[(&str, &str)])] = &[
     ("GAMEPAD · MENUS", &[
         ("Menu", "pause menu"),
@@ -941,11 +958,11 @@ pub const PAD_MENUS: &[(&str, &[(&str, &str)])] = &[
         ("LB / RB", "turn the page"),
         ("B", "back, close"),
     ]),
-    ("GAMEPAD · GLOBE", &[
-        ("LS", "turn the globe"),
+    ("GAMEPAD · MAP", &[
+        ("LS", "move the map"),
         ("LT / RT", "zoom out / in"),
         ("X", "start at the crosshair"),
-        ("Menu", "take off"),
+        ("Menu", "spawn"),
         ("B", "back to the main menu"),
     ]),
 ];
@@ -1008,12 +1025,21 @@ fn keyboard_sections(words: &[String]) -> Vec<Section> {
         .collect()
 }
 
-/// The gamepad's part: its flying layout as bound now, then the menus and the globe.
+/// The gamepad's part: on foot, in a car, menus, map, and flying.
 fn gamepad_sections(words: &[String]) -> Vec<Section> {
     let mut out = Vec::new();
-    let title = tr_en("GAMEPAD · FLYING");
-    let fly: Vec<_> = crate::padmap::flying_rows().into_iter().filter(|(k, w)| matches(words, &[k, w, title])).collect();
-    out.push((title.to_string(), fly));
+    for (title, rows) in [
+        ("GAMEPAD · ON FOOT", crate::padmap::foot_rows()),
+        ("GAMEPAD · IN A CAR", crate::padmap::car_rows()),
+    ] {
+        let title = tr_en(title);
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|(k, w)| matches(words, &[k, tr_en(w), w, title]))
+            .map(|(k, w)| (k, tr_en(w).to_string()))
+            .collect();
+        out.push((title.to_string(), rows));
+    }
     for (title, rows) in PAD_MENUS {
         let rows = rows
             .iter()
@@ -1022,6 +1048,9 @@ fn gamepad_sections(words: &[String]) -> Vec<Section> {
             .collect();
         out.push((tr_en(title).to_string(), rows));
     }
+    let title = tr_en("GAMEPAD · FLYING");
+    let fly: Vec<_> = crate::padmap::flying_rows().into_iter().filter(|(k, w)| matches(words, &[k, w, title])).collect();
+    out.push((title.to_string(), fly));
     out.retain(|(_, rows)| !rows.is_empty());
     out
 }

@@ -574,9 +574,9 @@ impl Minimap {
     }
 
     /// Everything inside the map's outline: the imagery or road map, the
-    /// runways, the approach guide, the names and the aircraft, cut to the outline.
+    /// runways (when flying), the approach guide, the names and the player/aircraft, cut to the outline.
     #[allow(clippy::too_many_arguments)]
-    fn paint(&mut self, ctx: &egui::Context, src: &Arc<Sources>, painter: &egui::Painter, view: &View, aircraft: (f64, f64), guide: Option<&crate::approach::Guide>, world: &crate::world::World, mut occupied: Vec<egui::Rect>) {
+    fn paint(&mut self, ctx: &egui::Context, src: &Arc<Sources>, painter: &egui::Painter, view: &View, aircraft: (f64, f64), guide: Option<&crate::approach::Guide>, world: &crate::world::World, mut occupied: Vec<egui::Rect>, aviation: bool, show_airports: bool) {
         let rect = view.rect;
         let outline = Outline::new(rect);
         // Everything painted from here to the bezel is cut to the outline afterwards.
@@ -590,10 +590,12 @@ impl Minimap {
         if supported {
             let map_drawn = self.draw_map(src, painter, view, &outline, &mut occupied);
             if self.plan { drawn = map_drawn; }
-            self.draw_runways(world, painter, view, &outline, &mut occupied);
-            if let Some(guide) = guide { guide.draw_map(painter, rect, view.cx, view.cy, view.n, view.angle); }
+            if aviation {
+                self.draw_runways(world, painter, view, &outline, &mut occupied);
+                if let Some(guide) = guide { guide.draw_map(painter, rect, view.cx, view.cy, view.n, view.angle); }
+            }
         }
-        // the VFR chart and the track flown.
+        // the VFR chart (aviation) or airport pins (full ground map) and the track.
         let at = view.project(geo::lon_to_merc_x(aircraft.1).rem_euclid(1.0), geo::lat_to_merc_y(aircraft.0));
         self.hits.clear();
         if supported {
@@ -601,7 +603,16 @@ impl Minimap {
             let fits = |r: egui::Rect| in_disc(r, &outline, 4.0);
             let scene = view.scene(&project, &fits);
             self.trail.draw(painter, &scene, at);
-            self.hits = crate::vfrmap::draw(painter, &scene, self.layers, &self.tuned, &mut occupied);
+            if aviation || show_airports {
+                let layers = if aviation {
+                    self.layers
+                } else {
+                    crate::vfrmap::Layers { airports: self.layers.airports, navaids: false }
+                };
+                let empty_tuned = crate::vfrmap::Tuned::default();
+                let tuned = if aviation { &self.tuned } else { &empty_tuned };
+                self.hits = crate::vfrmap::draw(painter, &scene, layers, tuned, &mut occupied);
+            }
         }
         if !supported || drawn == 0 {
             painter.text(rect.center() + Vec2::new(0.0, 32.0), egui::Align2::CENTER_CENTER,
@@ -651,12 +662,22 @@ impl Minimap {
                 }
             }
         }
-        // the aircraft.
-        let arrow = [Vec2::new(0.0, -12.0), Vec2::new(8.5, 9.0), Vec2::new(0.0, 4.5), Vec2::new(-8.5, 9.0)];
-        let points: Vec<_> = arrow.into_iter().map(|v| at + rotate(v, self.heading + view.angle)).collect();
-        painter.add(egui::Shape::closed_line(points.clone(), Stroke::new(3.0, Color32::from_black_alpha(150))));
-        for tri in [[0, 1, 2], [0, 2, 3]] {
-            painter.add(egui::Shape::convex_polygon(tri.iter().map(|&k| points[k]).collect(), Color32::WHITE, Stroke::NONE));
+        // the player or aircraft marker.
+        if aviation {
+            let arrow = [Vec2::new(0.0, -12.0), Vec2::new(8.5, 9.0), Vec2::new(0.0, 4.5), Vec2::new(-8.5, 9.0)];
+            let points: Vec<_> = arrow.into_iter().map(|v| at + rotate(v, self.heading + view.angle)).collect();
+            painter.add(egui::Shape::closed_line(points.clone(), Stroke::new(3.0, Color32::from_black_alpha(150))));
+            for tri in [[0, 1, 2], [0, 2, 3]] {
+                painter.add(egui::Shape::convex_polygon(tri.iter().map(|&k| points[k]).collect(), Color32::WHITE, Stroke::NONE));
+            }
+        } else {
+            let arrow = [Vec2::new(0.0, -9.0), Vec2::new(6.5, 7.0), Vec2::new(0.0, 3.5), Vec2::new(-6.5, 7.0)];
+            let points: Vec<_> = arrow.into_iter().map(|v| at + rotate(v, self.heading + view.angle)).collect();
+            painter.circle_filled(at, 10.5, Color32::from_black_alpha(130));
+            painter.circle_stroke(at, 10.5, Stroke::new(1.5, crate::menu::ACCENT));
+            for tri in [[0, 1, 2], [0, 2, 3]] {
+                painter.add(egui::Shape::convex_polygon(tri.iter().map(|&k| points[k]).collect(), Color32::WHITE, Stroke::NONE));
+            }
         }
         // the scale bar on a chip.
         let meters = 2.0 * std::f64::consts::PI * geo::R * view.lat.cos() / (view.n * 256.0) * 60.0;
@@ -755,19 +776,19 @@ impl Minimap {
 
     /// The map: the minimap in the corner, or the full-size map over the view.
     #[allow(clippy::too_many_arguments)]
-    pub fn show(&mut self, ctx: &egui::Context, src: &Arc<Sources>, lat: f64, lon: f64, heading: Option<f64>, info_open: bool, guide: Option<&crate::approach::Guide>, world: &crate::world::World) {
+    pub fn show(&mut self, ctx: &egui::Context, src: &Arc<Sources>, lat: f64, lon: f64, heading: Option<f64>, info_open: bool, guide: Option<&crate::approach::Guide>, world: &crate::world::World, aviation: bool) {
         self.frame += 1;
         self.poll(ctx, src.google.generation());
         if let Some(h) = heading { self.heading = h; }
         if self.full {
-            self.show_full(ctx, src, lat, lon, guide, world);
+            self.show_full(ctx, src, lat, lon, guide, world, aviation);
         } else {
-            self.show_mini(ctx, src, lat, lon, info_open, guide, world);
+            self.show_mini(ctx, src, lat, lon, info_open, guide, world, aviation);
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn show_mini(&mut self, ctx: &egui::Context, src: &Arc<Sources>, lat: f64, lon: f64, info_open: bool, guide: Option<&crate::approach::Guide>, world: &crate::world::World) {
+    fn show_mini(&mut self, ctx: &egui::Context, src: &Arc<Sources>, lat: f64, lon: f64, info_open: bool, guide: Option<&crate::approach::Guide>, world: &crate::world::World, aviation: bool) {
         let reserved_width = if info_open { 426.0 } else { 44.0 };
         let limit = (ctx.content_rect().width() - reserved_width).min(ctx.content_rect().bottom() - self.bottom - 44.0 - self.top - 8.0).clamp(120.0, 640.0);
         let diameter = self.size.x.clamp(240.0, 640.0).min(limit);
@@ -804,7 +825,7 @@ impl Minimap {
                         self.set_destination(dlat, dlon, name);
                     }
                 }
-                self.paint(ctx, src, &painter, &view, (lat, lon), guide, world, reserved(rect, angle));
+                self.paint(ctx, src, &painter, &view, (lat, lon), guide, world, reserved(rect, angle), aviation, false);
                 // north on a chip.
                 let north = center + rotate(Vec2::new(0.0, -(radius - 18.0)), angle);
                 painter.circle_filled(north, 11.0, Color32::from_black_alpha(160));
@@ -839,8 +860,9 @@ impl Minimap {
     }
 
     /// The full-size map over the whole view, north up: drag to move it, the
-    /// wheel zooms about the pointer, and it follows the aircraft until moved.
-    fn show_full(&mut self, ctx: &egui::Context, src: &Arc<Sources>, lat: f64, lon: f64, guide: Option<&crate::approach::Guide>, world: &crate::world::World) {
+    /// wheel zooms about the pointer, and it follows the player until moved.
+    #[allow(clippy::too_many_arguments)]
+    fn show_full(&mut self, ctx: &egui::Context, src: &Arc<Sources>, lat: f64, lon: f64, guide: Option<&crate::approach::Guide>, world: &crate::world::World, aviation: bool) {
         let screen = ctx.content_rect();
         let margin = if screen.width() < 900.0 { 12.0 } else { 28.0 };
         let area = screen.shrink(margin);
@@ -904,7 +926,7 @@ impl Minimap {
             let hint = egui::Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - 44.0), Pos2::new(rect.left() + 420.0, rect.bottom()));
             let scale_chip = egui::Rect::from_center_size(Pos2::new(rect.center().x, rect.bottom() - 22.0), Vec2::new(84.0, 32.0));
             let plane_at = view.project(aircraft.x, aircraft.y);
-            self.paint(ctx, src, &painter, &view, (lat, lon), guide, world, vec![bar, title, hint, scale_chip, egui::Rect::from_center_size(plane_at, Vec2::splat(38.0))]);
+            self.paint(ctx, src, &painter, &view, (lat, lon), guide, world, vec![bar, title, hint, scale_chip, egui::Rect::from_center_size(plane_at, Vec2::splat(38.0))], aviation, true);
             // what the pointer is on.
             let hover = response.hover_pos().filter(|_| !response.dragged()).and_then(|p| crate::vfrmap::hit_at(&self.hits, p, 12.0).map(|t| (p, t)));
             if let Some((p, t)) = hover {
@@ -955,7 +977,8 @@ impl Minimap {
                 self.full_center = Some(center);
             }
             x -= 8.0;
-            if self.full_center.is_some() && button(ui, &mut x, 32.0, "centre", crate::t!("minimap.back_to_the_aircraft"), &|p, r, c| {
+            let centre_tip = if aviation { crate::t!("minimap.back_to_the_aircraft") } else { crate::t!("minimap.back_to_player") };
+            if self.full_center.is_some() && button(ui, &mut x, 32.0, "centre", centre_tip, &|p, r, c| {
                 let m = r.center();
                 p.circle_stroke(m, 6.0, stroke(c));
                 p.circle_filled(m, 2.0, c);
@@ -976,9 +999,11 @@ impl Minimap {
             x -= 8.0;
             // the chart's layers, lit when shown.
             let on = |b: bool, c: Color32| if b { c } else { Color32::from_white_alpha(90) };
-            let navaids = self.layers.navaids;
-            if button(ui, &mut x, 32.0, "navaids", crate::t!("vfr.radio_beacons"), &|p, r, c| crate::vfrmap::navaid_icon(p, r.center(), on(navaids, if c == Color32::WHITE { crate::vfrmap::VOR } else { c }))) {
-                self.layers.navaids = !navaids;
+            if aviation {
+                let navaids = self.layers.navaids;
+                if button(ui, &mut x, 32.0, "navaids", crate::t!("vfr.radio_beacons"), &|p, r, c| crate::vfrmap::navaid_icon(p, r.center(), on(navaids, if c == Color32::WHITE { crate::vfrmap::VOR } else { c }))) {
+                    self.layers.navaids = !navaids;
+                }
             }
             let airports = self.layers.airports;
             if button(ui, &mut x, 32.0, "airports", crate::t!("vfr.airports"), &|p, r, c| crate::vfrmap::airport_icon(p, r.center(), on(airports, if c == Color32::WHITE { crate::vfrmap::TOWERED } else { c }))) {

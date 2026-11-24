@@ -147,12 +147,13 @@ pub fn stand_pose(st: &crate::airports::Stand, ty: u8) -> (Vec2, Vec2) {
 }
 
 /// The built-in aircraft a player takes when this traffic type is parked:
-/// light singles are the C172, business jets the G650. Larger traffic types
-/// are scenery only; the airport menu fallback covers them.
+/// light singles are the C172, business/regional jets the G650, and airliners
+/// the 747.
 pub fn player_spec_key(ty: u8) -> Option<&'static str> {
     match ty {
         0 => Some("c172"),
-        1 => Some("g650"),
+        1 | 2 => Some("g650"),
+        3 | 4 => Some("b747"),
         _ => None,
     }
 }
@@ -824,17 +825,13 @@ mod tests {
     fn traffic_types_map_to_built_in_player_aircraft() {
         assert_eq!(player_spec_key(0), Some("c172"));
         assert_eq!(player_spec_key(1), Some("g650"));
-        // Regional and larger types are scenery: the runway fallback uses the
-        // aircraft the player chose instead.
-        for ty in 2..=4 {
-            assert_eq!(player_spec_key(ty), None);
-            assert_eq!(fallback_spec_key(ty, "dr400"), "dr400");
-        }
-        // The flyable ones keep their own mapped type.
-        assert_eq!(fallback_spec_key(0, "dr400"), "c172");
-        assert_eq!(fallback_spec_key(1, "dr400"), "g650");
-        // The mapped keys really are built-in types.
-        for ty in 0..=1 {
+        assert_eq!(player_spec_key(2), Some("g650"));
+        assert_eq!(player_spec_key(3), Some("b747"));
+        assert_eq!(player_spec_key(4), Some("b747"));
+        assert_eq!(player_spec_key(5), None);
+        assert_eq!(fallback_spec_key(5, "dr400"), "dr400");
+        // Every parked airport type maps to a real built-in flyable aircraft.
+        for ty in 0..=4 {
             assert!(crate::aircraft::by_key(player_spec_key(ty).unwrap()).is_some());
         }
     }

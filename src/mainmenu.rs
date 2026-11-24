@@ -1,12 +1,12 @@
-//! the main menu: the wordmark over the aircraft, fly and settings tiles.
+//! the main menu: the wordmark over the world map, settings and multiplayer tiles.
 //! Quit sits small in the bottom left corner. Behind it the renderer draws
 //! space alone (the menu camera looks away from the planet, see `frame`).
 use crate::menu::{self, Screen, ACCENT, DIM, FAINT, TEXT};
 use crate::padui::{self, Hint};
-use crate::{aircraft, hangar_ui, save, settings_ui, t, tr_en, Game};
+use crate::{save, settings_ui, t, tr_en, Game};
 use egui::{pos2, vec2, Align2, Color32, FontId, Painter, Pos2, Rect, Sense, Stroke};
 
-/// The picture behind the FLY tile, 4:3 at a little over twice the tile's
+/// The picture behind the WORLD tile, 4:3 at a little over twice the tile's
 /// size: the game's own globe (sky.wgsl `globe_*`, live clouds) rendered
 /// from 7600 km over the Caribbean (`--menu-view 24,-66,7600000 --time 8.35
 /// --day 80`, exposure 0.3, a 3840x2160 frame with the menu hidden), cropped
@@ -19,10 +19,9 @@ pub const GLOBE_PICTURE: &[u8] = include_bytes!("../assets/ui/globe.jpg");
 /// What a tile does when pressed.
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Tile {
-    Aircraft,
     Fly,
     Settings,
-    /// back into the air where the last flight started.
+    /// spawn at the place last started.
     Again,
     /// pick the resume snapshot back up where it was left.
     Continue,
@@ -35,8 +34,6 @@ impl Game {
     pub(crate) fn main_menu(&mut self, ctx: &egui::Context) {
         let screen = ctx.content_rect();
         let globe = self.picture(ctx, GLOBE_PICTURE);
-        let spec = aircraft::nth(self.menu.aircraft);
-        let still = self.still(ctx, spec);
         let mut press: Option<Tile> = None;
         let mut quit = false;
         let again = self.last_start_label();
@@ -47,36 +44,25 @@ impl Game {
             // Darken space towards the foot of the screen, for depth.
             gradient(&p, Rect::from_min_max(pos2(screen.left(), screen.center().y), screen.max), Color32::TRANSPARENT, Color32::from_rgba_premultiplied(4, 6, 10, 200));
 
-            // The tiles: FLY in the middle and larger, the other two beside it.
+            // The tiles: WORLD map hero on the left, Settings + Multiplayer beside it.
             let gap = 18.0;
-            let (fw, fh, sw, sh) = (600.0, 450.0, 300.0, 400.0);
-            let total = fw + 2.0 * sw + 2.0 * gap;
+            let (fw, fh, sw, sh) = (680.0, 440.0, 320.0, 440.0);
+            let total = fw + sw + gap;
             let top = 104.0;
             let k = ((screen.width() - 48.0) / total).min((screen.height() - top - 84.0) / fh).min(1.05).max(0.45);
             let (fw, fh, sw, sh, gap) = (fw * k, fh * k, sw * k, sh * k, gap * k);
             let cy = top + (screen.height() - top - 60.0) * 0.5;
-            let x0 = screen.center().x - (fw + 2.0 * sw + 2.0 * gap) * 0.5;
+            let x0 = screen.center().x - (fw + sw + gap) * 0.5;
             // the tiles rise in as the menu opens.
             let lift = |r: Rect, i: usize| r.translate(vec2(0.0, 26.0 * (1.0 - rise(i))));
-            let air = lift(Rect::from_min_size(pos2(x0, cy - sh * 0.5), vec2(sw, sh)), 1);
-            let fly = lift(Rect::from_min_size(pos2(x0 + sw + gap, cy - fh * 0.5), vec2(fw, fh)), 0);
-            // Settings, and Multiplayer as a bar under it: the two as tall as the Aircraft tile.
+            let fly = lift(Rect::from_min_size(pos2(x0, cy - fh * 0.5), vec2(fw, fh)), 0);
             let bar_h = 46.0;
-            let set = lift(Rect::from_min_size(pos2(x0 + sw + gap + fw + gap, cy - sh * 0.5), vec2(sw, sh - bar_h - gap)), 2);
-            let mpb = lift(Rect::from_min_size(pos2(set.left(), set.bottom() + gap), vec2(sw, bar_h)), 3);
+            let set = lift(Rect::from_min_size(pos2(x0 + fw + gap, cy - sh * 0.5), vec2(sw, sh - bar_h - gap)), 1);
+            let mpb = lift(Rect::from_min_size(pos2(set.left(), set.bottom() + gap), vec2(sw, bar_h)), 2);
             let mut pw = p.clone();
             pw.set_opacity(rise(0));
-            wordmark(&pw, pos2(x0, fly.top() - 26.0 * k.max(0.7)), x0 + fw + 2.0 * sw + 2.0 * gap, k);
+            wordmark(&pw, pos2(x0, fly.top() - 26.0 * k.max(0.7)), x0 + fw + sw + gap, k);
 
-            // Tab and the d-pad go left to right: Aircraft, FLY, Settings.
-            let r = ui.interact(air, ui.scope_id().with("tile_air"), Sense::click());
-            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("menu.aircraft")));
-            let mut pa = p.clone();
-            pa.set_opacity(rise(1));
-            aircraft_tile(&pa, air, &r, k, spec.name, &still);
-            if r.clicked() {
-                press = Some(Tile::Aircraft);
-            }
             let r = ui.interact(fly, ui.scope_id().with("tile_fly"), Sense::click());
             r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("menu.fly")));
             self.pad_home_focus(&r);
@@ -89,7 +75,7 @@ impl Game {
             let r = ui.interact(set, ui.scope_id().with("tile_set"), Sense::click());
             r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("menu.settings")));
             let mut ps = p.clone();
-            ps.set_opacity(rise(2));
+            ps.set_opacity(rise(1));
             settings_tile(&ps, set, &r, k);
             if r.clicked() {
                 press = Some(Tile::Settings);
@@ -97,35 +83,35 @@ impl Game {
             let r = ui.interact(mpb, ui.scope_id().with("tile_mp"), Sense::click());
             r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("menu.multiplayer")));
             let mut pm = p.clone();
-            pm.set_opacity(rise(3));
+            pm.set_opacity(rise(2));
             let (col, status) = self.mp_short();
             mp_bar(&pm, mpb, &r, &status, col);
             if r.clicked() {
                 press = Some(Tile::Multiplayer);
             }
 
-            // Under fly: the resume snapshot first, then the last start, one
-            // press away each.
+            // Under the map tile: the resume snapshot first, then the last start,
+            // one press away each.
             let mut bar_y = fly.bottom() + 14.0 * k;
             if let Some(where_) = &resume {
                 let b = Rect::from_min_size(pos2(fly.left(), bar_y), vec2(fly.width(), 46.0));
                 let r = ui.interact(b, ui.scope_id().with("continue"), Sense::click());
                 r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("menu.continue")));
                 let mut pc = p.clone();
-                pc.set_opacity(rise(3));
+                pc.set_opacity(rise(2));
                 continue_button(&pc, b, &r, where_);
                 if r.clicked() {
                     press = Some(Tile::Continue);
                 }
                 bar_y += 46.0 + 8.0 * k;
             }
-            if let Some((place, plane)) = &again {
+            if let Some(place) = &again {
                 let b = Rect::from_min_size(pos2(fly.left(), bar_y), vec2(fly.width(), 46.0));
                 let r = ui.interact(b, ui.scope_id().with("again"), Sense::click());
                 r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("menu.fly_again")));
                 let mut pg = p.clone();
-                pg.set_opacity(rise(3));
-                again_button(&pg, b, &r, place, plane);
+                pg.set_opacity(rise(2));
+                again_button(&pg, b, &r, place);
                 if r.clicked() {
                     press = Some(Tile::Again);
                 }
@@ -154,14 +140,13 @@ impl Game {
         });
         match press {
             Some(Tile::Fly) => self.menu.screen = Screen::Fly,
-            Some(Tile::Aircraft) => self.open_aircraft(hangar_ui::Tab::Mine, Screen::Main),
             Some(Tile::Settings) => {
                 self.menu.set_back = Screen::Main;
                 self.menu.screen = Screen::Settings;
             }
             Some(Tile::Multiplayer) => self.open_settings(settings_ui::Section::Multiplayer, Screen::Main),
             Some(Tile::Again) => {
-                // over the globe, which shows it preparing.
+                // over the map, which shows it preparing.
                 self.restore_last_start();
                 self.menu.screen = Screen::Fly;
                 self.begin();
@@ -201,8 +186,8 @@ fn entrance(ctx: &egui::Context) -> impl Fn(usize) -> f32 {
     }
 }
 
-/// the fly again bar under fly.
-fn again_button(p: &Painter, r: Rect, resp: &egui::Response, place: &str, plane: &str) {
+/// the spawn again bar under the world tile.
+fn again_button(p: &Painter, r: Rect, resp: &egui::Response, place: &str) {
     let lit = menu::ease(p.ctx(), resp.id, resp.hovered() || resp.has_focus());
     p.rect_filled(r, menu::R_WIDGET, menu::mix(Color32::from_rgba_premultiplied(12, 16, 22, 226), Color32::from_rgba_premultiplied(26, 32, 42, 238), lit));
     p.rect_stroke(r, menu::R_WIDGET, Stroke::new(1.0, menu::mix(Color32::from_white_alpha(26), ACCENT, lit)), egui::StrokeKind::Inside);
@@ -217,7 +202,7 @@ fn again_button(p: &Painter, r: Rect, resp: &egui::Response, place: &str, plane:
     p.line(pts, Stroke::new(1.8, col));
     p.add(egui::Shape::convex_polygon(vec![end + vec2(3.5, -3.5), end + vec2(4.0, 3.0), end + vec2(-2.5, 1.5)], col, Stroke::NONE));
     p.text(pos2(r.left() + 44.0, r.center().y), Align2::LEFT_CENTER, t!("menu.fly_again"), menu::label(), menu::mix(TEXT, Color32::WHITE, lit));
-    let g = p.layout_no_wrap(format!("{place}  ·  {plane}"), menu::caption(), DIM);
+    let g = p.layout_no_wrap(place.to_string(), menu::caption(), DIM);
     p.galley(pos2(r.right() - 16.0 - g.size().x, r.center().y - g.size().y * 0.5), g, DIM);
 }
 
@@ -286,21 +271,6 @@ fn caption(p: &Painter, r: Rect, k: f32, lit: f32, title: &str, sub: &str) {
     let y = r.bottom() - 74.0 * k.max(0.7);
     spaced(p, pos2(r.left() + 24.0 * k, y), Align2::LEFT_BOTTOM, &title.to_uppercase(), menu::bold(30.0 * k.max(0.7)), menu::mix(TEXT, Color32::WHITE, lit), 2.5 * k);
     p.text(pos2(r.left() + 25.0 * k, y + 8.0), Align2::LEFT_TOP, sub, menu::label(), menu::mix(DIM, TEXT, lit));
-}
-
-/// the aircraft tile: your aircraft, easing forward on hover.
-fn aircraft_tile(p: &Painter, r: Rect, resp: &egui::Response, k: f32, name: &str, still: &egui::TextureHandle) {
-    let lit = menu::ease(p.ctx(), resp.id, resp.hovered() || resp.has_focus());
-    tile_frame(p, r, lit, true);
-    // a pool of light under it.
-    let c = pos2(r.center().x, r.top() + r.height() * 0.38);
-    let clip = p.with_clip_rect(r.shrink(1.0));
-    menu::glow(&clip, c + vec2(0.0, 30.0 * k), vec2(r.width() * 0.62, r.width() * 0.36), Color32::from_white_alpha((14.0 + 8.0 * lit) as u8));
-    // the picture is 680 x 392 with the aircraft in the middle.
-    let w = r.width() * 0.98;
-    let pic = Rect::from_center_size(c + vec2(5.0 * lit, -4.0 * lit) * k, vec2(w, w * 392.0 / 680.0));
-    clip.image(still.id(), pic, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-    caption(p, r, k, lit, t!("menu.aircraft"), name);
 }
 
 /// the settings tile: a cog that turns on hover.
