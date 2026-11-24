@@ -251,6 +251,11 @@ fn angle_diff(a: f64, b: f64) -> f64 {
     (b - a + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
 }
 
+/// Ease a bearing towards `target` at `rate` per second, the short way round.
+fn follow_angle(from: f64, target: f64, rate: f64, dt: f64) -> f64 {
+    from + angle_diff(from, target) * (dt * rate).min(1.0)
+}
+
 /// What the gamepad's buttons work at the moment, besides flying.
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Nav {
@@ -7188,7 +7193,7 @@ impl Game {
             self.cam_yaw = (self.cam_yaw + look_x * 1.6 * dt).rem_euclid(std::f64::consts::TAU);
             self.cam_pitch = (self.cam_pitch + look_y * 1.1 * dt).clamp(-0.9, 0.8);
             if look_x == 0.0 && look_y == 0.0 && !self.drag {
-                self.cam_yaw -= angle_diff(self.cam_yaw, car_yaw) * (dt * 2.5).min(1.0);
+                self.cam_yaw = follow_angle(self.cam_yaw, car_yaw, 2.5, dt).rem_euclid(std::f64::consts::TAU);
                 self.cam_pitch *= 1.0 - (dt * 1.5).min(1.0);
             }
             let up = car_pos.normalize();
@@ -10696,6 +10701,17 @@ mod cli_tests {
         assert!(!ground_minimap_shown(Mode::Menu, true));
         // Looking round wraps the short way.
         assert!((angle_diff(0.1, 6.2) + 0.183).abs() < 0.01);
+        // The chase camera follows the car rather than turning away from it:
+        // a right turn swings the view right, a left turn left.
+        let right = follow_angle(0.0, 0.2, 2.5, 0.2);
+        assert!(right > 0.0 && right < 0.2, "the view must move towards the car's heading");
+        let left = follow_angle(0.2, 0.0, 2.5, 0.2);
+        assert!(left < 0.2 && left > 0.0, "and the other way when it turns left");
+        // A whole step lands on the heading, across north as well.
+        for (from, target) in [(0.0, 0.4), (std::f64::consts::TAU - 0.2, 0.2)] {
+            let y = follow_angle(from, target, 2.5, 1.0).rem_euclid(std::f64::consts::TAU);
+            assert!((y - target.rem_euclid(std::f64::consts::TAU)).abs() < 1e-12);
+        }
     }
 
     #[test]
