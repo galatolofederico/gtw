@@ -247,43 +247,43 @@ cargo run --release -- --help
 
 ### Implementation
 
-- [ ] 5.1 Add `Traffic::take_parked(stand)` and expose the stand pose needed to spawn a player aircraft.
-- [ ] 5.2 Map traffic type 0 (light single) to `c172` and type 1 (business jet) to `g650`; larger types remain scenery.
-- [ ] 5.3 Add airport detection within 5 km and a parked-aircraft interaction on foot; enter the aircraft with `Plane::spawn_ground`, set `plane_visible = true`, and switch to `Mode::Fly`.
-- [ ] 5.4 Add the airport menu fallback: choose a built-in aircraft and start on the active runway using the existing `start_airport` path.
-- [ ] 5.5 Add exit-aircraft interaction on the ground at low speed; place the character beside the plane and keep the plane visible for re-entry.
-- [ ] 5.6 Refuse exit while airborne or above 2 m/s ground speed with a clear status message.
-- [ ] 5.7 Create `src/save.rs` with `SaveState`, `SaveMode`, `SavedFoot`, `SavedCar`, `SavedPlane`, `SavedClock` (UTC, day, and snow/weather settings), version 1, serde JSON, atomic write, corrupt/unsupported fallback, and the `<config>/gtw/save.json` path.
-- [ ] 5.8 Add `Game::update_autosave` every 5 s and on quit; save the active mode plus `last_car` and a visible parked plane.
-- [ ] 5.9 Add load-on-start: if a valid save exists, show Continue on the main menu and resume the saved mode; New Game starts at the chosen place on foot.
-- [ ] 5.10 Add `--no-save` to disable load and autosave for automated runs.
-- [ ] 5.11 Add safe-position validation for saved foot, car, and plane positions before applying them.
-- [ ] 5.12 Add `--start plane` with `--airport` for scripted flight starts and update the launcher benchmark arguments to use it.
-- [ ] 5.13 Extend `tests/gtw_smoke.rs` with `--start plane --airport EZE` and `--no-save` smoke coverage that does not require a full flight.
+- [x] 5.1 Add `Traffic::take_parked(stand)` and expose the stand pose needed to spawn a player aircraft.
+- [x] 5.2 Map traffic type 0 (light single) to `c172` and type 1 (business jet) to `g650`; larger types remain scenery.
+- [x] 5.3 Add airport detection within 5 km and a parked-aircraft interaction on foot; enter the aircraft with `Plane::spawn_ground`, set `plane_visible = true`, and switch to `Mode::Fly`.
+- [x] 5.4 Add the airport menu fallback: choose a built-in aircraft and start on the active runway using the existing `start_airport` path.
+- [x] 5.5 Add exit-aircraft interaction on the ground at low speed; place the character beside the plane and keep the plane visible for re-entry.
+- [x] 5.6 Refuse exit while airborne or above 2 m/s ground speed with a clear status message.
+- [x] 5.7 Create `src/save.rs` with `SaveState`, `SaveMode`, `SavedFoot`, `SavedCar`, `SavedPlane`, `SavedClock` (UTC, day, and snow/weather settings), version 1, serde JSON, atomic write, corrupt/unsupported fallback, and the `<config>/gtw/save.json` path.
+- [x] 5.8 Add `Game::update_autosave` every 5 s and on quit; save the active mode plus `last_car` and a visible parked plane.
+- [x] 5.9 Add load-on-start: if a valid save exists, show Continue on the main menu and resume the saved mode; New Game starts at the chosen place on foot.
+- [x] 5.10 Add `--no-save` to disable load and autosave for automated runs.
+- [x] 5.11 Add safe-position validation for saved foot, car, and plane positions before applying them.
+- [x] 5.12 Add `--start plane` with `--airport` for scripted flight starts and update the launcher benchmark arguments to use it.
+- [x] 5.13 Extend `tests/gtw_smoke.rs` with `--start plane --airport EZE` and `--no-save` smoke coverage that does not require a full flight.
 
 ### Tests
 
-- [ ] 5.14 Unit-test `Traffic::take_parked` removes the selected stand and returns the expected type/livery, and that a second take fails.
-- [ ] 5.15 Unit-test the light-single/business-jet mapping and the menu fallback for larger types.
-- [ ] 5.16 Unit-test save round-trip for Foot, Drive, and Fly with position, yaw, health, damage, fuel, and clock.
-- [ ] 5.17 Unit-test corrupt JSON, future version, missing file, and empty file fallbacks.
-- [ ] 5.18 Unit-test atomic write leaves either the old valid save or the new valid save, never a partial file.
-- [ ] 5.19 Unit-test safe-position search rejects water, building interiors, and missing tiles and finds a nearby valid point.
-- [ ] 5.20 Unit-test exit-aircraft refusal while airborne and acceptance on the ground at low speed.
-- [ ] 5.21 Unit-test `--start plane` argument parsing and `--no-save` behaviour.
-- [ ] 5.22 Run the headless plane-start smoke test from `tests/gtw_smoke.rs`.
+- [x] 5.14 Unit-test `Traffic::take_parked` removes the selected stand and returns the expected type/livery, and that a second take fails.
+- [x] 5.15 Unit-test the light-single/business-jet mapping and the menu fallback for larger types.
+- [x] 5.16 Unit-test save round-trip for Foot, Drive, and Fly with position, yaw, health, damage, fuel, and clock.
+- [x] 5.17 Unit-test corrupt JSON, future version, missing file, and empty file fallbacks.
+- [x] 5.18 Unit-test atomic write leaves either the old valid save or the new valid save, never a partial file.
+- [x] 5.19 Unit-test safe-position search rejects water, building interiors, and missing tiles and finds a nearby valid point.
+- [x] 5.20 Unit-test exit-aircraft refusal while airborne and acceptance on the ground at low speed.
+- [x] 5.21 Unit-test `--start plane` argument parsing and `--no-save` behaviour.
+- [x] 5.22 Run the headless plane-start smoke test from `tests/gtw_smoke.rs`.
 
 ### Verification
 
-- [ ] Run `cargo check --all-targets`; it exits 0.
-- [ ] Run `cargo test`; it exits 0 and all aircraft-access and save tests pass.
-- [ ] Run `cargo test --test gtw_smoke`; it exits 0.
-- [ ] Run `cargo test --test shaders`; it exits 0.
+- [x] Run `cargo check --all-targets`; it exits 0.
+- [x] Run `cargo test`; it exits 0 and all aircraft-access and save tests pass.
+- [x] Run `cargo test --test gtw_smoke`; it exits 0.
+- [x] Run `cargo test --test shaders`; it exits 0.
 - [ ] Run `cargo run --release -- --place "Buenos Aires" --start foot`; drive to an airport, enter a parked aircraft, fly, land, exit, and re-enter.
 - [ ] Run `cargo run --release -- --airport EZE --start plane`; fly the airport-start fallback.
 - [ ] Quit and relaunch in Foot, Drive, and Fly modes; confirm Continue resumes the same mode and place.
-- [ ] Run `cargo build --release --locked`; it exits 0.
-- [ ] Confirm no new skipped, quarantined, or failing tests.
+- [x] Run `cargo build --release --locked`; it exits 0.
+- [x] Confirm no new skipped, quarantined, or failing tests.
 
 **Done when:** The full spawn → walk → car → airport → plane → land → exit → quit → resume loop works, with a valid save for each mode.
 
