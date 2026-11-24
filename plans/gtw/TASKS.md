@@ -42,43 +42,43 @@ cargo run --release -- --help
 
 ### Implementation
 
-- [ ] 1.1 Create `src/surface.rs` with `Surface` (Asphalt, Concrete, Dirt, Grass, Sand, Rock, Water), `SurfaceHit`, `SurfaceWeather`, OSM mapping, WorldCover mapping, and grip/rolling-resistance/foot-speed tables.
-- [ ] 1.2 Add `surface::merge(osm_class, water, worldcover_class) -> Surface` implementing the precedence water > OSM > WorldCover > Grass.
-- [ ] 1.3 Create `src/landcover.rs` with the 3° item-id calculation, the Planetary Computer z14 URL, 256×256 `LA` PNG decode, boundary composition for up to four items, and a `Sources`-independent decode entry point.
-- [ ] 1.4 Add `Sources::landcover(id)` with the cache key `lc/{z}/{x}/{y}.png`, z14 ancestry lookup, and OSM fallback when the fetch fails.
-- [ ] 1.5 Add `TileData.surface: Vec<u8>` (256×256) and derive it in `sources::build_tile` from the existing OSM mask plus the landcover tile; keep `TileData.mask` GPU-only and drop it after upload.
-- [ ] 1.6 Add `Tile.surface` and retain it when `World::update` consumes `JobResult::Terrain`; do not retain the RGBA mask.
-- [ ] 1.7 Add `Path.drive_half`, `Path.walk`, `Path.bridge`, `Path.local`, and `Path.alt` in `src/roads.rs`; populate them in `roads::build`.
-- [ ] 1.8 Add `RoadIndex` and `RoadHit` in `src/roads.rs`; build a 64×64 tile-unit candidate grid, implement closest-point interpolation, and classify carriageway versus sidewalk.
-- [ ] 1.9 Add `BuildingData.road_index` and build it after `roads::build` in `src/buildings.rs`.
-- [ ] 1.10 Add `World::surface_at(p)`, diagnostic `World::surface(lat, lon)`, `World::road_hit(lat, lon)`, and the `WorldQuery` trait methods `surface_at`, `building_push_sphere`, `building_push_box`, `tree_push_sphere`, `tree_push_box` in `src/world.rs`; share the tile-selection loop with `terrain_ground` through a private `terrain_sample` returning both `Ground` and the surface class.
-- [ ] 1.11 Implement the 2.5 m bridge-height filter and the Grass fallback when no landcover exists.
-- [ ] 1.12 Add `--surface-probe LAT,LON` to `src/main.rs`; it prints elevation, OSM class, WorldCover class, merged class, and exits.
-- [ ] 1.13 Add the ESA WorldCover and Planetary Computer attribution to `README.md`.
-- [ ] 1.14 Add `tests/fixtures/landcover_z14.png` containing known WorldCover codes for decode tests.
-- [ ] 1.15 Add a debug `RoadIndex` dump helper behind `#[cfg(test)]` so tests can inspect candidate cells without a GPU.
+- [x] 1.1 Create `src/surface.rs` with `Surface` (Asphalt, Concrete, Dirt, Grass, Sand, Rock, Water), `SurfaceHit`, `SurfaceWeather`, OSM mapping, WorldCover mapping, and grip/rolling-resistance/foot-speed tables.
+- [x] 1.2 Add `surface::merge(osm_class, water, worldcover_class) -> Surface` implementing the precedence water > OSM > WorldCover > Grass.
+- [x] 1.3 Create `src/landcover.rs` with the 3° item-id calculation, the Planetary Computer z14 URL, 256×256 `LA` PNG decode, boundary composition for up to four items, and a `Sources`-independent decode entry point.
+- [x] 1.4 Add `Sources::landcover(id)` with the cache key `lc/{z}/{x}/{y}.png`, z14 ancestry lookup, and OSM fallback when the fetch fails.
+- [x] 1.5 Add `TileData.surface: Vec<u8>` (256×256) and derive it in `sources::build_tile` from the existing OSM mask plus the landcover tile; keep `TileData.mask` GPU-only and drop it after upload.
+- [x] 1.6 Add `Tile.surface` and retain it when `World::update` consumes `JobResult::Terrain`; do not retain the RGBA mask.
+- [x] 1.7 Add `Path.drive_half`, `Path.walk`, `Path.bridge`, `Path.local`, and `Path.alt` in `src/roads.rs`; populate them in `roads::build`.
+- [x] 1.8 Add `RoadIndex` and `RoadHit` in `src/roads.rs`; build a 64×64 tile-unit candidate grid, implement closest-point interpolation, and classify carriageway versus sidewalk.
+- [x] 1.9 Add `BuildingData.road_index` and build it after `roads::build` in `src/buildings.rs`.
+- [x] 1.10 Add `World::surface_at(p)`, diagnostic `World::surface(lat, lon)`, `World::road_hit(lat, lon)`, and the `WorldQuery` trait methods `surface_at`, `building_push_sphere`, `building_push_box`, `tree_push_sphere`, `tree_push_box` in `src/world.rs`; share the tile-selection loop with `terrain_ground` through a private `terrain_sample` returning both `Ground` and the surface class.
+- [x] 1.11 Implement the 2.5 m bridge-height filter and the Grass fallback when no landcover exists.
+- [x] 1.12 Add `--surface-probe LAT,LON` to `src/main.rs`; it prints elevation, OSM class, WorldCover class, merged class, and exits.
+- [x] 1.13 Add the ESA WorldCover and Planetary Computer attribution to `README.md`.
+- [x] 1.14 Add `tests/fixtures/landcover_z14.png` containing known WorldCover codes for decode tests.
+- [x] 1.15 Add a debug `RoadIndex` dump helper behind `#[cfg(test)]` so tests can inspect candidate cells without a GPU.
 
 ### Tests
 
-- [ ] 1.16 Unit-test every `Surface` mapping from OSM `GC_PAVED`, `GC_PITCH`, and `LC_*` values in `src/surface.rs`.
-- [ ] 1.17 Unit-test every WorldCover code (10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100) and an unknown code in `src/surface.rs`.
-- [ ] 1.18 Unit-test the water precedence and all weather grip/foot multipliers in `src/surface.rs`.
-- [ ] 1.19 Unit-test item ids for north/south/east/west, 3° boundaries, the antimeridian, and a tile crossing two WorldCover items in `src/landcover.rs`.
-- [ ] 1.20 Unit-test PNG decode against `tests/fixtures/landcover_z14.png`, including empty, truncated, and all-zero inputs.
-- [ ] 1.21 Unit-test `RoadIndex` on a straight carriageway, a sidewalk band, an off-ribbon point, a bridge deck, a hidden tunnel flag, and a path crossing a tile border in `src/roads.rs`.
-- [ ] 1.22 Unit-test closest-point distance and altitude interpolation on a synthetic two-segment path in `src/roads.rs`.
-- [ ] 1.23 Unit-test `surface::merge` for road-over-landcover, water-over-road, and missing-landcover fallback in `src/surface.rs`.
-- [ ] 1.24 Unit-test `World::surface_at` on `World { flat: Some(0.0) }` returning Grass at 0 m and the diagnostic `World::surface` wrapper, plus `--surface-probe` argument parsing in `src/main.rs`.
+- [x] 1.16 Unit-test every `Surface` mapping from OSM `GC_PAVED`, `GC_PITCH`, and `LC_*` values in `src/surface.rs`.
+- [x] 1.17 Unit-test every WorldCover code (10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100) and an unknown code in `src/surface.rs`.
+- [x] 1.18 Unit-test the water precedence and all weather grip/foot multipliers in `src/surface.rs`.
+- [x] 1.19 Unit-test item ids for north/south/east/west, 3° boundaries, the antimeridian, and a tile crossing two WorldCover items in `src/landcover.rs`.
+- [x] 1.20 Unit-test PNG decode against `tests/fixtures/landcover_z14.png`, including empty, truncated, and all-zero inputs.
+- [x] 1.21 Unit-test `RoadIndex` on a straight carriageway, a sidewalk band, an off-ribbon point, a bridge deck, a hidden tunnel flag, and a path crossing a tile border in `src/roads.rs`.
+- [x] 1.22 Unit-test closest-point distance and altitude interpolation on a synthetic two-segment path in `src/roads.rs`.
+- [x] 1.23 Unit-test `surface::merge` for road-over-landcover, water-over-road, and missing-landcover fallback in `src/surface.rs`.
+- [x] 1.24 Unit-test `World::surface_at` on `World { flat: Some(0.0) }` returning Grass at 0 m and the diagnostic `World::surface` wrapper, plus `--surface-probe` argument parsing in `src/main.rs`.
 
 ### Verification
 
-- [ ] Run `cargo check --all-targets`; it exits 0.
-- [ ] Run `cargo test`; it exits 0 and all new surface, landcover, road, and world tests pass.
-- [ ] Run `cargo test --test shaders`; it exits 0 (no shader changes expected, but the suite must stay green).
-- [ ] Run `cargo run --release -- --surface-probe -34.6037,-58.3816`; it prints plausible elevation and classes and exits 0.
-- [ ] Run `cargo run --release -- --surface-probe 48.8566,2.3522`; it prints a different landcover mixture and exits 0.
-- [ ] Run `cargo build --release --locked`; it exits 0.
-- [ ] Confirm no new skipped, quarantined, or failing tests.
+- [x] Run `cargo check --all-targets`; it exits 0.
+- [x] Run `cargo test`; it exits 0 and all new surface, landcover, road, and world tests pass.
+- [x] Run `cargo test --test shaders`; it exits 0 (no shader changes expected, but the suite must stay green).
+- [x] Run `cargo run --release -- --surface-probe -34.6037,-58.3816`; it prints plausible elevation and classes and exits 0.
+- [x] Run `cargo run --release -- --surface-probe 48.8566,2.3522`; it prints a different landcover mixture and exits 0.
+- [x] Run `cargo build --release --locked`; it exits 0.
+- [x] Confirm no new skipped, quarantined, or failing tests.
 
 **Done when:** A point query returns height, one of six land classes or water, and road/sidewalk/bridge flags with no GPU or streamed world required beyond the loaded tile, and the full suite is green.
 
