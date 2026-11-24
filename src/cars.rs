@@ -421,9 +421,30 @@ pub struct Car {
     pub dir: Vec3,
     pub shift: Vec3,
     gap: f32,
+    /// Seconds left braking to a stop for a player nearby (see `step`).
+    pub yield_t: f32,
+    /// Damage taken from the player's car, 0..1; it slows the car for good.
+    pub hurt: f32,
     /// Under the 3D tiles: how far the mesh's street is above our road here,
     /// and the frame it was found on (World::photo_car_lights).
     pub street: std::cell::Cell<(f32, u32)>,
+}
+
+/// How long a car holds still after the player comes right up to it (s).
+const YIELD_HOLD: f32 = 2.0;
+/// Within this distance of the player a yielding car stops outright (m): close
+/// enough to be walked up to, but clear of the body.
+const YIELD_STOP: f32 = 2.5;
+/// Within this distance it holds at a standstill, rather than creeping up on
+/// the player a little at a time (m).
+const YIELD_HOLD_D: f32 = 4.5;
+/// How hard a yielding car brakes (m/s²).
+const YIELD_BRAKE: f32 = 12.0;
+
+/// A car at a known distance along a path, for a synthetic tile (the
+/// `--carjack` smoke run): a real car in every other respect.
+pub fn placed(path: u32, s: f32, v: f32, model: u8, col: [f32; 3]) -> Car {
+    Car { path, s, fwd: true, lane: 0, v, vmul: 1.0, model, col, rank: 0.0, dir: Vec3::ZERO, shift: Vec3::ZERO, gap: 1e9, yield_t: 0.0, hurt: 0.0, street: std::cell::Cell::new((0.0, u32::MAX)) }
 }
 
 fn density(class: u8) -> f32 {
@@ -463,6 +484,8 @@ fn place(net: &RoadNet, c: &mut Car, seed: u32) -> bool {
             c.v = p.speed * c.vmul;
             c.shift = Vec3::ZERO;
             c.dir = Vec3::ZERO;
+            c.yield_t = 0.0;
+            c.hurt = 0.0;
             return true;
         }
         pick -= w;
@@ -476,7 +499,7 @@ pub fn spawn(net: &RoadNet, tile_seed: u32) -> Vec<Car> {
     let mut cars = Vec::with_capacity(n);
     for k in 0..n as u32 {
         let seed = tile_seed ^ k.wrapping_mul(2654435761);
-        let mut c = Car { path: 0, s: 0.0, fwd: true, lane: 0, v: 0.0, vmul: 0.82 + 0.36 * hash(seed, 5), model: 0, col: [0.5; 3], rank: hash(seed, 6), dir: Vec3::ZERO, shift: Vec3::ZERO, gap: 1e9, street: std::cell::Cell::new((0.0, u32::MAX)) };
+        let mut c = Car { path: 0, s: 0.0, fwd: true, lane: 0, v: 0.0, vmul: 0.82 + 0.36 * hash(seed, 5), model: 0, col: [0.5; 3], rank: hash(seed, 6), dir: Vec3::ZERO, shift: Vec3::ZERO, gap: 1e9, yield_t: 0.0, hurt: 0.0, street: std::cell::Cell::new((0.0, u32::MAX)) };
         if place(net, &mut c, seed) {
             c.model = car_model(hash(seed, 7), net.paths[c.path as usize].class <= 2);
             c.col = livery(c.model, hash(seed, 8));
@@ -587,7 +610,11 @@ fn lane_order(cars: &[Car]) -> Vec<usize> {
 }
 
 /// Advance every car of one tile. Cars that leave the tile are returned.
-pub fn step(net: &RoadNet, cars: &mut Vec<Car>, dt: f32, up: Vec3, tick: u32) -> Vec<Exit> {
+/// `player` is the player's position relative to the tile centre and the
+/// distance traffic brakes for them within: a car inside it eases off, and one
+/// the player has come right up to stops and holds for a moment, so it can be
+/// taken at a standstill.
+pub fn step(net: &RoadNet, cars: &mut Vec<Car>, dt: f32, up: Vec3, tick: u32, player: Option<(Vec3, f32)>) -> Vec<Exit> {
     // Following distance: sort the cars of each lane and look at the one in front.
     let order = lane_order(cars);
     for c in cars.iter_mut() {
@@ -608,12 +635,32 @@ pub fn step(net: &RoadNet, cars: &mut Vec<Car>, dt: f32, up: Vec3, tick: u32) ->
         let p = &net.paths[c.path as usize];
         let ahead = if c.fwd { p.len - c.s } else { c.s };
         let mut target = p.speed * c.vmul;
+        // Damaged cars go slower for good.
+        target *= 1.0 - 0.6 * c.hurt.clamp(0.0, 1.0);
         // Ease off for the junction at the end of the road, and for the car in front.
         if ahead < 22.0 && p.class >= 2 {
             target = target.min(4.5 + ahead * 0.45);
         }
         target = target.min((c.gap - 2.5).max(0.0) * 0.9);
-        c.v += (target - c.v).clamp(-7.0 * dt, 2.6 * dt);
+        // Yield to the player: brake smoothly inside the radius, stop outright
+        // when they are right next to the car, and hold a moment after they go.
+        c.yield_t = (c.yield_t - dt).max(0.0);
+        if let Some((pp, radius)) = player {
+            let d = (pose(net, c, up).0 + c.shift - pp).length();
+            if d < radius {
+                let f = ((d - YIELD_STOP) / (radius - YIELD_STOP).max(1.0)).clamp(0.0, 1.0);
+                target *= f;
+                if d < YIELD_HOLD_D {
+                    c.yield_t = c.yield_t.max(YIELD_HOLD);
+                }
+            }
+        }
+        let held = c.yield_t > 0.0;
+        if held {
+            target = 0.0;
+        }
+        let decel = if held { YIELD_BRAKE } else { 7.0 };
+        c.v += (target - c.v).clamp(-decel * dt, 2.6 * dt);
         c.v = c.v.max(0.0);
         let before = c.s;
         c.s += c.v * dt * if c.fwd { 1.0 } else { -1.0 };
@@ -739,6 +786,8 @@ mod tests {
                 dir: Vec3::ZERO,
                 shift: Vec3::ZERO,
                 gap: 0.0,
+                yield_t: 0.0,
+                hurt: 0.0,
                 street: Default::default(),
             })
             .collect();

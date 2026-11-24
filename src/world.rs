@@ -118,12 +118,77 @@ pub struct Ground {
 
 /// A parked car the player can take: its pose on the planet (not tile-relative).
 #[derive(Copy, Clone, Debug)]
+#[allow(dead_code)]
 pub struct ParkedCar {
     pub model: u8,
     pub colour: [f32; 3],
     pub pos: DVec3,
     /// Bearing: radians from north, clockwise.
     pub yaw: f64,
+}
+
+/// A car that has been taken: the pose (and the speed it was doing) the player's
+/// own car starts from.
+#[derive(Copy, Clone, Debug)]
+pub struct TakenCar {
+    pub model: u8,
+    pub colour: [f32; 3],
+    pub pos: DVec3,
+    /// Bearing: radians from north, clockwise.
+    pub yaw: f64,
+    /// Velocity in the planet frame (m/s); zero for a parked car.
+    pub velocity: DVec3,
+}
+
+/// Whether a [`TrafficBody`] is moving in its lane or parked at the kerb.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum TrafficKind {
+    Moving,
+    Parked,
+}
+
+/// One car as the player's physics sees it: an oriented box in the planet frame.
+/// The `tile` and `index` identify the source car, so a hit can be applied back
+/// to its lane state (`World::hurt_traffic`).
+#[derive(Copy, Clone, Debug)]
+#[allow(dead_code)]
+pub struct TrafficBody {
+    pub kind: TrafficKind,
+    pub tile: TileId,
+    pub index: usize,
+    pub model: u8,
+    pub colour: [f32; 3],
+    /// Ground-contact centre in the planet frame.
+    pub pos: DVec3,
+    /// Bearing: radians from north, clockwise.
+    pub yaw: f64,
+    /// Half width and half length in the car's own frame (m).
+    pub half: [f64; 2],
+    /// Velocity in the planet frame (m/s).
+    pub velocity: DVec3,
+}
+
+/// Where the player is, so that traffic can brake for them.
+#[derive(Copy, Clone, Debug)]
+pub struct PlayerPresence {
+    pub pos: DVec3,
+    /// Walking (traffic brakes inside 12 m) or driving (18 m).
+    pub driving: bool,
+}
+
+impl PlayerPresence {
+    /// Traffic brakes smoothly inside this distance of someone on foot (m).
+    pub const WALK_RADIUS: f64 = 12.0;
+    /// …and of a car being driven (m).
+    pub const DRIVE_RADIUS: f64 = 18.0;
+
+    pub fn radius(&self) -> f64 {
+        if self.driving {
+            Self::DRIVE_RADIUS
+        } else {
+            Self::WALK_RADIUS
+        }
+    }
 }
 
 /// Index of the nearest parked car in one tile's list to `p`, within `radius`.
@@ -138,8 +203,8 @@ fn nearest_parked(center: DVec3, parked: &[Parked], p: DVec3, radius: f64) -> Op
     best.map(|(_, i)| i)
 }
 
-/// A parked prop's facing, as a bearing on the planet.
-fn parked_yaw(pos: DVec3, fwd: Vec3) -> f64 {
+/// A direction in the planet frame, as a bearing: radians from north, clockwise.
+fn bearing_of(pos: DVec3, fwd: Vec3) -> f64 {
     let (e, n, _) = geo::enu(pos);
     let f = fwd.as_dvec3();
     f.dot(e).atan2(f.dot(n))
@@ -325,6 +390,8 @@ pub struct World {
     photo: Option<Box<crate::tiles3d::Photo>>,
     /// the waves (their CPU copy, so what floats rides what is drawn)
     pub ocean: crate::ocean::Ocean,
+    /// the `--carjack` smoke run's synthetic traffic tile, kept from eviction
+    test_traffic: Option<TileId>,
 }
 
 #[derive(Clone)]
@@ -344,7 +411,7 @@ impl Frustum {
 impl World {
     pub fn new(loader: Loader, max_zoom: u8) -> Self {
         let photo = Some(Box::new(crate::tiles3d::Photo::new(loader.src.google.clone(), Some(loader.src.clone()))));
-        Self { photo, flat: None, loader, tiles: HashMap::default(), builds: HashMap::default(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, reach_k: 1.0, city_k: 1.0, tile_cap: 700, spare_builds: 12, max_build_jobs: 12, tree_far: 3200.0, tree_imp_k: 1.0, cars: (1.0, 2200.0, 1100.0), buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::default(), ocean: crate::ocean::Ocean::new() }
+        Self { photo, flat: None, loader, tiles: HashMap::default(), builds: HashMap::default(), frame: 0, in_flight: 0, max_zoom, lod_k: 0.62, reach_k: 1.0, city_k: 1.0, tile_cap: 700, spare_builds: 12, max_build_jobs: 12, tree_far: 3200.0, tree_imp_k: 1.0, cars: (1.0, 2200.0, 1100.0), buildings_on: true, draw: Vec::new(), draw_shore: Vec::new(), draw_b: Vec::new(), wanted: Vec::new(), in_view: Vec::new(), frustum: None, craters: Vec::new(), tree_dims: Vec::new(), tick: 0, stats: (0, 0, 0), last_update: None, uploads: VecDeque::new(), fields: HashMap::default(), ocean: crate::ocean::Ocean::new(), test_traffic: None }
     }
 
     /// Tiles wanted but not yet asked for (at most 28 are on their way at once).
@@ -706,7 +773,7 @@ impl World {
                 let pos = b.center + pk.pos.as_dvec3();
                 let d = (pos - p).length();
                 if best.is_none_or(|(bd, _)| d < bd) {
-                    best = Some((d, ParkedCar { model: pk.model, colour: pk.col, pos, yaw: parked_yaw(pos, pk.fwd) }));
+                    best = Some((d, ParkedCar { model: pk.model, colour: pk.col, pos, yaw: bearing_of(pos, pk.fwd) }));
                 }
             }
         }
@@ -715,11 +782,11 @@ impl World {
 
     /// Take the nearest parked car within `radius` of `p`, removing it from its
     /// tile so it cannot be taken twice.
-    pub fn take_parked_car(&mut self, p: DVec3, radius: f64) -> Option<ParkedCar> {
+    pub fn take_parked_car(&mut self, p: DVec3, radius: f64) -> Option<TakenCar> {
         let (lat, lon, _) = geo::pos_to_lla(p);
         let c = TileId::at(lat, lon, DATA_ZOOM);
         let size = 1i64 << DATA_ZOOM;
-        let mut best: Option<(f64, TileId, usize, ParkedCar)> = None;
+        let mut best: Option<(f64, TileId, usize, TakenCar)> = None;
         for dy in -1..=1i64 {
             for dx in -1..=1i64 {
                 let (x, y) = ((c.x as i64 + dx).rem_euclid(size), c.y as i64 + dy);
@@ -733,7 +800,7 @@ impl World {
                 let pos = b.center + pk.pos.as_dvec3();
                 let d = (pos - p).length();
                 if best.as_ref().is_none_or(|(bd, _, _, _)| d < *bd) {
-                    best = Some((d, id, i, ParkedCar { model: pk.model, colour: pk.col, pos, yaw: parked_yaw(pos, pk.fwd) }));
+                    best = Some((d, id, i, TakenCar { model: pk.model, colour: pk.col, pos, yaw: bearing_of(pos, pk.fwd), velocity: DVec3::ZERO }));
                 }
             }
         }
@@ -744,6 +811,196 @@ impl World {
             }
         }
         Some(car)
+    }
+
+    /// The nearest moving traffic car within `radius` of `p`, without taking it:
+    /// for the interaction prompt.
+    pub fn nearest_traffic_car(&self, p: DVec3, radius: f64) -> Option<TakenCar> {
+        self.pick_traffic_car(p, radius).map(|(_, _, _, car)| car)
+    }
+
+    /// Take the nearest moving traffic car within `radius` of `p`, removing it
+    /// from its lane so it can neither be taken twice nor drawn again. Cars in
+    /// tiles that are not ready are refused: the interaction is offered only for
+    /// a car the simulation actually has.
+    pub fn take_traffic_car(&mut self, p: DVec3, radius: f64) -> Option<TakenCar> {
+        let (_, id, i, car) = self.pick_traffic_car(p, radius)?;
+        let removed = match self.builds.get_mut(&id) {
+            Some(BSlot::Ready(b)) if i < b.cars.len() && b.cars[i].model == car.model => {
+                b.cars.swap_remove(i);
+                true
+            }
+            _ => false,
+        };
+        removed.then_some(car)
+    }
+
+    /// Find the nearest moving car in the ready tiles around `p`.
+    fn pick_traffic_car(&self, p: DVec3, radius: f64) -> Option<(f64, TileId, usize, TakenCar)> {
+        if !p.is_finite() || !(radius > 0.0) {
+            return None;
+        }
+        let (lat, lon, _) = geo::pos_to_lla(p);
+        let c = TileId::at(lat, lon, DATA_ZOOM);
+        let size = 1i64 << DATA_ZOOM;
+        let mut best: Option<(f64, TileId, usize, TakenCar)> = None;
+        for dy in -1..=1i64 {
+            for dx in -1..=1i64 {
+                let (x, y) = ((c.x as i64 + dx).rem_euclid(size), c.y as i64 + dy);
+                if y < 0 || y >= size {
+                    continue;
+                }
+                let id = TileId::new(DATA_ZOOM, x as u32, y as u32);
+                let Some(BSlot::Ready(b)) = self.builds.get(&id) else { continue };
+                let up = b.center.normalize().as_vec3();
+                for (i, car) in b.cars.iter().enumerate() {
+                    if b.net.paths.get(car.path as usize).is_none_or(|path| path.hidden) {
+                        continue;
+                    }
+                    let (rel, dir) = cars::pose(&b.net, car, up);
+                    let pos = b.center + (rel + car.shift).as_dvec3();
+                    let d = (pos - p).length();
+                    if d > radius || best.as_ref().is_some_and(|(bd, _, _, _)| *bd <= d) {
+                        continue;
+                    }
+                    best = Some((d, id, i, TakenCar { model: car.model, colour: car.col, pos, yaw: bearing_of(pos, dir), velocity: dir.as_dvec3() * car.v as f64 }));
+                }
+            }
+        }
+        best
+    }
+
+    /// Oriented boxes for the moving and parked cars within `radius` of `p`.
+    /// Only cars in ready tiles are returned; tunnels stay out of sight.
+    pub fn traffic_bodies_near(&self, p: DVec3, radius: f64, out: &mut Vec<TrafficBody>) {
+        out.clear();
+        if !p.is_finite() || !(radius > 0.0) {
+            return;
+        }
+        let (lat, lon, _) = geo::pos_to_lla(p);
+        let c = TileId::at(lat, lon, DATA_ZOOM);
+        let size = 1i64 << DATA_ZOOM;
+        for dy in -1..=1i64 {
+            for dx in -1..=1i64 {
+                let (x, y) = ((c.x as i64 + dx).rem_euclid(size), c.y as i64 + dy);
+                if y < 0 || y >= size {
+                    continue;
+                }
+                let id = TileId::new(DATA_ZOOM, x as u32, y as u32);
+                let Some(BSlot::Ready(b)) = self.builds.get(&id) else { continue };
+                if (b.center - p).length() > radius + b.radius {
+                    continue;
+                }
+                let up = b.center.normalize().as_vec3();
+                for (i, car) in b.cars.iter().enumerate() {
+                    if b.net.paths.get(car.path as usize).is_none_or(|path| path.hidden) {
+                        continue;
+                    }
+                    let (rel, dir) = cars::pose(&b.net, car, up);
+                    let pos = b.center + (rel + car.shift).as_dvec3();
+                    let half = cars::player_geom(car.model).half;
+                    if (pos - p).length() > radius + half[1] {
+                        continue;
+                    }
+                    out.push(TrafficBody { kind: TrafficKind::Moving, tile: id, index: i, model: car.model, colour: car.col, pos, yaw: bearing_of(pos, dir), half, velocity: dir.as_dvec3() * car.v as f64 });
+                }
+                for (i, pk) in b.parked.iter().enumerate() {
+                    let pos = b.center + pk.pos.as_dvec3();
+                    let half = cars::player_geom(pk.model).half;
+                    if (pos - p).length() > radius + half[1] {
+                        continue;
+                    }
+                    out.push(TrafficBody { kind: TrafficKind::Parked, tile: id, index: i, model: pk.model, colour: pk.col, pos, yaw: bearing_of(pos, pk.fwd), half, velocity: DVec3::ZERO });
+                }
+            }
+        }
+    }
+
+    /// Release the `--carjack` tile, so the world streams over it as usual.
+    pub fn clear_test_traffic(&mut self) {
+        self.test_traffic = None;
+    }
+
+    /// A player car hit a moving car: slow it, damage it and hold it stopped for
+    /// a moment. Parked props are solid but not damaged.
+    pub fn hurt_traffic(&mut self, body: &TrafficBody, impact: f64) {
+        let Some(car) = self.traffic_car_mut(body) else { return };
+        if !(impact > 0.0) || !impact.is_finite() {
+            return;
+        }
+        car.hurt = (car.hurt + (impact * 0.08) as f32).clamp(0.0, 1.0);
+        car.v *= (1.0 - (impact * 0.06).clamp(0.2, 0.7)) as f32;
+        car.yield_t = car.yield_t.max(1.5);
+    }
+
+    /// Traffic braked because it hit the player on foot: hold it stopped for a
+    /// few seconds.
+    pub fn brake_traffic(&mut self, body: &TrafficBody) {
+        let Some(car) = self.traffic_car_mut(body) else { return };
+        car.v *= 0.3;
+        car.yield_t = car.yield_t.max(3.0);
+    }
+
+    fn traffic_car_mut(&mut self, body: &TrafficBody) -> Option<&mut Car> {
+        if body.kind != TrafficKind::Moving {
+            return None;
+        }
+        let Some(BSlot::Ready(b)) = self.builds.get_mut(&body.tile) else { return None };
+        let car = b.cars.get_mut(body.index)?;
+        (car.model == body.model).then_some(car)
+    }
+
+    /// One moving car on a straight, empty road through `pos`, facing `yaw`, at
+    /// `speed` m/s: the deterministic traffic the `--carjack` smoke run takes.
+    /// It sits in an ordinary building tile, so it is stepped, drawn and taken
+    /// exactly as streamed traffic is.
+    pub fn spawn_test_traffic(&mut self, pos: DVec3, yaw: f64, speed: f32) -> bool {
+        if !pos.is_finite() || !yaw.is_finite() {
+            return false;
+        }
+        let (lat, lon, alt) = geo::pos_to_lla(pos);
+        let id = TileId::at(lat, lon, DATA_ZOOM);
+        let (clat, clon) = id.lat_lon(0.5, 0.5);
+        let center = geo::lla_to_pos(clat, clon, alt);
+        let (east, north, _) = geo::enu(center);
+        let dir = east * yaw.sin() + north * yaw.cos();
+        let right = dir.cross(center.normalize()).normalize_or_zero();
+        // Offset the road so the car's lane runs through `pos`.
+        let base = pos - right * 1.5;
+        let length = 120.0f32;
+        let half = length * 0.5;
+        let a = base - dir * half as f64;
+        let b = base + dir * half as f64;
+        let pts = vec![(a - center).as_vec3(), (b - center).as_vec3()];
+        let path = crate::roads::Path {
+            pts: pts.clone(),
+            cum: vec![0.0, length],
+            len: length,
+            class: 1,
+            oneway: false,
+            lanes: 1,
+            lane_w: 3.0,
+            park_off: 0.0,
+            speed: speed.max(1.0),
+            hidden: false,
+            drive_half: 5.0,
+            walk: false,
+            bridge: false,
+            local: Vec::new(),
+            alt: vec![alt as f32, alt as f32],
+            nodes: [0, 0],
+            edge: [0, 0],
+            junctions: Vec::new(),
+            keep_clear: Vec::new(),
+        };
+        let net = RoadNet { paths: vec![path], ..Default::default() };
+        let car = cars::placed(0, half + 2.8, speed.max(0.0), 0, [0.62, 0.08, 0.05]);
+        let road_index = RoadIndex::build(&net, 1024.0, 1.0);
+        let radius = (pos - center).length() + 400.0;
+        let tile = BTile { center, radius, gpu: None, footprints: Vec::new(), last_used: self.frame, net, road_index, cars: vec![car], parked: Vec::new(), trees: Vec::new(), tree_var: Vec::new(), chunks: Vec::new(), under: Vec::new(), cells: Vec::new(), near_idx: Vec::new(), ax: [0.0; 4], ay: [0.0; 4], shown: 1.0, mid_t: 1.0, fine_t: 1.0, tall: 0.0 };
+        self.builds.insert(id, BSlot::Ready(Box::new(tile)));
+        self.test_traffic = Some(id);
+        true
     }
 
     /// Building or bridge deck over a lat/lon.
@@ -1013,8 +1270,9 @@ impl World {
         self.craters.push((pos, radius));
     }
 
-    /// Drive the traffic on the tiles around a point.
-    pub fn update_traffic(&mut self, dt: f32, focus: DVec3) {
+    /// Drive the traffic on the tiles around a point. `player` is where the
+    /// person on foot or the car being driven is, so traffic can brake for them.
+    pub fn update_traffic(&mut self, dt: f32, focus: DVec3, player: Option<PlayerPresence>) {
         self.tick = self.tick.wrapping_add(1);
         let tick = self.tick;
         let mut exits: Vec<(TileId, cars::Exit, glam::Vec3)> = Vec::new();
@@ -1024,8 +1282,9 @@ impl World {
                 continue;
             }
             let up = b.center.normalize().as_vec3();
+            let near = player.filter(|p| (p.pos - b.center).length() <= p.radius() + b.radius + 30.0).map(|p| ((p.pos - b.center).as_vec3(), p.radius() as f32));
             let mut cs = std::mem::take(&mut b.cars);
-            for e in cars::step(&b.net, &mut cs, dt, up, tick) {
+            for e in cars::step(&b.net, &mut cs, dt, up, tick, near) {
                 let was = cars::pose(&b.net, &e.car, up).0;
                 exits.push((*id, e, was));
             }
@@ -1298,6 +1557,11 @@ impl World {
             }
             let (prio, id) = self.wanted[k];
             if id.z & 0x80 != 0 {
+                // The `--carjack` test tile is made and owned by the smoke run.
+                if self.test_traffic.is_some_and(|t| t.z == id.z & 0x7f && t.x == id.x && t.y == id.y) {
+                    sent[k] = true;
+                    continue;
+                }
                 if building >= self.max_build_jobs {
                     continue;
                 }
@@ -1353,6 +1617,11 @@ impl World {
                 }
             }
             self.tiles.retain(|_, s| !matches!(s, Slot::Failed) || f % 3600 != 0);
+            if let Some(id) = self.test_traffic {
+                if let Some(BSlot::Ready(b)) = self.builds.get_mut(&id) {
+                    b.last_used = f;
+                }
+            }
             self.builds.retain(|_, s| !matches!(s, BSlot::Ready(b) if f - b.last_used > 900));
             // Of the building tiles left behind (out of reach this frame),
             // only the most recent few stay, for turning back.
@@ -2301,11 +2570,204 @@ mod tests {
         assert!(nearest_parked(center, &list, p, 3.0).is_some(), "neighbours stay");
         assert!(nearest_parked(center, &list, center + n * 20.0, 1.0).is_none());
         // The prop's facing becomes a bearing: north 0, east a quarter turn.
-        assert!(parked_yaw(center, n.as_vec3()).abs() < 1e-9);
-        assert!((parked_yaw(center, e.as_vec3()) - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+        assert!(bearing_of(center, n.as_vec3()).abs() < 1e-9);
+        assert!((bearing_of(center, e.as_vec3()) - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
         // A world with no detail tile loaded has nothing to take.
         let mut w = flat_world();
         assert!(w.nearest_parked_car(p, 10.0).is_none());
         assert!(w.take_parked_car(p, 10.0).is_none());
+    }
+
+    // ------------------------------------------------------------- traffic
+
+    fn origin() -> DVec3 {
+        geo::lla_to_pos(0.0, 0.0, 0.0)
+    }
+
+    /// An eastbound road through `origin`, facing east.
+    fn east() -> DVec3 {
+        geo::enu(origin()).0
+    }
+
+    const EAST: f64 = std::f64::consts::FRAC_PI_2;
+
+    /// A flat world with one test car on a straight road through the origin,
+    /// facing east at `speed`.
+    fn traffic_world(speed: f32) -> World {
+        let mut w = flat_world();
+        assert!(w.spawn_test_traffic(origin(), EAST, speed));
+        w
+    }
+
+    /// Put the test car `ahead` metres east of `origin` along its road.
+    fn place_car(w: &mut World, ahead: f64) {
+        let id = w.test_traffic.expect("test tile");
+        let Some(BSlot::Ready(b)) = w.builds.get_mut(&id) else { panic!("test tile ready") };
+        b.cars[0].s = 60.0 + ahead as f32;
+    }
+
+    fn test_car(w: &World) -> &Car {
+        let id = w.test_traffic.expect("test tile");
+        let Some(BSlot::Ready(b)) = w.builds.get(&id) else { panic!("test tile ready") };
+        &b.cars[0]
+    }
+
+    fn walk_presence() -> PlayerPresence {
+        PlayerPresence { pos: origin(), driving: false }
+    }
+
+    fn drive_presence() -> PlayerPresence {
+        PlayerPresence { pos: origin(), driving: true }
+    }
+
+    fn run_traffic(w: &mut World, secs: f64, player: Option<PlayerPresence>) {
+        let n = (secs * 60.0).round() as usize;
+        for _ in 0..n {
+            w.update_traffic(1.0 / 60.0, origin(), player);
+        }
+    }
+
+    #[test]
+    fn traffic_brakes_for_a_walking_and_for_a_driving_player() {
+        // A car 27 m away, driving at the player: with someone on foot in the
+        // road it brakes inside 12 m and stops short of them.
+        let mut w = traffic_world(8.0);
+        place_car(&mut w, -27.0);
+        run_traffic(&mut w, 4.0, Some(walk_presence()));
+        let car = test_car(&w);
+        assert!(car.v < 0.2, "the car stopped: {:.2} m/s", car.v);
+        let id = w.test_traffic.unwrap();
+        let Some(BSlot::Ready(b)) = w.builds.get(&id) else { panic!() };
+        let up = b.center.normalize().as_vec3();
+        let (rel, _) = cars::pose(&b.net, car, up);
+        let d = (b.center + rel.as_dvec3() - origin()).length();
+        assert!(d < PlayerPresence::WALK_RADIUS, "stopped within the yield radius: {d:.1} m");
+        assert!(d > 1.0, "did not drive over the player: {d:.1} m");
+
+        // The same car with nobody about keeps its speed.
+        let mut w = traffic_world(8.0);
+        place_car(&mut w, -27.0);
+        run_traffic(&mut w, 1.0, None);
+        assert!(test_car(&w).v > 6.0, "unhindered traffic keeps moving: {:.2}", test_car(&w).v);
+
+        // Inside the driving radius but outside the walking one, a driver makes
+        // the car slow; a walker at the same distance does not.
+        let mut walk = traffic_world(8.0);
+        place_car(&mut walk, -15.0);
+        run_traffic(&mut walk, 0.25, Some(walk_presence()));
+        let mut drive = traffic_world(8.0);
+        place_car(&mut drive, -15.0);
+        run_traffic(&mut drive, 0.25, Some(drive_presence()));
+        assert!(test_car(&drive).v < test_car(&walk).v - 0.5, "traffic slows for a car 15 m off ({:.2}) but not for a walker ({:.2})", test_car(&drive).v, test_car(&walk).v);
+    }
+
+    #[test]
+    fn traffic_holds_for_a_carjack_and_resumes_when_the_player_leaves() {
+        let mut w = traffic_world(6.0);
+        place_car(&mut w, -5.0);
+        run_traffic(&mut w, 2.0, Some(walk_presence()));
+        assert!(test_car(&w).v < 0.2, "held at a standstill: {:.2}", test_car(&w).v);
+        assert!(test_car(&w).yield_t > 0.0, "in its yield state");
+        // The player walks off: after the hold expires the car pulls away again.
+        run_traffic(&mut w, 1.0, None);
+        assert!(test_car(&w).v < 0.2, "still holding through the short hold");
+        run_traffic(&mut w, 5.0, None);
+        assert!(test_car(&w).v > 5.5, "back to normal speed: {:.2}", test_car(&w).v);
+    }
+
+    #[test]
+    fn taking_a_traffic_car_removes_exactly_one_and_keeps_its_pose() {
+        let mut w = traffic_world(9.0);
+        place_car(&mut w, -17.0);
+        let id = w.test_traffic.unwrap();
+        if let Some(BSlot::Ready(b)) = w.builds.get_mut(&id) {
+            // A second car, well out of reach, proves only one is taken.
+            b.cars.push(cars::placed(0, 85.0, 5.0, 3, [0.2, 0.3, 0.4]));
+            b.cars[0].col = [0.1, 0.5, 0.2];
+        }
+        let taken = w.take_traffic_car(origin(), 20.0).expect("one in reach");
+        assert_eq!(taken.model, 0);
+        assert_eq!(taken.colour, [0.1, 0.5, 0.2]);
+        assert!((taken.pos - (origin() - east() * 17.0)).length() < 0.5, "its pose: {:.2} m off", (taken.pos - (origin() - east() * 17.0)).length());
+        assert!((taken.yaw - EAST).abs() < 0.15, "facing east: {:.2}", taken.yaw);
+        assert!((taken.velocity.length() - 9.0).abs() < 0.3, "its speed comes with it: {:.2}", taken.velocity.length());
+        assert!((taken.velocity.dot(east()) - 9.0).abs() < 0.3, "and its direction");
+        let Some(BSlot::Ready(b)) = w.builds.get(&id) else { panic!() };
+        assert_eq!(b.cars.len(), 1, "exactly one left the lane");
+        assert_eq!(b.cars[0].model, 3, "the neighbour stays");
+        // It cannot be taken twice, and nothing else is in reach.
+        assert!(w.take_traffic_car(origin(), 20.0).is_none());
+        assert!(w.nearest_traffic_car(origin(), 20.0).is_none());
+    }
+
+    #[test]
+    fn taking_a_parked_car_removes_one_and_leaves_the_neighbours() {
+        let mut w = flat_world();
+        let p = origin();
+        assert!(w.spawn_test_traffic(origin(), EAST, 0.0));
+        let (e, n, up) = geo::enu(p);
+        let id = w.test_traffic.unwrap();
+        let center = match w.builds.get(&id) {
+            Some(BSlot::Ready(b)) => b.center,
+            _ => panic!("test tile ready"),
+        };
+        let mk = |at: DVec3, model| Parked { pos: (at - center).as_vec3(), fwd: n.as_vec3(), up: up.as_vec3(), model, col: [0.5; 3] };
+        if let Some(BSlot::Ready(b)) = w.builds.get_mut(&id) {
+            b.parked = vec![mk(p + e * 1.0, 0), mk(p + e * 3.0, 3), mk(p - e * 2.0, 5)];
+        }
+        let taken = w.take_parked_car(p + e * 0.9, 2.0).expect("one in reach");
+        assert_eq!(taken.model, 0);
+        assert_eq!(taken.velocity, DVec3::ZERO, "a parked car is at rest");
+        let Some(BSlot::Ready(b)) = w.builds.get(&id) else { panic!() };
+        assert_eq!(b.parked.len(), 2, "only the taken prop goes");
+        let mut left: Vec<u8> = b.parked.iter().map(|pk| pk.model).collect();
+        left.sort_unstable();
+        assert_eq!(left, vec![3, 5], "the neighbours stay");
+        // Out of range finds nothing.
+        assert!(w.take_parked_car(p + e * 40.0, 2.0).is_none());
+    }
+
+    #[test]
+    fn carjacking_is_refused_when_the_tile_is_not_ready_or_nothing_is_in_reach() {
+        let p = origin();
+        // No detail tile at all: nothing to take, however close it feels.
+        let mut w = flat_world();
+        assert!(w.nearest_traffic_car(p, 50.0).is_none());
+        assert!(w.take_traffic_car(p, 50.0).is_none());
+        assert!(w.take_parked_car(p, 50.0).is_none());
+        // A tile still loading owns no cars the simulation can see.
+        let mut w = flat_world();
+        let id = TileId::at(geo::pos_to_lla(p).0, geo::pos_to_lla(p).1, DATA_ZOOM);
+        w.builds.insert(id, BSlot::Loading);
+        assert!(w.nearest_traffic_car(p, 50.0).is_none());
+        assert!(w.take_traffic_car(p, 50.0).is_none());
+        // A ready tile, but the only car is out of reach.
+        let mut w = traffic_world(4.0);
+        assert!(w.nearest_traffic_car(p, 2.0).is_none());
+        assert!(w.take_traffic_car(p, 2.0).is_none());
+        let near = w.nearest_traffic_car(p, 3.2).expect("in talk reach");
+        assert!((near.pos - p).length() < 3.2, "distance {:.2}", (near.pos - p).length());
+        assert!(w.nearest_traffic_car(p, 5.0).is_some());
+    }
+
+    #[test]
+    fn traffic_bodies_are_oriented_boxes_with_the_cars_velocity() {
+        let p = origin();
+        let mut w = traffic_world(7.0);
+        place_car(&mut w, -12.0);
+        let mut out = Vec::new();
+        w.traffic_bodies_near(p, 20.0, &mut out);
+        assert_eq!(out.len(), 1, "one moving car");
+        let b = out[0];
+        assert_eq!(b.kind, TrafficKind::Moving);
+        assert_eq!(b.model, 0);
+        assert!((b.pos - (p - east() * 12.0)).length() < 0.5);
+        assert!((b.yaw - EAST).abs() < 0.15, "facing east: {:.2}", b.yaw);
+        assert!((b.velocity.dot(east()) - 7.0).abs() < 0.3);
+        assert!((b.half[0] - cars::player_geom(0).half[0]).abs() < 1e-9 && (b.half[1] - cars::player_geom(0).half[1]).abs() < 1e-9);
+        // Far away it is not returned.
+        out.clear();
+        w.traffic_bodies_near(p + east() * 400.0, 10.0, &mut out);
+        assert!(out.is_empty());
     }
 }
