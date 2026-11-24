@@ -378,9 +378,11 @@ impl Character {
             self.vel = DVec3::ZERO;
         }
 
-        // Facing follows the way the body is going.
+        // Facing follows the way the body is going, turning smoothly.
         if new_vh.length() > 0.25 {
-            self.yaw = new_vh.dot(east).atan2(new_vh.dot(north));
+            let target = new_vh.dot(east).atan2(new_vh.dot(north));
+            let diff = (target - self.yaw + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI;
+            self.yaw = (self.yaw + diff * (12.0 * h).min(1.0)).rem_euclid(std::f64::consts::TAU);
         }
 
         // Footsteps, and the last safe place.

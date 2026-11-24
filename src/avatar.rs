@@ -24,6 +24,7 @@ pub const MAT_SKIN: f32 = 0.0;
 pub const MAT_CLOTH: f32 = 0.25;
 pub const MAT_HAIR: f32 = 0.5;
 pub const MAT_SHOE: f32 = 0.75;
+pub const MAT_FIXED: f32 = 0.95;
 
 /// The part names, in the order the meshes and poses use.
 #[allow(dead_code)]
@@ -36,25 +37,31 @@ pub const NAMES: [&str; PARTS] = [
 pub struct Palette {
     pub skin: [f32; 3],
     pub cloth: [f32; 3],
+    pub pants: [f32; 3],
     pub hair: [f32; 3],
     pub shoe: [f32; 3],
 }
 
 /// One of four palettes; an out-of-range style falls back to the first.
 pub fn palette(style: u8) -> Palette {
-    let p = |skin: [f32; 3], cloth: [f32; 3], hair: [f32; 3], shoe: [f32; 3]| Palette { skin, cloth, hair, shoe };
+    let p = |skin: [f32; 3], cloth: [f32; 3], pants: [f32; 3], hair: [f32; 3], shoe: [f32; 3]| Palette { skin, cloth, pants, hair, shoe };
     match style as usize {
-        1 => p([0.42, 0.27, 0.18], [0.20, 0.26, 0.10], [0.03, 0.025, 0.02], [0.04, 0.035, 0.03]),
-        2 => p([0.62, 0.45, 0.34], [0.16, 0.18, 0.24], [0.55, 0.42, 0.20], [0.08, 0.07, 0.06]),
-        3 => p([0.30, 0.19, 0.12], [0.30, 0.12, 0.08], [0.02, 0.02, 0.02], [0.03, 0.03, 0.03]),
-        _ => p([0.58, 0.40, 0.30], [0.13, 0.20, 0.26], [0.06, 0.045, 0.03], [0.05, 0.045, 0.04]),
+        // Olive bomber jacket + dark indigo jeans + dark hair
+        1 => p([0.42, 0.27, 0.18], [0.16, 0.22, 0.10], [0.05, 0.07, 0.12], [0.03, 0.025, 0.02], [0.04, 0.035, 0.03]),
+        // Slate hoodie + charcoal chinos + blonde hair
+        2 => p([0.62, 0.45, 0.34], [0.18, 0.20, 0.26], [0.08, 0.08, 0.09], [0.55, 0.42, 0.20], [0.08, 0.07, 0.06]),
+        // Crimson jacket + black jeans + black hair
+        3 => p([0.30, 0.19, 0.12], [0.36, 0.08, 0.07], [0.035, 0.035, 0.04], [0.02, 0.02, 0.02], [0.04, 0.04, 0.045]),
+        // Denim/navy jacket + khaki pants + brown hair
+        _ => p([0.58, 0.40, 0.30], [0.09, 0.15, 0.26], [0.22, 0.18, 0.13], [0.06, 0.045, 0.03], [0.05, 0.045, 0.04]),
     }
 }
 
 /// The colour of a part's material.
 fn tint(p: &Palette, part: usize) -> [f32; 3] {
     match part {
-        2 => p.skin,
+        2 | 5 | 8 => p.skin,
+        0 | 9 | 10 | 12 | 13 => p.pants,
         15 => p.hair,
         11 | 14 => p.shoe,
         _ => p.cloth,
@@ -91,36 +98,48 @@ fn rx(a: f32) -> Mat4 {
     Mat4::from_rotation_x(a)
 }
 
+fn ry(a: f32) -> Mat4 {
+    Mat4::from_rotation_y(a)
+}
+
 fn rz(a: f32) -> Mat4 {
     Mat4::from_rotation_z(a)
 }
 
 /// The pose for a gait at `phase` radians. Idle breathes, walk and run swing
-/// the limbs in opposition, jump tucks the legs and lifts the arms.
+/// the limbs in opposition with torso counter-twist, jump tucks the legs and
+/// raises the arms. Note: in the body frame (+X left, +Y up, +Z forward),
+/// negative `rx` swings a hanging `-Y` limb forward (`+Z`), and positive `rx`
+/// swings it backward (`-Z`).
 pub fn pose(gait: Gait, phase: f64) -> RigPose {
-    let (swing, arm, knee, lean, bounce) = match gait {
+    let (swing, arm, knee, lean, bounce, twist) = match gait {
         Gait::Idle => {
             let b = (phase * 0.35).sin() as f32;
-            (0.0, 0.0, 0.0, 0.015 * b, 0.006 * b)
+            (0.0, 0.0, 0.0, 0.015 * b, 0.006 * b, 0.0)
         }
-        Gait::Walk => (0.50, 0.42, 0.55, 0.03, 0.012),
-        Gait::Run => (0.85, 0.75, 1.05, 0.16, 0.03),
-        Gait::Jump => (0.0, 0.0, 0.0, 0.0, 0.0),
+        Gait::Walk => (0.48, 0.38, 0.55, 0.03, 0.016, 0.06),
+        Gait::Run => (0.85, 0.72, 1.05, 0.16, 0.035, 0.11),
+        Gait::Jump => (0.0, 0.0, 0.0, 0.05, 0.0, 0.0),
     };
     let s = phase.sin() as f32;
+    let bob = if matches!(gait, Gait::Walk | Gait::Run) {
+        bounce * (2.0 * phase).cos().abs() as f32
+    } else {
+        bounce
+    };
     let mut parts = [Mat4::IDENTITY; PARTS];
-    // Pelvis, torso and head.
-    parts[0] = hinge(0.0, 0.94 + bounce, 0.0);
-    parts[1] = parts[0] * hinge(0.0, 0.08, 0.0) * rx(lean);
-    parts[2] = parts[1] * hinge(0.0, 0.52, 0.0) * rx(-lean * 0.5);
-    // Arms: shoulders on the torso, elbows and wrists.
+    // Pelvis, torso and head (with subtle hip/shoulder counter-rotation).
+    parts[0] = hinge(0.0, 0.94 + bob, 0.0) * ry(-s * twist);
+    parts[1] = parts[0] * hinge(0.0, 0.08, 0.0) * ry(s * twist * 1.6) * rx(lean);
+    parts[2] = parts[1] * hinge(0.0, 0.52, 0.0) * ry(-s * twist * 0.6) * rx(-lean * 0.5);
+    // Arms: shoulders on the torso, elbows (bend forward with negative rx) and wrists.
     let (l_arm, r_arm) = (-s * arm, s * arm);
     let (l_knee, r_knee) = (knee * (-s).max(0.0), knee * s.max(0.0));
     if gait == Gait::Jump {
-        parts[3] = parts[1] * hinge(-0.22, 0.43, 0.0) * rx(-2.1);
-        parts[6] = parts[1] * hinge(0.22, 0.43, 0.0) * rx(-2.1);
-        parts[4] = parts[3] * hinge(0.0, -0.28, 0.0) * rx(0.6);
-        parts[7] = parts[6] * hinge(0.0, -0.28, 0.0) * rx(0.6);
+        parts[3] = parts[1] * hinge(-0.22, 0.43, 0.0) * rz(-0.20) * rx(-1.35);
+        parts[6] = parts[1] * hinge(0.22, 0.43, 0.0) * rz(0.20) * rx(-1.35);
+        parts[4] = parts[3] * hinge(0.0, -0.28, 0.0) * rx(-0.85);
+        parts[7] = parts[6] * hinge(0.0, -0.28, 0.0) * rx(-0.85);
         parts[9] = parts[0] * hinge(-0.10, -0.02, 0.0) * rx(-0.55);
         parts[12] = parts[0] * hinge(0.10, -0.02, 0.0) * rx(0.35);
         parts[10] = parts[9] * hinge(0.0, -0.44, 0.0) * rx(1.05);
@@ -128,18 +147,21 @@ pub fn pose(gait: Gait, phase: f64) -> RigPose {
     } else {
         parts[3] = parts[1] * hinge(-0.22, 0.43, 0.0) * rz(-0.10) * rx(l_arm);
         parts[6] = parts[1] * hinge(0.22, 0.43, 0.0) * rz(0.10) * rx(r_arm);
-        parts[4] = parts[3] * hinge(0.0, -0.28, 0.0) * rx(0.10 + 0.35 * s.max(0.0) * arm);
-        parts[7] = parts[6] * hinge(0.0, -0.28, 0.0) * rx(0.10 + 0.35 * (-s).max(0.0) * arm);
+        // Elbows bend forward (negative rx), more on the forward swing.
+        let l_elbow = -0.14 - 0.50 * s.max(0.0) * arm;
+        let r_elbow = -0.14 - 0.50 * (-s).max(0.0) * arm;
+        parts[4] = parts[3] * hinge(0.0, -0.28, 0.0) * rx(l_elbow);
+        parts[7] = parts[6] * hinge(0.0, -0.28, 0.0) * rx(r_elbow);
         parts[9] = parts[0] * hinge(-0.10, -0.02, 0.0) * rx(s * swing);
         parts[12] = parts[0] * hinge(0.10, -0.02, 0.0) * rx(-s * swing);
         parts[10] = parts[9] * hinge(0.0, -0.44, 0.0) * rx(l_knee);
         parts[13] = parts[12] * hinge(0.0, -0.44, 0.0) * rx(r_knee);
     }
     // Hands and feet follow their limbs.
-    parts[5] = parts[4] * hinge(0.0, -0.27, 0.0);
-    parts[8] = parts[7] * hinge(0.0, -0.27, 0.0);
-    parts[11] = parts[10] * hinge(0.0, -0.45, 0.0) * rx(-0.15);
-    parts[14] = parts[13] * hinge(0.0, -0.45, 0.0) * rx(-0.15);
+    parts[5] = parts[4] * hinge(0.0, -0.26, 0.0);
+    parts[8] = parts[7] * hinge(0.0, -0.26, 0.0);
+    parts[11] = parts[10] * hinge(0.0, -0.45, 0.0) * rx(-0.08 + 0.18 * s * swing);
+    parts[14] = parts[13] * hinge(0.0, -0.45, 0.0) * rx(-0.08 - 0.18 * s * swing);
     // The hair cap follows the head.
     parts[15] = parts[2];
     RigPose { parts }
@@ -208,41 +230,74 @@ impl MB {
         self.quad([p(false, false, false), p(true, false, false), p(true, false, true), p(false, false, true)], col);
     }
 
-    /// A tapered tube hanging from its pivot at the origin down -Y.
-    fn limb(&mut self, len: f32, r0: f32, r1: f32, segs: usize, col: [f32; 4]) {
-        let segs = segs.max(4);
+    /// A smooth loft through vertical elliptical stations `(y, rx, rz, z_off)`.
+    fn loft(&mut self, stations: &[(f32, f32, f32, f32)], segs: usize, col: [f32; 4]) {
+        let segs = segs.max(6);
+        let ring = |s: (f32, f32, f32, f32), k: usize| {
+            let a = k as f32 * std::f32::consts::TAU / segs as f32;
+            Vec3::new(a.cos() * s.1, s.0, s.3 + a.sin() * s.2)
+        };
+        let nrm = |s: (f32, f32, f32, f32), k: usize| {
+            let a = k as f32 * std::f32::consts::TAU / segs as f32;
+            Vec3::new(a.cos() / s.1.max(1e-3), 0.0, a.sin() / s.2.max(1e-3)).normalize_or_zero()
+        };
+        let base = self.v.len() as u32;
+        for &st in stations {
+            for k in 0..segs {
+                self.v.push(MeshVertex { pos: ring(st, k).into(), nrm: nrm(st, k).into(), col });
+            }
+        }
+        let stride = segs as u32;
+        for r in 0..stations.len() as u32 - 1 {
+            for k in 0..stride {
+                let next = (k + 1) % stride;
+                let a = base + r * stride + k;
+                let b = base + r * stride + next;
+                let c = base + (r + 1) * stride + next;
+                let d = base + (r + 1) * stride + k;
+                self.i.extend([a, b, c, a, c, d]);
+            }
+        }
+        // Bottom and top caps.
+        let bot_c = Vec3::new(0.0, stations[0].0, stations[0].3);
+        let top_c = Vec3::new(0.0, stations.last().unwrap().0, stations.last().unwrap().3);
         for k in 0..segs {
-            let a0 = k as f32 * std::f32::consts::TAU / segs as f32;
-            let a1 = (k + 1) as f32 * std::f32::consts::TAU / segs as f32;
-            let ring = |a: f32, y: f32, r: f32| Vec3::new(a.cos() * r, y, a.sin() * r);
-            let (p0, p1) = (ring(a0, 0.0, r0), ring(a1, 0.0, r0));
-            let (q0, q1) = (ring(a0, -len, r1), ring(a1, -len, r1));
-            self.quad([p0, p1, q1, q0], col);
-            // Caps, so a limb seen end-on is solid.
-            self.tri(Vec3::ZERO, p1, p0, col);
-            self.tri(Vec3::new(0.0, -len, 0.0), q0, q1, col);
+            let kn = (k + 1) % segs;
+            self.tri(bot_c, ring(stations[0], kn), ring(stations[0], k), col);
+            let last = *stations.last().unwrap();
+            self.tri(top_c, ring(last, k), ring(last, kn), col);
         }
     }
 
-    /// An ellipsoid: the head.
+    /// A tapered tube hanging from its pivot at the origin down -Y, with smooth side normals.
+    fn limb(&mut self, len: f32, r0: f32, r1: f32, segs: usize, col: [f32; 4]) {
+        self.loft(&[(0.0, r0, r0, 0.0), (-len, r1, r1, 0.0)], segs, col);
+    }
+
+    /// An ellipsoid: the head and joint caps, with smooth normals.
     fn ball(&mut self, centre: Vec3, radii: Vec3, rings: usize, segs: usize, col: [f32; 4]) {
-        let rings = rings.max(3);
-        let segs = segs.max(6);
-        let pt = |i: usize, j: usize| {
+        let rings = rings.max(4);
+        let segs = segs.max(8);
+        let base = self.v.len() as u32;
+        for i in 0..=rings {
             let phi = i as f32 * std::f32::consts::PI / rings as f32;
-            let theta = j as f32 * std::f32::consts::TAU / segs as f32;
-            centre + Vec3::new(phi.sin() * theta.cos() * radii.x, phi.cos() * radii.y, phi.sin() * theta.sin() * radii.z)
-        };
-        for i in 0..rings {
             for j in 0..segs {
-                let (a, b, c, d) = (pt(i, j), pt(i + 1, j), pt(i + 1, j + 1), pt(i, j + 1));
-                if i == 0 {
-                    self.tri(a, b, d, col);
-                } else if i == rings - 1 {
-                    self.tri(a, b, d, col);
-                } else {
-                    self.quad([a, b, c, d], col);
-                }
+                let theta = j as f32 * std::f32::consts::TAU / segs as f32;
+                let dir = Vec3::new(phi.sin() * theta.cos(), phi.cos(), phi.sin() * theta.sin());
+                let pos = centre + dir * radii;
+                let nrm = (dir / radii.max(Vec3::splat(1e-4))).normalize_or_zero();
+                self.v.push(MeshVertex { pos: pos.into(), nrm: nrm.into(), col });
+            }
+        }
+        let stride = segs as u32;
+        for i in 0..rings as u32 {
+            for j in 0..stride {
+                let jn = (j + 1) % stride;
+                let a = base + i * stride + j;
+                let b = base + (i + 1) * stride + j;
+                let c = base + (i + 1) * stride + jn;
+                let d = base + i * stride + jn;
+                self.i.extend([a, b, c, a, c, d]);
             }
         }
     }
@@ -252,65 +307,114 @@ impl MB {
 pub fn meshes() -> &'static Vec<(Vec<MeshVertex>, Vec<u32>)> {
     static M: OnceLock<Vec<(Vec<MeshVertex>, Vec<u32>)>> = OnceLock::new();
     M.get_or_init(|| {
-        let skin = [0.95, 0.90, 0.86, MAT_SKIN];
-        let cloth = [0.95, 0.95, 0.95, MAT_CLOTH];
-        let hair = [0.95, 0.95, 0.95, MAT_HAIR];
-        let shoe = [0.95, 0.95, 0.95, MAT_SHOE];
+        let skin = [1.0, 1.0, 1.0, MAT_SKIN];
+        let cloth = [1.0, 1.0, 1.0, MAT_CLOTH];
+        let cloth_dark = [0.78, 0.78, 0.80, MAT_CLOTH];
+        let shoe = [1.0, 1.0, 1.0, MAT_SHOE];
+        let hair = [1.0, 1.0, 1.0, MAT_HAIR];
+        let belt = [0.07, 0.05, 0.04, MAT_FIXED];
+        let buckle = [0.62, 0.64, 0.66, MAT_FIXED];
+        let tee = [0.85, 0.87, 0.90, MAT_FIXED];
+        let shades = [0.025, 0.025, 0.03, MAT_FIXED];
+        let sole = [0.84, 0.84, 0.82, MAT_FIXED];
         let mut all = Vec::with_capacity(PARTS);
-        // 0 pelvis
+
+        // 0 pelvis: rounded hips + dark leather belt + buckle
         let mut m = MB::default();
-        m.cuboid(Vec3::new(-0.17, -0.11, -0.11), Vec3::new(0.17, 0.11, 0.11), cloth);
+        m.loft(&[(-0.11, 0.155, 0.098, 0.0), (0.04, 0.172, 0.112, 0.0), (0.08, 0.162, 0.105, 0.0)], 12, cloth);
+        m.loft(&[(0.06, 0.168, 0.110, 0.0), (0.11, 0.165, 0.108, 0.0)], 12, belt);
+        m.cuboid(Vec3::new(-0.028, 0.062, 0.104), Vec3::new(0.028, 0.108, 0.118), buckle);
         all.push((m.v, m.i));
-        // 1 torso
+
+        // 1 torso: tapered jacket/shirt + open collar + inner tee
         let mut m = MB::default();
-        m.cuboid(Vec3::new(-0.16, 0.0, -0.09), Vec3::new(0.16, 0.30, 0.09), cloth);
-        m.cuboid(Vec3::new(-0.20, 0.30, -0.10), Vec3::new(0.20, 0.54, 0.10), cloth);
+        m.loft(
+            &[
+                (0.00, 0.156, 0.098, 0.0),
+                (0.18, 0.165, 0.104, 0.004),
+                (0.34, 0.190, 0.118, 0.008),
+                (0.47, 0.210, 0.110, 0.0),
+                (0.53, 0.130, 0.086, -0.005),
+            ],
+            14,
+            cloth,
+        );
+        // Collar rim & inner tee V
+        m.loft(&[(0.49, 0.088, 0.082, 0.002), (0.55, 0.072, 0.072, 0.0)], 10, cloth_dark);
+        m.cuboid(Vec3::new(-0.045, 0.36, 0.065), Vec3::new(0.045, 0.52, 0.116), tee);
         all.push((m.v, m.i));
-        // 2 head
+
+        // 2 head: neck, jaw/cranium, nose, ears, sunglasses
         let mut m = MB::default();
-        m.ball(Vec3::new(0.0, 0.13, 0.0), Vec3::new(0.105, 0.13, 0.11), 8, 12, skin);
+        m.loft(&[(-0.02, 0.056, 0.056, 0.0), (0.07, 0.052, 0.052, 0.0)], 10, skin);
+        m.ball(Vec3::new(0.0, 0.155, 0.0), Vec3::new(0.096, 0.120, 0.106), 10, 14, skin);
+        // Jawline + nose + ears
+        m.loft(&[(0.045, 0.058, 0.062, 0.015), (0.10, 0.080, 0.086, 0.008)], 10, skin);
+        m.cuboid(Vec3::new(-0.014, 0.125, 0.092), Vec3::new(0.014, 0.165, 0.122), skin);
+        for side in [-1.0f32, 1.0] {
+            m.ball(Vec3::new(side * 0.098, 0.152, -0.005), Vec3::new(0.016, 0.028, 0.022), 5, 8, skin);
+        }
+        // Sunglasses
+        m.cuboid(Vec3::new(-0.078, 0.155, 0.085), Vec3::new(-0.012, 0.192, 0.112), shades);
+        m.cuboid(Vec3::new(0.012, 0.155, 0.085), Vec3::new(0.078, 0.192, 0.112), shades);
+        m.cuboid(Vec3::new(-0.018, 0.175, 0.095), Vec3::new(0.018, 0.188, 0.110), shades);
         all.push((m.v, m.i));
-        // 3, 6 upper arms
+
+        // 3, 6 upper arms + shoulder joint caps
         for _ in 0..2 {
             let mut m = MB::default();
-            m.limb(0.28, 0.055, 0.045, 6, cloth);
-            m.ball(Vec3::ZERO, Vec3::splat(0.055), 4, 8, cloth);
+            m.limb(0.28, 0.058, 0.046, 10, cloth);
+            m.ball(Vec3::ZERO, Vec3::splat(0.058), 6, 10, cloth);
             all.push((m.v, m.i));
         }
-        // 4, 7 lower arms
+
+        // 4, 7 lower arms + elbow cap + sleeve cuff
         for _ in 0..2 {
             let mut m = MB::default();
-            m.limb(0.26, 0.045, 0.035, 6, cloth);
+            m.ball(Vec3::ZERO, Vec3::splat(0.046), 6, 10, cloth);
+            m.loft(&[(0.0, 0.046, 0.046, 0.0), (-0.21, 0.039, 0.039, 0.0)], 10, cloth);
+            m.loft(&[(-0.21, 0.041, 0.041, 0.0), (-0.26, 0.036, 0.036, 0.0)], 10, cloth_dark);
             all.push((m.v, m.i));
         }
-        // 5, 8 hands
+
+        // 5, 8 hands (skin-tinted)
+        for s in [-1.0f32, 1.0] {
+            let mut m = MB::default();
+            m.ball(Vec3::new(0.0, -0.042, 0.004), Vec3::new(0.032, 0.052, 0.022), 6, 10, skin);
+            m.ball(Vec3::new(-s * 0.022, -0.025, 0.018), Vec3::new(0.014, 0.026, 0.014), 4, 8, skin);
+            all.push((m.v, m.i));
+        }
+
+        // 9, 12 thighs + hip joint cap
         for _ in 0..2 {
             let mut m = MB::default();
-            m.cuboid(Vec3::new(-0.04, -0.09, -0.03), Vec3::new(0.04, 0.0, 0.03), skin);
+            m.ball(Vec3::ZERO, Vec3::splat(0.084), 6, 10, cloth);
+            m.limb(0.44, 0.086, 0.066, 10, cloth);
             all.push((m.v, m.i));
         }
-        // 9, 12 thighs
+
+        // 10, 13 shins + knee joint cap
         for _ in 0..2 {
             let mut m = MB::default();
-            m.limb(0.44, 0.085, 0.065, 7, cloth);
+            m.ball(Vec3::ZERO, Vec3::splat(0.064), 6, 10, cloth);
+            m.limb(0.45, 0.064, 0.048, 10, cloth);
             all.push((m.v, m.i));
         }
-        // 10, 13 shins
+
+        // 11, 14 feet: sneaker upper + crisp contrast sole
         for _ in 0..2 {
             let mut m = MB::default();
-            m.limb(0.45, 0.06, 0.045, 6, cloth);
+            m.cuboid(Vec3::new(-0.054, -0.072, -0.062), Vec3::new(0.054, -0.048, 0.185), sole);
+            m.loft(&[(-0.048, 0.052, 0.118, 0.060), (-0.005, 0.046, 0.080, 0.025)], 10, shoe);
+            m.ball(Vec3::new(0.0, -0.030, 0.130), Vec3::new(0.048, 0.022, 0.056), 5, 10, shoe);
             all.push((m.v, m.i));
         }
-        // 11, 14 feet
-        for _ in 0..2 {
-            let mut m = MB::default();
-            m.cuboid(Vec3::new(-0.055, -0.07, -0.06), Vec3::new(0.055, 0.0, 0.18), shoe);
-            all.push((m.v, m.i));
-        }
-        // 15 hair: a cap over the back and top of the head, a little larger
-        // than the skull so it always covers it.
+
+        // 15 hair: sculpted crown + back/side coverage, leaving face & sunglasses clear
         let mut m = MB::default();
-        m.ball(Vec3::new(0.0, 0.155, -0.012), Vec3::new(0.112, 0.115, 0.118), 7, 12, hair);
+        m.ball(Vec3::new(0.0, 0.185, -0.014), Vec3::new(0.102, 0.102, 0.108), 8, 14, hair);
+        m.ball(Vec3::new(0.0, 0.232, 0.025), Vec3::new(0.082, 0.042, 0.078), 6, 12, hair);
+        m.loft(&[(0.08, 0.094, 0.065, -0.048), (0.17, 0.100, 0.075, -0.038)], 10, hair);
         all.push((m.v, m.i));
         debug_assert_eq!(all.len(), PARTS);
         all
@@ -339,7 +443,7 @@ mod tests {
     fn palettes_are_in_range() {
         for style in 0..STYLES as u8 {
             let p = palette(style);
-            for c in [p.skin, p.cloth, p.hair, p.shoe] {
+            for c in [p.skin, p.cloth, p.pants, p.hair, p.shoe] {
                 assert!(c.iter().all(|v| (0.0..=1.0).contains(v)), "style {style}: {c:?}");
             }
         }

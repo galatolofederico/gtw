@@ -70,12 +70,11 @@ fn crumple_body(p: vec3f, amt: f32) -> vec3f {
   var Nout = N;
   var mirror = 0.0;
   if (in.ext.w > 1.5) {
-    // Character (ext.w = 2): m = 0 skin, 0.25 cloth, 0.5 hair, 0.75 shoe.
-    // Cloth and hair take the palette tint fully; skin keeps a little warmth,
-    // shoes stay matte and dark. No metal, no lights, nothing that shines.
+    // Character (ext.w = 2): m = 0 skin, 0.25 cloth, 0.5 hair, 0.75 shoe, >0.85 fixed colour.
     let hair = step(0.4, m) * step(m, 0.6);
-    let shoe = step(0.6, m);
-    let albedo = in.tint.rgb;
+    let shoe = step(0.6, m) * step(m, 0.85);
+    let fixed = step(0.85, m);
+    let albedo = mix(in.col.rgb * in.tint.rgb, in.col.rgb, fixed);
     // A gentle wrap light so limbs read as rounded even out of direct sun.
     let wrap = clamp(dot(N, normalize(-V + l.sun.xyz * 0.25)) * 0.5 + 0.5, 0.0, 1.0);
     c = shade(in.P, N, albedo) * mix(0.92, 1.04, wrap);
