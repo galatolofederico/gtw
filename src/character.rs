@@ -44,6 +44,29 @@ pub const REGEN_DELAY: f64 = 5.0;
 pub const REGEN_RATE: f32 = 2.0;
 /// Distance between footsteps (m).
 pub const STRIDE: f64 = 0.9;
+
+/// How a footstep on a surface sounds: relative level, how bright its scuff
+/// is, and how much of it is a low body thump.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FootstepTimbre {
+    pub gain: f32,
+    pub bright: f32,
+    pub thump: f32,
+}
+
+/// The timbre of a footstep on `surface`: asphalt clicks, grass and sand are
+/// soft and dull, rock rattles, water splashes.
+pub fn footstep_timbre(surface: Surface) -> FootstepTimbre {
+    match surface {
+        Surface::Asphalt => FootstepTimbre { gain: 1.0, bright: 1.0, thump: 0.65 },
+        Surface::Concrete => FootstepTimbre { gain: 0.95, bright: 0.9, thump: 0.7 },
+        Surface::Dirt => FootstepTimbre { gain: 0.8, bright: 0.45, thump: 0.85 },
+        Surface::Grass => FootstepTimbre { gain: 0.55, bright: 0.28, thump: 0.45 },
+        Surface::Sand => FootstepTimbre { gain: 0.45, bright: 0.18, thump: 0.3 },
+        Surface::Rock => FootstepTimbre { gain: 1.05, bright: 1.15, thump: 0.9 },
+        Surface::Water => FootstepTimbre { gain: 0.5, bright: 0.7, thump: 0.2 },
+    }
+}
 /// How fast the body can change its horizontal velocity on the ground (m/s²).
 const GROUND_ACCEL: f64 = 22.0;
 /// …and in the air.
@@ -735,6 +758,48 @@ mod tests {
         assert_eq!(c.health, MAX_HEALTH);
         assert!((c.pos - origin()).length() < 200.0, "respawned nearby");
         assert!((height(&c)).abs() < 0.5);
+    }
+
+    #[test]
+    fn footsteps_keep_time_with_the_stride_and_the_surface() {
+        let w = SurfaceWorld(Surface::Asphalt);
+        let mut c = at_origin();
+        c.step(1.0 / 60.0, &CharacterControls::default(), &w, &SurfaceWeather::default());
+        // Standing still makes no sound.
+        let mut still = 0;
+        for _ in 0..120 {
+            still += c.step(1.0 / 60.0, &CharacterControls::default(), &w, &SurfaceWeather::default()).footsteps.len();
+        }
+        assert_eq!(still, 0, "no footsteps without moving");
+        // Jogging for three seconds steps about once every stride, and each one
+        // carries the ground class under the foot.
+        let mut steps = Vec::new();
+        let mut phase = c.stride_phase;
+        for _ in 0..180 {
+            let s = c.step(1.0 / 60.0, &CharacterControls { forward: 1.0, ..Default::default() }, &w, &SurfaceWeather::default());
+            for surf in s.footsteps {
+                assert_eq!(surf, Surface::Asphalt);
+                assert!((c.stride_phase - phase - std::f64::consts::PI).abs() < 1e-9, "a half turn per step");
+                phase = c.stride_phase;
+                steps.push(surf);
+            }
+        }
+        let travelled = c.pos.distance(origin());
+        let want = (travelled / STRIDE).floor() as usize;
+        assert!((steps.len() as i64 - want as i64).abs() <= 1, "{} steps in {travelled:.1} m, want about {want}", steps.len());
+        assert!(steps.len() >= 8, "three seconds of jogging: {} steps", steps.len());
+    }
+
+    #[test]
+    fn footstep_timbre_follows_the_surface() {
+        let asphalt = footstep_timbre(Surface::Asphalt);
+        let grass = footstep_timbre(Surface::Grass);
+        let sand = footstep_timbre(Surface::Sand);
+        let rock = footstep_timbre(Surface::Rock);
+        assert!(asphalt.gain > grass.gain && grass.gain > sand.gain, "hard ground is louder");
+        assert!(asphalt.bright > grass.bright && grass.bright > sand.bright, "and brighter");
+        assert!(rock.bright > asphalt.bright && rock.gain > asphalt.gain, "rock rattles loudest");
+        assert!(footstep_timbre(Surface::Water).thump < asphalt.thump, "water has no hard thump");
     }
 
     #[test]

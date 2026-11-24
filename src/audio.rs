@@ -19,6 +19,8 @@
 //! close by, a long low rumble rolling in from far off, arriving at the speed
 //! of sound), and rain (a hiss all round; in the cockpit, drops drumming on
 //! the windshield and roof, turning into a roar at speed).
+use crate::surface::Surface;
+use glam::DVec3;
 use parking_lot::Mutex;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::num::NonZero;
@@ -142,12 +144,111 @@ pub enum Event {
     Thunder { delay: f32, near: f32, far: f32, power: f32, pan: f32 },
     /// a missile leaving its rail (strength ~0.2 .. 2)
     Missile(f32),
+    /// a footstep: the ground it landed on, its distance gain and stereo pan
+    Footstep { surface: Surface, gain: f32, pan: f32 },
+    /// a car body or tyre scraping the ground (strength)
+    Scrape(f32),
+    /// a car horn (strength)
+    Horn(f32),
+    /// a car crash: sheet metal, glass and a blow (strength)
+    Crash(f32),
+}
+
+/// The most nearby traffic engines that are mixed at once.
+pub const MAX_TRAFFIC_VOICES: usize = 6;
+
+/// What kind of ground sound an [`Emitter`] makes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmitterKind {
+    /// the player's own car (mixed from `WorldAudio::car`, not the traffic list)
+    #[allow(dead_code)]
+    Car,
+    /// a moving traffic car
+    Traffic,
+}
+
+/// A continuous ground sound source in the planet frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Emitter {
+    pub pos: DVec3,
+    pub kind: EmitterKind,
+    /// Speed over the ground (m/s): traffic pitch and tyre noise follow it.
+    pub speed: f32,
+    /// Engine load, 0..1.
+    pub load: f32,
+}
+
+/// The player's car, as the synth needs it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CarAudio {
+    pub pos: DVec3,
+    pub speed: f32,
+    pub rpm: f32,
+    pub load: f32,
+    pub braking: f32,
+    pub handbrake: bool,
+    /// 0 dead .. 1 sound.
+    pub health: f32,
+    pub surface: Surface,
+}
+
+/// Everything the ground mix needs for a frame, set with [`Audio::set_world`].
+#[derive(Clone, Debug, Default)]
+pub struct WorldAudio {
+    /// Camera position and its right vector, for distance gain and pan.
+    pub cam: DVec3,
+    pub right: DVec3,
+    pub car: Option<CarAudio>,
+    pub traffic: Vec<Emitter>,
+    /// 1 on the ground, 0 in a menu, flying or paused (the ground falls silent).
+    pub live: f32,
+}
+
+/// Distance gain and stereo pan for a sound at `pos`, heard at `cam` with the
+/// listener's right vector `right`. Zero distance is head-on: full gain, centre.
+pub fn emitter_gain_pan(cam: DVec3, right: DVec3, pos: DVec3) -> (f32, f32) {
+    if !cam.is_finite() || !pos.is_finite() {
+        return (0.0, 0.0);
+    }
+    let d = pos - cam;
+    let dist = d.length();
+    if !dist.is_finite() {
+        return (0.0, 0.0);
+    }
+    if dist < 0.05 {
+        return (1.0, 0.0);
+    }
+    // Roughly -6 dB per doubling past a few metres, floored so distant traffic
+    // is still faintly there rather than vanishing abruptly.
+    let gain = (12.0 / (dist + 6.0)).clamp(0.0, 1.0);
+    let pan = (d.dot(right.normalize_or_zero()) / dist).clamp(-1.0, 1.0) as f32;
+    (gain as f32, pan)
+}
+
+/// The nearest `cap` emitters by distance, nearest first (ties by index).
+pub fn nearest_emitters(cam: DVec3, emitters: &[Emitter], cap: usize) -> Vec<usize> {
+    if cap == 0 || !cam.is_finite() {
+        return Vec::new();
+    }
+    let mut chosen: Vec<(f64, usize)> = Vec::with_capacity(cap.min(emitters.len()));
+    for (i, e) in emitters.iter().enumerate() {
+        let d = if e.pos.is_finite() { (e.pos - cam).length_squared() } else { f64::INFINITY };
+        if chosen.len() < cap {
+            chosen.push((d, i));
+            chosen.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        } else if d < chosen[cap - 1].0 {
+            chosen[cap - 1] = (d, i);
+            chosen.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        }
+    }
+    chosen.into_iter().map(|(_, i)| i).collect()
 }
 
 #[derive(Default)]
 struct Shared {
     params: Mutex<Params>,
     events: Mutex<Vec<Event>>,
+    world: Mutex<Arc<WorldAudio>>,
 }
 
 pub struct Audio {
@@ -224,6 +325,10 @@ impl Audio {
         if ev.len() < 64 {
             ev.push(e);
         }
+    }
+    /// Position the ground mix for this frame (see [`WorldAudio`]).
+    pub fn set_world(&self, w: WorldAudio) {
+        *self.shared.world.lock() = Arc::new(w);
     }
     pub fn boom(&self, power: f32) {
         self.event(Event::Boom(power));
@@ -1081,6 +1186,136 @@ impl Body {
     }
 }
 
+/// One nearby traffic engine, chosen and positioned each control tick.
+#[derive(Clone, Copy, Default)]
+struct TrafficSlot {
+    on: bool,
+    gain: f32,
+    pan: f32,
+    speed: f32,
+    load: f32,
+}
+
+/// The ground mix: the player's car and the nearest traffic cars, synthesised
+/// separately from the aircraft so that flying it stays exactly as it was.
+struct Ground {
+    car_ph: f32,
+    car_eng: Bq,
+    car_sub: Bq,
+    car_roll: Bq,
+    car_grit: Bq,
+    car_squeal: Bq,
+    car_mod: Slow,
+    knock: Bq,
+    slots: [TrafficSlot; MAX_TRAFFIC_VOICES],
+    traffic_ph: [f32; MAX_TRAFFIC_VOICES],
+    traffic_lp: [Bq; MAX_TRAFFIC_VOICES],
+}
+
+impl Ground {
+    fn new() -> Self {
+        Self {
+            car_ph: 0.0,
+            car_eng: Bq::new(Bq::lp, 420.0, 0.9),
+            car_sub: Bq::new(Bq::lp, 95.0, 1.0),
+            car_roll: Bq::new(Bq::bp, 520.0, 0.8),
+            car_grit: Bq::new(Bq::bp, 1700.0, 1.6),
+            car_squeal: Bq::new(Bq::bp, 2400.0, 26.0),
+            car_mod: Slow::default(),
+            knock: Bq::new(Bq::ring, 1300.0, 7.0),
+            slots: [TrafficSlot::default(); MAX_TRAFFIC_VOICES],
+            traffic_ph: [0.0; MAX_TRAFFIC_VOICES],
+            traffic_lp: [Bq::new(Bq::lp, 340.0, 0.9); MAX_TRAFFIC_VOICES],
+        }
+    }
+
+    /// Retune the tyre layer for the surface under the car and choose the
+    /// nearby traffic (once per control tick).
+    fn control(&mut self, w: &WorldAudio) {
+        if let Some(car) = w.car {
+            let t = crate::character::footstep_timbre(car.surface);
+            self.car_roll.bp(260.0 + 900.0 * t.bright, 0.8);
+            self.car_grit.bp(900.0 + 1900.0 * t.bright, 1.5);
+        }
+        self.slots = [TrafficSlot::default(); MAX_TRAFFIC_VOICES];
+        if w.live <= 0.001 {
+            return;
+        }
+        let near = nearest_emitters(w.cam, &w.traffic, MAX_TRAFFIC_VOICES);
+        for (slot, &i) in self.slots.iter_mut().zip(&near) {
+            let e = &w.traffic[i];
+            let (gain, pan) = emitter_gain_pan(w.cam, w.right, e.pos);
+            *slot = TrafficSlot { on: true, gain, pan, speed: e.speed.max(0.0), load: e.load.clamp(0.0, 1.0) };
+        }
+    }
+
+    fn sample(&mut self, w: &WorldAudio, rng: &mut Rng) -> (f32, f32) {
+        if w.live <= 0.001 {
+            return (0.0, 0.0);
+        }
+        let (mut l, mut r) = (0.0, 0.0);
+        if let Some(car) = w.car {
+            let (gain, pn) = emitter_gain_pan(w.cam, w.right, car.pos);
+            let speed = car.speed.abs();
+            let health = car.health.clamp(0.0, 1.0);
+            let crank = (car.rpm / 60.0).max(0.0);
+            let load = car.load.clamp(0.0, 1.0);
+            let mut y = 0.0;
+            // Firing pulses, twice a turn: a small four-cylinder.
+            if health > 0.0 && crank > 0.5 {
+                let before = self.car_ph;
+                self.car_ph = (self.car_ph + crank * 2.0 * DT).fract();
+                let mut x = if self.car_ph < before { rng.range(0.6, 1.4) * (0.4 + 0.6 * load) } else { 0.0 };
+                // A sick engine stumbles, and knocks under load.
+                if health < 0.35 {
+                    if rng.u() < (0.35 - health) * 0.5 {
+                        x *= 0.15;
+                    }
+                    if rng.u() < (0.35 - health) * 0.02 {
+                        y += self.knock.run(rng.range(0.3, 0.8)) * 0.4;
+                    }
+                }
+                let body = self.car_eng.run(x) + self.car_sub.run(x) * 0.7;
+                let whine = (TAU * self.car_ph * 6.0).sin() * 0.012 * (crank / 55.0).min(1.0);
+                y += (body * 3.2 + whine) * (0.35 + 0.65 * health);
+            }
+            // Tyres on the surface: level and brightness follow the class.
+            if speed > 0.25 {
+                let t = crate::character::footstep_timbre(car.surface);
+                let m = 0.65 + 0.35 * self.car_mod.run(rng.f(), 0.002);
+                let roll = self.car_roll.run(rng.f()) * (speed / 16.0).min(1.0) * (0.22 + 0.42 * t.gain) * m;
+                let grit = self.car_grit.run(rng.f()) * (speed / 26.0).min(1.0) * 0.10 * (0.4 + t.bright);
+                y += roll + grit;
+            }
+            if car.braking > 0.01 && speed > 2.0 {
+                y += self.car_squeal.run(rng.f()) * car.braking * smooth(2.0, 18.0, speed) * 0.28;
+            }
+            if car.handbrake && speed > 3.0 {
+                y += rng.f() * (speed / 24.0).min(1.0) * 0.06;
+            }
+            let (a, b) = pan(y * (0.7 + 0.3 * load), pn);
+            l += a * gain;
+            r += b * gain;
+        }
+        for (i, slot) in self.slots.iter().enumerate() {
+            if !slot.on {
+                continue;
+            }
+            // A higher engine note the faster the traffic is going.
+            let f = 42.0 + slot.speed * 7.0;
+            self.traffic_ph[i] = (self.traffic_ph[i] + f * DT).fract();
+            let ph = self.traffic_ph[i];
+            let tone = (TAU * ph).sin() * 0.5 + (TAU * ph * 2.0).sin() * 0.25;
+            let noise = self.traffic_lp[i].run(rng.f());
+            let y = (tone * 0.055 + noise * 0.07) * (0.25 + 0.75 * slot.load);
+            let (a, b) = pan(y, slot.pan);
+            l += a * slot.gain;
+            r += b * slot.gain;
+        }
+        (l, r)
+    }
+}
+
 /// The cockpit's warning sounds.
 struct Alarms {
     t: f32,
@@ -1469,6 +1704,9 @@ struct Synth {
     voices: Vec<Voice>,
     alarms: Alarms,
     world: World,
+    ground: Ground,
+    /// the ground sounds asked for this frame
+    world_audio: Arc<WorldAudio>,
     rain: Rain,
     /// the thunder heard through the cabin's walls
     thunder_lp: [f32; 2],
@@ -1500,6 +1738,8 @@ impl Synth {
             voices: Vec::with_capacity(MAX_VOICES),
             alarms: Alarms::new(),
             world: World { lp_boom: 0.0, lp_boom2: 0.0, lp_wind: 0.0, booms: Vec::new(), crackle: 0.0, thunder: Vec::new(), echo: vec![0.0; RATE as usize * 2], echo_pos: 0, echo_lp: 0.0 },
+            ground: Ground::new(),
+            world_audio: Arc::new(WorldAudio::default()),
             rain: Rain::new(),
             thunder_lp: [0.0; 2],
             cab: Cabin::new(),
@@ -1561,6 +1801,48 @@ impl Synth {
                 let v = Voice::new(1.6, r.range(-0.25, 0.25), Bus::Mid).noise(2600.0, 700.0, 0.9, 1.3 * s, 0.32).tone(95.0, 55.0, 0.7 * s, 0.18).pulses(170.0, 40.0, false, 0.35 * s);
                 self.push(v);
             }
+            Event::Footstep { surface, gain, pan } => {
+                let t = crate::character::footstep_timbre(surface);
+                let g = gain.clamp(0.0, 1.0);
+                if g <= 0.001 {
+                    return;
+                }
+                // A scuff: a soft body thump under a burst of ground noise. Hard
+                // ground clicks bright and short, grass and sand are dull.
+                let v = Voice::new(0.16, pan, Bus::Mid)
+                    .tone(55.0 + 95.0 * t.thump, 42.0, 0.20 * g * t.thump, 0.035)
+                    .noise(600.0 + 2400.0 * t.bright, 380.0, 0.9, 0.26 * g * t.gain, 0.042);
+                self.push(v);
+            }
+            Event::Scrape(s) => {
+                let s = s.clamp(0.1, 2.0);
+                let v = Voice::new(0.42, r.range(-0.45, 0.45), Bus::Mid).noise(2800.0, 1100.0, 0.8, 0.8 * s, 0.16).tone(92.0, 58.0, 0.16 * s, 0.09);
+                self.push(v);
+            }
+            Event::Horn(s) => {
+                let s = s.clamp(0.1, 2.0);
+                // Two reedy notes a little apart, as a small car's horn.
+                let pn = r.range(-0.05, 0.05);
+                for f in [415.0, 520.0] {
+                    let v = Voice::new(0.75, pn, Bus::Mid).tone(f, f, 0.16 * s, 0.7).noise(f, f, 0.8, 0.05 * s, 0.5);
+                    self.push(v);
+                }
+            }
+            Event::Crash(s) => {
+                let s = s.clamp(0.2, 2.0);
+                let pn = r.range(-0.5, 0.5);
+                let body = Voice::new(0.85, pn, Bus::Mid)
+                    .strike(0.9 * s)
+                    .res([r.range(700.0, 1100.0), r.range(2200.0, 3200.0)], [4.0, 5.0], [0.32, 0.2])
+                    .pulses(95.0, 18.0, true, 0.55 * s)
+                    .noise(3200.0, 650.0, 0.7, 1.2 * s, 0.18)
+                    .tone(78.0, 38.0, 0.55 * s, 0.11);
+                // Glass and trim letting go over the top.
+                let glass = Voice::new(0.55, -pn, Bus::Mid).noise(5600.0, 3200.0, 0.9, 0.32 * s, 0.14).pulses(1900.0, 240.0, true, 0.18 * s);
+                for v in [body, glass] {
+                    self.push(v);
+                }
+            }
             Event::Splash(s) => {
                 let s = s.min(2.0);
                 let pn = r.range(-0.3, 0.3);
@@ -1610,6 +1892,10 @@ impl Synth {
         for e in events {
             self.event(e);
         }
+        if let Some(w) = self.s.world.try_lock() {
+            self.world_audio = w.clone();
+        }
+        self.ground.control(&self.world_audio);
         let (t, p) = (&self.t, &mut self.p);
         let sm = |a: &mut f32, b: f32, tau: f32| *a += (b - *a) * kt(tau);
         sm(&mut p.live, t.live, 0.12);
@@ -1801,6 +2087,11 @@ impl Iterator for Synth {
         let alarm = self.alarms.sample(&p.warn) * (0.55 + 0.45 * x) * 0.32;
         l += alarm;
         r += alarm;
+        // The ground: the player's car, nearby traffic, and their tyres. Silent
+        // in flight and in the menus, so the aircraft mix above is untouched.
+        let (gl, gr) = self.ground.sample(&self.world_audio, rng);
+        l += gl;
+        r += gr;
 
         #[cfg(test)]
         for (m, v) in self.meter.iter_mut().zip([ex, prop, mech, w[0], w[2], sl, ml, il - w[2] - sl, alarm, l]) {
@@ -1886,10 +2177,60 @@ mod tests {
         p.warn = Warn { stall: 1.0, pull_up: true, overspeed: 1.0, gear: true, ..Default::default() };
         for cabin in [0.0, 1.0] {
             p.cabin = cabin;
-            let ev = [Event::Boom(2.0), Event::Snap(2.0), Event::Bump(3.0), Event::Touch(8.0), Event::Clunk(1.0), Event::Crunch(2.0), Event::Splash(2.0), Event::Thunder { delay: 0.0, near: 100.0, far: 4000.0, power: 2.0, pan: 1.0 }];
+            let ev = [Event::Boom(2.0), Event::Snap(2.0), Event::Bump(3.0), Event::Touch(8.0), Event::Clunk(1.0), Event::Crunch(2.0), Event::Splash(2.0), Event::Thunder { delay: 0.0, near: 100.0, far: 4000.0, power: 2.0, pan: 1.0 }, Event::Footstep { surface: Surface::Asphalt, gain: 1.0, pan: -0.5 }, Event::Scrape(2.0), Event::Horn(2.0), Event::Crash(2.0)];
             let x = render(p, &ev, 1.5);
             assert!(x.iter().all(|s| s[0].is_finite() && s[1].is_finite() && s[0].abs() <= 1.0 && s[1].abs() <= 1.0));
         }
+    }
+
+    #[test]
+    fn emitter_gain_and_pan_follow_the_listener() {
+        let cam = DVec3::ZERO;
+        let right = DVec3::X;
+        let (g, p) = emitter_gain_pan(cam, right, cam);
+        assert_eq!((g, p), (1.0, 0.0), "zero distance is head-on");
+        let (gl, pl) = emitter_gain_pan(cam, right, -right * 10.0);
+        let (gr, pr) = emitter_gain_pan(cam, right, right * 10.0);
+        assert!(pl < -0.9 && pr > 0.9, "left {pl:.2}, right {pr:.2}");
+        assert!((gl - gr).abs() < 1e-6, "the same distance either side");
+        assert!(gl > 0.0 && gl < 1.0);
+        for ahead in [DVec3::Z * 10.0, DVec3::Z * -10.0] {
+            let (ga, pa) = emitter_gain_pan(cam, right, ahead);
+            assert_eq!(pa, 0.0, "ahead and behind are centred");
+            assert!((ga - gl).abs() < 1e-6, "and at the same distance, as loud");
+        }
+        // A broken listener or source makes no sound rather than a NaN.
+        assert_eq!(emitter_gain_pan(DVec3::NAN, right, cam), (0.0, 0.0));
+        assert_eq!(emitter_gain_pan(cam, right, DVec3::NAN), (0.0, 0.0));
+    }
+
+    #[test]
+    fn only_the_nearest_traffic_voices_are_chosen() {
+        let cam = DVec3::ZERO;
+        let at = |d: f64| Emitter { pos: DVec3::new(d, 0.0, 0.0), kind: EmitterKind::Traffic, speed: 10.0, load: 0.5 };
+        let emitters: Vec<Emitter> = [80.0, 10.0, 55.0, 25.0, 5.0, 40.0, 70.0, 15.0].into_iter().map(at).collect();
+        let near = nearest_emitters(cam, &emitters, MAX_TRAFFIC_VOICES);
+        assert_eq!(near, vec![4, 1, 7, 3, 5, 2], "the six nearest, nearest first");
+        assert_eq!(MAX_TRAFFIC_VOICES, 6);
+        assert_eq!(nearest_emitters(cam, &emitters, 20).len(), emitters.len(), "no cap below the voice count");
+        assert!(nearest_emitters(cam, &emitters, 0).is_empty());
+        assert!(nearest_emitters(cam, &[], MAX_TRAFFIC_VOICES).is_empty());
+    }
+
+    #[test]
+    fn the_ground_is_silent_when_the_world_is_not_live() {
+        let shared = Arc::new(Shared::default());
+        *shared.params.lock() = Params { master: 1.0, ..Default::default() };
+        let mut s = Synth::new(shared);
+        s.world_audio = Arc::new(WorldAudio {
+            cam: DVec3::ZERO,
+            right: DVec3::X,
+            car: Some(CarAudio { pos: DVec3::new(2.0, 0.0, 0.0), speed: 20.0, rpm: 3000.0, load: 1.0, braking: 1.0, handbrake: true, health: 0.2, surface: Surface::Grass }),
+            traffic: vec![Emitter { pos: DVec3::new(5.0, 0.0, 0.0), kind: EmitterKind::Traffic, speed: 12.0, load: 1.0 }],
+            live: 0.0,
+        });
+        let x: Vec<f32> = (0..RATE).map(|_| s.next().unwrap()).collect();
+        assert!(x.iter().all(|v| *v == 0.0), "live = 0 keeps the ground out of the mix");
     }
 
     #[test]
