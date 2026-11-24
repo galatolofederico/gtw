@@ -1,10 +1,10 @@
 [package]
-name = "fablegame"
+name = "gtw"
 version = "1.1.1"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
-default-run = "fablegame"
+default-run = "gtw"
 
 [dependencies]
 anyhow = "1.0.104"
@@ -15,7 +15,7 @@ earcutr = "0.5.0"
 egui = "0.37.0"
 egui-wgpu = "0.37.0"
 egui-winit = "0.37.0"
-# the launcher's window (src/bin/fableflight-launcher); the same egui and wgpu
+# the launcher's window (src/bin/gtw-launcher); the same egui and wgpu
 # as the game, so it adds little to the build
 eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "wayland", "x11", "links", "clipboard"] }
 ab_glyph = "0.2.32"

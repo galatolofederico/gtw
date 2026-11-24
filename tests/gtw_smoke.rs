@@ -1,8 +1,5 @@
 //! GTW smoke tests: the on-foot start really reaches the game loop headless,
 //! without a window or the network, and the CLI carries the ground flags.
-//!
-//! The binary is still `fablegame` until the phase 7 rebrand, so the Cargo
-//! `CARGO_BIN_EXE_*` name is the old one on purpose.
 
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -17,7 +14,7 @@ fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn bin() -> Command {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_fablegame"));
+    let mut c = Command::new(env!("CARGO_BIN_EXE_gtw"));
     c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     c
 }
@@ -65,6 +62,18 @@ fn help_lists_the_ground_flags() {
     assert!(text.contains("--start foot|car|plane"), "usage names --start: {text}");
     assert!(text.contains("--flat"), "usage names --flat: {text}");
     assert!(text.contains("--no-save"), "usage names --no-save: {text}");
+    assert!(text.contains("gtw [--version]"), "usage names the GTW binary: {text}");
+    assert!(!text.contains("FableFlight") && !text.contains("Fable Flight") && !text.contains("fablegame"), "usage carries no old name: {text}");
+}
+
+#[test]
+fn version_names_gtw() {
+    let mut c = bin();
+    c.arg("--version");
+    let (ok, text) = run_with_limit(c, Duration::from_secs(30));
+    assert!(ok, "--version failed: {text}");
+    assert!(text.lines().any(|l| l.trim().starts_with("gtw ")), "--version prints the GTW name: {text}");
+    assert!(!text.contains("FableFlight") && !text.contains("fablegame"), "--version carries no old name: {text}");
 }
 
 #[test]

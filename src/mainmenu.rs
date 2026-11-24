@@ -259,13 +259,13 @@ fn wordmark(p: &Painter, at: Pos2, right: f32, k: f32) {
     let size = 60.0 * k.max(0.7);
     let mut job = egui::text::LayoutJob::default();
     let fmt = |col| egui::TextFormat { font_id: menu::bold(size), color: col, extra_letter_spacing: 3.0 * k, ..Default::default() };
-    job.append("FABLE ", 0.0, fmt(Color32::WHITE));
-    job.append("FLIGHT", 0.0, fmt(ACCENT));
+    job.append("GT", 0.0, fmt(Color32::WHITE));
+    job.append("W", 0.0, fmt(ACCENT));
     let g = p.layout_job(job);
     let r = Align2::LEFT_BOTTOM.anchor_size(at, g.size());
     let w = g.size().x;
     p.galley(r.min, g, Color32::WHITE);
-    // a short accent bar over the f, and a hairline from the end of the word to the row's edge.
+    // a short accent bar over the G, and a hairline from the end of the word to the row's edge.
     p.rect_filled(Rect::from_min_size(pos2(r.left() + 2.0, r.top() - 6.0), vec2(34.0 * k.max(0.7), 3.0)), 1, ACCENT);
     let y = r.center().y + 2.0;
     if right - (r.left() + w + 24.0) > 40.0 {

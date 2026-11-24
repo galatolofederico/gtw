@@ -14,15 +14,15 @@ struct Bridge {
 
 impl Bridge {
     fn start() -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_fableflight-mcp"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_gtw-mcp"))
             // A port nothing is listening on: tool calls must answer with a
             // useful tool-level error instead of hanging.
-            .env("FABLEFLIGHT_MCP_PORT", "1")
+            .env("GTW_MCP_PORT", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .expect("start fableflight-mcp");
+            .expect("start gtw-mcp");
         let stdin = child.stdin.take().expect("stdin");
         let stdout = child.stdout.take().expect("stdout");
         let (tx, lines) = channel();
@@ -70,6 +70,7 @@ fn handshake_tools_and_offline_error() {
     let init = bridge.receive();
     assert_eq!(init["result"]["protocolVersion"], "2025-11-25");
     assert!(init["result"]["instructions"].as_str().unwrap().contains("copilot"));
+    assert_eq!(init["result"]["serverInfo"]["name"], "gtw");
 
     bridge.send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
     bridge.send(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));

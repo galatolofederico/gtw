@@ -1,7 +1,7 @@
 //! The copilot's tool catalogue.
 //!
 //! The same definitions are used by the game (to answer calls) and by the
-//! `fableflight-mcp` bridge (to answer `tools/list` even when the game is not
+//! `gtw-mcp` bridge (to answer `tools/list` even when the game is not
 //! running).  Units are the ones pilots use: feet, knots, ft/min, degrees
 //! true, hPa and kg.
 

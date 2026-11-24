@@ -16,7 +16,7 @@ shoot() { # key, camera yaw,pitch,distance, then one picture name per scheme in 
     key=$1; cam=$2; shift 2
     i=0
     for name in "$@"; do
-        ./target/release/fablegame --headless --still --no-menu --offline --mute --aircraft "$key" --livery $i \
+        ./target/release/gtw --headless --still --no-menu --offline --mute --aircraft "$key" --livery $i \
             --agl 1500 --speed 0 --clouds 0 --time 13 --no-taa --render-scale 1 --width 2040 --height 1176 \
             --hold 60 --shot "$TMP/$name.png@8@$cam" > "$TMP/log" 2>&1
         python3 "$OUT/fit.py" "$TMP/$name.png" "$OUT/$name.png"

@@ -14,7 +14,7 @@
 //! the JSBSim reference manual. Aircraft files are read from wherever the
 //! player keeps them; none ship with the game.
 //!
-//! `fablegame --jsbsim-compare path/to/aircraft.xml [--aircraft c172]` prints
+//! `gtw --jsbsim-compare path/to/aircraft.xml [--aircraft c172]` prints
 //! the comparison (see `compare`).
 
 use std::collections::{BTreeSet, HashMap};

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 /// User-Agent sent on outbound HTTP requests (includes project URL for providers
 /// such as OpenStreetMap's Nominatim that ask for a contact reference).
-pub const USER_AGENT: &str = concat!("fablegame-flightsim/", env!("CARGO_PKG_VERSION"), " (+https://github.com/Rolandjg/fableflight)");
+pub const USER_AGENT: &str = concat!("gtw/", env!("CARGO_PKG_VERSION"), " (+https://github.com/galatolofederico/gtw)");
 
 /// Default disk cache cap for tile data (bytes, 3 GiB).
 pub const CACHE_MAX_BYTES: u64 = 3 << 30;

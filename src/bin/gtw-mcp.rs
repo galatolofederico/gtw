@@ -1,8 +1,8 @@
-//! `fableflight-mcp`: the MCP server an AI client launches to copilot a
-//! running FableFlight.  It speaks MCP over stdin/stdout and forwards tool
-//! calls to the game's loopback control service.
+//! `gtw-mcp`: the MCP server an AI client launches to copilot a running
+//! GTW.  It speaks MCP over stdin/stdout and forwards tool calls to the
+//! game's loopback control service.
 
-use fablegame::mcp::{rpc, tools};
+use gtw::mcp::{rpc, tools};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -24,7 +24,7 @@ fn main() {
             Ok(0) => break,
             Ok(_) => {}
             Err(e) => {
-                eprintln!("fableflight-mcp: reading stdin: {e}");
+                eprintln!("gtw-mcp: reading stdin: {e}");
                 break;
             }
         }
@@ -39,7 +39,7 @@ fn main() {
                         break;
                     }
                 }
-                Err(e) => eprintln!("fableflight-mcp: encoding a response: {e}"),
+                Err(e) => eprintln!("gtw-mcp: encoding a response: {e}"),
             }
         }
     }
@@ -60,16 +60,20 @@ fn port() -> u16 {
                 }
                 if other == "--help" || other == "-h" {
                     eprintln!(
-                        "fableflight-mcp: MCP stdio bridge for FableFlight\n\
-                         usage: fableflight-mcp [--port PORT]\n\
+                        "gtw-mcp: MCP stdio bridge for GTW\n\
+                         usage: gtw-mcp [--port PORT]\n\
                          The running game listens on 127.0.0.1:42761 by default.\n\
-                         FABLEFLIGHT_MCP_PORT sets the port too."
+                         GTW_MCP_PORT sets the port too (FABLEFLIGHT_MCP_PORT still works)."
                     );
                 }
             }
         }
     }
-    std::env::var("FABLEFLIGHT_MCP_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(rpc::DEFAULT_PORT)
+    std::env::var("GTW_MCP_PORT")
+        .or_else(|_| std::env::var("FABLEFLIGHT_MCP_PORT"))
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(rpc::DEFAULT_PORT)
 }
 
 fn handle(line: &str, port: u16) -> Option<Value> {
@@ -116,8 +120,8 @@ fn initialize(params: &Value) -> Value {
     json!({
         "protocolVersion": protocol,
         "capabilities": { "tools": { "listChanged": false } },
-        "serverInfo": { "name": "fableflight", "version": env!("CARGO_PKG_VERSION") },
-        "instructions": "You are the copilot of a running FableFlight flight simulator. \
+        "serverInfo": { "name": "gtw", "version": env!("CARGO_PKG_VERSION") },
+        "instructions": "You are the copilot of a running GTW flight and ground simulator. \
             Read get_aircraft_state before acting. Units: feet, knots, ft/min, degrees true, hPa, kg. \
             You may set the throttle, aircraft configuration, engine, radios, weather, time and the aircraft's position. \
             You cannot move the stick; the human pilot keeps attitude. \
@@ -133,7 +137,7 @@ fn call_game(port: u16, name: &str, args: &Value) -> Result<Value, String> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).map_err(|e| {
         format!(
-            "FableFlight is not running (could not reach 127.0.0.1:{port}: {e}). \
+            "GTW is not running (could not reach 127.0.0.1:{port}: {e}). \
              Start the simulator (the MCP service is on by default; --no-mcp disables it)."
         )
     })?;
@@ -152,22 +156,22 @@ fn call_game(port: u16, name: &str, args: &Value) -> Result<Value, String> {
     }
     let mut text = serde_json::to_string(&request).map_err(|e| e.to_string())?;
     text.push('\n');
-    writer.write_all(text.as_bytes()).map_err(|e| format!("writing to FableFlight: {e}"))?;
-    writer.flush().map_err(|e| format!("writing to FableFlight: {e}"))?;
+    writer.write_all(text.as_bytes()).map_err(|e| format!("writing to GTW: {e}"))?;
+    writer.flush().map_err(|e| format!("writing to GTW: {e}"))?;
     let mut reply = String::new();
-    reader.read_line(&mut reply).map_err(|e| format!("reading from FableFlight: {e}"))?;
+    reader.read_line(&mut reply).map_err(|e| format!("reading from GTW: {e}"))?;
     if reply.trim().is_empty() {
-        return Err("FableFlight closed the connection without answering.".into());
+        return Err("GTW closed the connection without answering.".into());
     }
-    let value: Value = serde_json::from_str(reply.trim()).map_err(|e| format!("bad answer from FableFlight: {e}"))?;
+    let value: Value = serde_json::from_str(reply.trim()).map_err(|e| format!("bad answer from GTW: {e}"))?;
     if let Some(result) = value.get("result") {
         return Ok(result.clone());
     }
     if let Some(error) = value.get("error") {
         let message = error.get("message").and_then(Value::as_str).unwrap_or("unknown error");
-        return Err(format!("FableFlight: {message}"));
+        return Err(format!("GTW: {message}"));
     }
-    Err("FableFlight sent a response with neither result nor error.".into())
+    Err("GTW sent a response with neither result nor error.".into())
 }
 
 fn ok(id: Value, result: Value) -> Value {

@@ -2925,7 +2925,7 @@ mod tests {
     }
 
     fn empty_world() -> World {
-        let dir = std::env::temp_dir().join("fablegame-test-cache");
+        let dir = std::env::temp_dir().join("gtw-test-cache");
         let src = Arc::new(crate::sources::Sources::new(crate::fetch::Fetcher::new(dir, true), String::new()));
         World::new(crate::sources::Loader::new(src, 0), 14)
     }

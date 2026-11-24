@@ -1,4 +1,4 @@
-//! Start-up progress for the launcher (src/bin/fableflight-launcher.rs). With
+//! Start-up progress for the launcher (src/bin/gtw-launcher). With
 //! `FABLE_PROGRESS` set, each stage of the start is printed on stdout as a
 //! line `@fable-progress <stage>`; the launcher times them against the last
 //! start to draw its progress bar. Without it nothing is printed.
