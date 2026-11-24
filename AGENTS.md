@@ -4,11 +4,11 @@ These instructions apply throughout this repository.
 
 ## Model requirements
 
-- Substantial work requires Claude Opus 5.5, GPT-6 Astra, Claude Fable, Gemini 4 Neon or another model established to have equivalent or greater capability. Do not infer capability from a higher version number alone.
+- Substantial work requires Claude Opus 5.5, GPT-6 Astra, Claude Fable, Gemini 4 Neon, DeepSeek V4.1 Flash or another model established to have equivalent or greater capability. Do not infer capability from a higher version number alone.
 - Sonnet models, GPT-6.1 Terra and Luna, and models below that capability level may only make simple fixes, reviews, tests, or add very simple features. Examples include a typo correction, a small isolated bug fix with an obvious solution, or a minor UI adjustment. 
 - Aircraft creation, substantial aircraft changes, flight-model tuning, complex graphics work, architectural changes, and broad refactors are not simple tasks.
 - Before substantive investigation or changes, check the model identity supplied by the runtime. If you do not meet the requirement, or cannot establish that you do, stop unless the task clearly falls within the simple-work exception. Do not split a complex task into small edits to bypass this rule.
-- When stopping, tell the user: "This task needs a stronger model. Please switch to Opus 5.5, GPT-6 Astra, Fable, or an equivalent or more capable model."
+- When stopping, tell the user: "This task needs a stronger model. Please switch to Opus 5.5, GPT-6 Astra, Fable, DeepSeek V4.1 Flash, or an equivalent or more capable model."
 
 ## Learn from the existing aircraft
 
