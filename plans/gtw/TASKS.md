@@ -203,38 +203,38 @@ cargo run --release -- --help
 
 ### Implementation
 
-- [ ] 4.1 Add `World::traffic_bodies_near(pos, radius, out)` returning oriented boxes for moving and parked cars.
-- [ ] 4.2 Add `World::take_traffic_car(pos, radius)` and `World::take_parked_car(pos, radius)` returning a `TakenCar { model, colour, pos, yaw, velocity }` and removing the source car.
-- [ ] 4.3 Add a `player_presence` parameter to `World::update_traffic` carrying mode and position; traffic within 12 m of a walking player or 18 m of a driving player must brake smoothly.
-- [ ] 4.4 Add a per-car yield state so a traffic car that is about to be taken stops and holds for a short time before removal.
-- [ ] 4.5 Add OBB-versus-OBB collision between the player vehicle and traffic bodies; apply impulse and damage to both the player car and the traffic car state.
-- [ ] 4.6 Add circle-versus-OBB collision between the character and traffic; apply knockback, health damage, and a traffic brake event.
-- [ ] 4.7 Add the interaction prompt and E-key behaviour for parked and moving cars; refuse the interaction if the source tile is not ready.
-- [ ] 4.8 Add a “traffic hit” event for audio, damage HUD, and screen feedback; wire the event queue without adding audio synthesis yet.
-- [ ] 4.9 Keep traffic path-following and lane logic unchanged outside the new yield/collision hooks.
-- [ ] 4.10 Extend `tests/gtw_smoke.rs` with a headless car run that takes a traffic car and exits.
+- [x] 4.1 Add `World::traffic_bodies_near(pos, radius, out)` returning oriented boxes for moving and parked cars.
+- [x] 4.2 Add `World::take_traffic_car(pos, radius)` and `World::take_parked_car(pos, radius)` returning a `TakenCar { model, colour, pos, yaw, velocity }` and removing the source car.
+- [x] 4.3 Add a `player_presence` parameter to `World::update_traffic` carrying mode and position; traffic within 12 m of a walking player or 18 m of a driving player must brake smoothly.
+- [x] 4.4 Add a per-car yield state so a traffic car that is about to be taken stops and holds for a short time before removal.
+- [x] 4.5 Add OBB-versus-OBB collision between the player vehicle and traffic bodies; apply impulse and damage to both the player car and the traffic car state.
+- [x] 4.6 Add circle-versus-OBB collision between the character and traffic; apply knockback, health damage, and a traffic brake event.
+- [x] 4.7 Add the interaction prompt and E-key behaviour for parked and moving cars; refuse the interaction if the source tile is not ready.
+- [x] 4.8 Add a “traffic hit” event for audio, damage HUD, and screen feedback; wire the event queue without adding audio synthesis yet.
+- [x] 4.9 Keep traffic path-following and lane logic unchanged outside the new yield/collision hooks.
+- [x] 4.10 Extend `tests/gtw_smoke.rs` with a headless car run that takes a traffic car and exits.
 
 ### Tests
 
-- [ ] 4.11 Unit-test traffic braking distance and slowdown near a walking and a driving player in `src/world.rs`.
-- [ ] 4.12 Unit-test `take_traffic_car` removes exactly one car from the correct lane and returns its model, colour, pose, and velocity.
-- [ ] 4.13 Unit-test `take_parked_car` removes exactly one parked prop and leaves neighbouring props intact.
-- [ ] 4.14 Unit-test refusal when the target tile is not ready and when no car is in range.
-- [ ] 4.15 Unit-test OBB-versus-OBB collision damage and separation for two vehicles.
-- [ ] 4.16 Unit-test character-versus-traffic knockback and health damage.
-- [ ] 4.17 Unit-test that traffic resumes normal speed after the player leaves the yield radius.
-- [ ] 4.18 Run the headless traffic-carpack smoke test from `tests/gtw_smoke.rs`.
+- [x] 4.11 Unit-test traffic braking distance and slowdown near a walking and a driving player in `src/world.rs`.
+- [x] 4.12 Unit-test `take_traffic_car` removes exactly one car from the correct lane and returns its model, colour, pose, and velocity.
+- [x] 4.13 Unit-test `take_parked_car` removes exactly one parked prop and leaves neighbouring props intact.
+- [x] 4.14 Unit-test refusal when the target tile is not ready and when no car is in range.
+- [x] 4.15 Unit-test OBB-versus-OBB collision damage and separation for two vehicles.
+- [x] 4.16 Unit-test character-versus-traffic knockback and health damage.
+- [x] 4.17 Unit-test that traffic resumes normal speed after the player leaves the yield radius.
+- [x] 4.18 Run the headless traffic-carpack smoke test from `tests/gtw_smoke.rs`.
 
 ### Verification
 
-- [ ] Run `cargo check --all-targets`; it exits 0.
-- [ ] Run `cargo test`; it exits 0 and all traffic, carjacking, and collision tests pass.
-- [ ] Run `cargo test --test gtw_smoke`; it exits 0.
-- [ ] Run `cargo test --test shaders`; it exits 0.
+- [x] Run `cargo check --all-targets`; it exits 0.
+- [x] Run `cargo test`; it exits 0 and all traffic, carjacking, and collision tests pass.
+- [x] Run `cargo test --test gtw_smoke`; it exits 0.
+- [x] Run `cargo test --test shaders`; it exits 0.
 - [ ] Run `cargo run --release -- --place "Buenos Aires" --start foot`; walk into traffic, verify it brakes, then take a moving car.
 - [ ] Run `cargo run --release -- --place "Buenos Aires" --start car`; collide with traffic and a building, verify damage and health feedback.
-- [ ] Run `cargo build --release --locked`; it exits 0.
-- [ ] Confirm no new skipped, quarantined, or failing tests.
+- [x] Run `cargo build --release --locked`; it exits 0.
+- [x] Confirm no new skipped, quarantined, or failing tests.
 
 **Done when:** Traffic is solid and yielding, a moving car can be taken without duplication or loss, and collisions damage the player and vehicles consistently.
 
