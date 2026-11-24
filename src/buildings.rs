@@ -108,6 +108,8 @@ pub struct BuildingData {
     pub road_verts: Vec<RoadVertex>,
     pub road_idx: Vec<u32>,
     pub net: crate::roads::RoadNet,
+    /// candidate grid for "which road is under this point" queries
+    pub road_index: crate::roads::RoadIndex,
     pub parked: Vec<Parked>,
     pub trees: Vec<TreeInst>,
     pub tree_var: Vec<u8>,
@@ -2209,6 +2211,7 @@ pub fn build(src: &Sources, id: TileId) -> Result<BuildingData> {
     let bld_end = [m.main.len(), m.det.len(), m.fine.len(), m.far.len()];
 
     let mut roads = crate::roads::build(&cx, &vt, src, &mut m, &mut footprints, &built);
+    let road_index = crate::roads::RoadIndex::build(&roads.net, ext, cx.unit_m);
     let parked = crate::roads::park_cars(&cx, &roads.net, &hoods, &built);
     let grown = crate::trees::place(&cx, &vt, &hoods, &built, &roads.mask);
 
@@ -2268,6 +2271,7 @@ pub fn build(src: &Sources, id: TileId) -> Result<BuildingData> {
         road_verts: std::mem::take(&mut roads.verts),
         road_idx: std::mem::take(&mut roads.idx),
         net: roads.net,
+        road_index,
         parked,
         trees: grown.trees,
         tree_var: grown.var,

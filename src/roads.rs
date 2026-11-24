@@ -22,6 +22,18 @@ pub struct Path {
     pub speed: f32,
     /// in a tunnel: traffic passes through unseen
     pub hidden: bool,
+    /// carriageway half-width, kerb to kerb (metres)
+    pub drive_half: f32,
+    /// the road has a sidewalk band
+    pub walk: bool,
+    /// the path is a bridge deck
+    #[allow(dead_code)]
+    pub bridge: bool,
+    /// centreline in tile units (y down), for the road index
+    pub local: Vec<[f32; 2]>,
+    /// absolute surface altitude at each centreline point
+    #[allow(dead_code)]
+    pub alt: Vec<f32>,
     pub nodes: [u64; 2],
     /// which tile edge each end sits on (0 none, 1 west, 2 east, 3 north, 4 south)
     pub edge: [u8; 2],
@@ -42,6 +54,137 @@ impl Path {
         let (a, b) = (self.pts[i], self.pts[i + 1]);
         let l = (self.cum[i + 1] - self.cum[i]).max(1e-4);
         (a + (b - a) * ((s - self.cum[i]) / l), (b - a) / l)
+    }
+}
+
+/// Sidewalk band width outside the carriageway (metres), as in `cfg`.
+pub const SIDEWALK_W: f32 = 1.9;
+
+/// What the road index found under a point.
+#[allow(dead_code)]
+#[derive(Copy, Clone, Debug)]
+pub struct RoadHit {
+    #[allow(dead_code)]
+    pub path: u32,
+    /// distance along the path (metres)
+    pub s: f32,
+    /// distance from the centreline (metres)
+    pub dist: f32,
+    /// absolute surface altitude
+    pub h: f64,
+    pub kind: crate::surface::Surface,
+    pub sidewalk: bool,
+    pub bridge: bool,
+    /// a tunnel, which v1 keeps at grade and does not make enterable
+    pub hidden: bool,
+}
+
+/// A 64 x 64 tile-unit grid of candidate path ids, built from a `RoadNet` so a
+/// point query only has to test the roads near it. Distances are measured from
+/// the centreline; a point inside `drive_half` is carriageway asphalt, one in
+/// the walk band beyond it is concrete sidewalk.
+#[allow(dead_code)]
+pub struct RoadIndex {
+    ext: f32,
+    unit_m: f32,
+    cell: f32,
+    cells: Vec<Vec<u32>>,
+}
+
+#[allow(dead_code)]
+impl RoadIndex {
+    const N: usize = 64;
+
+    pub fn build(net: &RoadNet, ext: f32, unit_m: f32) -> Self {
+        let unit_m = unit_m.max(1e-6);
+        let cell = (ext / Self::N as f32).max(1e-6);
+        let mut cells = vec![Vec::new(); Self::N * Self::N];
+        for (i, p) in net.paths.iter().enumerate() {
+            if p.local.len() < 2 {
+                continue;
+            }
+            let hw = (p.drive_half + if p.walk { SIDEWALK_W } else { 0.0 }) / unit_m;
+            // A cell is a candidate when its centre is within reach of the
+            // ribbon: any point in a cell is at most half a diagonal from it.
+            let reach = hw + cell * 0.75;
+            for w in p.local.windows(2) {
+                let (a, b) = (Vec2::from(w[0]), Vec2::from(w[1]));
+                let x0 = (((a.x.min(b.x) - reach) / cell).floor() as i64).clamp(0, Self::N as i64 - 1) as usize;
+                let x1 = (((a.x.max(b.x) + reach) / cell).ceil() as i64).clamp(0, Self::N as i64) as usize;
+                let y0 = (((a.y.min(b.y) - reach) / cell).floor() as i64).clamp(0, Self::N as i64 - 1) as usize;
+                let y1 = (((a.y.max(b.y) + reach) / cell).ceil() as i64).clamp(0, Self::N as i64) as usize;
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let c = Vec2::new((x as f32 + 0.5) * cell, (y as f32 + 0.5) * cell);
+                        if seg_dist(c, a, b) <= reach {
+                            cells[y * Self::N + x].push(i as u32);
+                        }
+                    }
+                }
+            }
+        }
+        for c in &mut cells {
+            c.sort_unstable();
+            c.dedup();
+        }
+        Self { ext, unit_m, cell, cells }
+    }
+
+    pub fn ext(&self) -> f32 {
+        self.ext
+    }
+
+    pub fn query(&self, net: &RoadNet, p: [f32; 2]) -> Option<RoadHit> {
+        let q = Vec2::from(p);
+        let cx = ((p[0] / self.cell).floor().max(0.0) as usize).min(Self::N - 1);
+        let cy = ((p[1] / self.cell).floor().max(0.0) as usize).min(Self::N - 1);
+        let mut best: Option<RoadHit> = None;
+        for &pi in &self.cells[cy * Self::N + cx] {
+            let path = &net.paths[pi as usize];
+            let n = path.local.len().min(path.alt.len());
+            if n < 2 {
+                continue;
+            }
+            let (mut d2, mut t, mut seg) = (f32::INFINITY, 0.0f32, 0usize);
+            for (k, w) in path.local[..n].windows(2).enumerate() {
+                let (a, b) = (Vec2::from(w[0]), Vec2::from(w[1]));
+                let d = b - a;
+                let dd = d.length_squared().max(1e-9);
+                let u = ((q - a).dot(d) / dd).clamp(0.0, 1.0);
+                let dist = (a + d * u - q).length_squared();
+                if dist < d2 {
+                    (d2, t, seg) = (dist, u, k);
+                }
+            }
+            let dist = d2.sqrt() * self.unit_m;
+            let max = path.drive_half + if path.walk { SIDEWALK_W } else { 0.0 };
+            if dist > max {
+                continue;
+            }
+            if best.is_some_and(|b| dist >= b.dist) {
+                continue;
+            }
+            let (s0, s1) = (path.cum.get(seg).copied().unwrap_or(0.0), path.cum.get(seg + 1).copied().unwrap_or(path.len));
+            let h = path.alt[seg] as f64 * (1.0 - t as f64) + path.alt[seg + 1] as f64 * t as f64;
+            let sidewalk = dist > path.drive_half;
+            best = Some(RoadHit {
+                path: pi,
+                s: s0 + (s1 - s0) * t,
+                dist,
+                h,
+                kind: if sidewalk { crate::surface::Surface::Concrete } else { crate::surface::Surface::Asphalt },
+                sidewalk,
+                bridge: path.bridge,
+                hidden: path.hidden,
+            });
+        }
+        best
+    }
+
+    /// Candidate paths in a grid cell (test aid: the grid is not drawn).
+    #[cfg(test)]
+    pub fn cell_ids(&self, x: usize, y: usize) -> &[u32] {
+        &self.cells[y.min(Self::N - 1) * Self::N + x.min(Self::N - 1)]
     }
 }
 
@@ -886,6 +1029,11 @@ pub fn build(cx: &Ctx, vt: &VecTile, src: &crate::sources::Sources, mesh: &mut M
                     park_off: if cf.parking { drive_half + 1.1 } else { 0.0 },
                     speed: cf.speed,
                     hidden: line.brunnel == 2,
+                    drive_half: cf.drive * 0.5,
+                    walk: cf.walk,
+                    bridge,
+                    local: pts.clone(),
+                    alt: (0..n).map(|i| zs[i] + if bridge { 0.02 } else { 0.14 }).collect(),
                     nodes,
                     edge: edges,
                     junctions: Vec::new(),
@@ -1030,5 +1178,97 @@ mod tests {
         let off = [[240.0, 600.0], [260.0, 600.0], [260.0, 610.0], [240.0, 610.0]];
         assert!(crate::buildings::on_road(&mask, &on, 1024.0));
         assert!(!crate::buildings::on_road(&mask, &off, 1024.0));
+    }
+
+    fn road(pts: &[[f32; 2]], alt: &[f32], drive_half: f32, walk: bool, bridge: bool, hidden: bool) -> Path {
+        let mut cum = vec![0f32; pts.len()];
+        for i in 1..pts.len() {
+            cum[i] = cum[i - 1] + (pts[i][0] - pts[i - 1][0]).hypot(pts[i][1] - pts[i - 1][1]);
+        }
+        let len = cum.last().copied().unwrap_or(0.0);
+        Path {
+            pts: pts.iter().map(|p| Vec3::new(p[0], 0.0, p[1])).collect(),
+            cum,
+            len,
+            class: RC_MINOR,
+            oneway: false,
+            lanes: 1,
+            lane_w: 3.0,
+            park_off: 0.0,
+            speed: 8.0,
+            hidden,
+            drive_half,
+            walk,
+            bridge,
+            local: pts.to_vec(),
+            alt: alt.to_vec(),
+            nodes: [0, 0],
+            edge: [0, 0],
+            junctions: Vec::new(),
+            keep_clear: Vec::new(),
+        }
+    }
+
+    fn net(paths: Vec<Path>) -> RoadNet {
+        RoadNet { paths, ..Default::default() }
+    }
+
+    #[test]
+    fn road_index_finds_carriageway_sidewalk_and_off_ribbon() {
+        use crate::surface::Surface;
+        let n = net(vec![road(&[[100.0, 500.0], [400.0, 500.0]], &[10.0, 10.0], 4.0, true, false, false)]);
+        let idx = RoadIndex::build(&n, 1024.0, 1.0);
+        let c = idx.query(&n, [250.0, 501.0]).unwrap();
+        assert_eq!(c.kind, Surface::Asphalt);
+        assert!(!c.sidewalk);
+        assert!((c.dist - 1.0).abs() < 1e-4);
+        assert!((c.h - 10.0).abs() < 1e-9);
+        assert!((c.s - 150.0).abs() < 1e-4);
+        let s = idx.query(&n, [250.0, 505.5]).unwrap();
+        assert_eq!(s.kind, Surface::Concrete);
+        assert!(s.sidewalk);
+        assert!(idx.query(&n, [250.0, 507.0]).is_none());
+        assert!(idx.query(&n, [250.0, 480.0]).is_none());
+    }
+
+    #[test]
+    fn road_index_reports_a_bridge_deck_and_a_hidden_tunnel() {
+        let n = net(vec![
+            road(&[[100.0, 200.0], [400.0, 200.0]], &[30.0, 30.0], 5.0, false, true, false),
+            road(&[[100.0, 800.0], [400.0, 800.0]], &[0.0, 0.0], 5.0, false, false, true),
+        ]);
+        let idx = RoadIndex::build(&n, 1024.0, 1.0);
+        let b = idx.query(&n, [250.0, 201.0]).unwrap();
+        assert!(b.bridge);
+        assert!(!b.hidden);
+        assert!((b.h - 30.0).abs() < 1e-9);
+        let t = idx.query(&n, [250.0, 801.0]).unwrap();
+        assert!(t.hidden);
+        assert!(!t.bridge);
+        assert_eq!(t.kind, crate::surface::Surface::Asphalt);
+    }
+
+    #[test]
+    fn road_index_covers_a_path_crossing_the_tile_border() {
+        let n = net(vec![road(&[[-8.0, 500.0], [1032.0, 500.0]], &[4.0, 4.0], 3.0, false, false, false)]);
+        let idx = RoadIndex::build(&n, 1024.0, 1.0);
+        assert!(idx.query(&n, [2.0, 501.0]).is_some());
+        assert!(idx.query(&n, [1022.0, 501.0]).is_some());
+        // The candidate grid can be inspected without a GPU.
+        assert!(idx.cell_ids(15, 31).contains(&0));
+    }
+
+    #[test]
+    fn road_index_interpolates_closest_point_and_altitude() {
+        let n = net(vec![road(&[[100.0, 500.0], [200.0, 500.0], [200.0, 600.0]], &[0.0, 0.0, 20.0], 5.0, false, false, false)]);
+        let idx = RoadIndex::build(&n, 1024.0, 1.0);
+        let a = idx.query(&n, [150.0, 503.0]).unwrap();
+        assert!((a.dist - 3.0).abs() < 1e-4);
+        assert!((a.s - 50.0).abs() < 1e-4);
+        assert!(a.h.abs() < 1e-9);
+        let b = idx.query(&n, [203.0, 550.0]).unwrap();
+        assert!((b.dist - 3.0).abs() < 1e-4);
+        assert!((b.s - 150.0).abs() < 1e-4);
+        assert!((b.h - 10.0).abs() < 1e-9);
     }
 }

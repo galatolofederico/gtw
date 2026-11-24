@@ -4,10 +4,11 @@ use crate::buildings::{self, Footprint, Parked, TreeChunk};
 use crate::cars::{self, Car};
 use crate::geo::{self, TileId};
 use crate::render::{BuildGpu, DetailDraw, Inst, NearDraw, Renderer, TessCells, TileGpu, TreeDraw, TreeInst, MAX_NEAR};
-use crate::roads::RoadNet;
+use crate::roads::{RoadHit, RoadIndex, RoadNet};
 use crate::trees::{tree_jit, NearCell, TreeDim, Under, CARDS, CARD_RANGE, IMP_DIST, LODS, LOD_JITTER, TREE_SPECIES, VARIANTS};
 use crate::weapons::{Target, TargetKey};
-use crate::sources::{Job, JobResult, Loader, DATA_ZOOM, GRID, GV};
+use crate::sources::{Job, JobResult, Loader, DATA_ZOOM, GRID, GV, MASK};
+use crate::surface::{Surface, SurfaceHit};
 use glam::{DMat4, DVec3, DVec4, Vec3};
 // Fx hashing: these maps are hit many times a frame with small, locally made keys (no untrusted input).
 use rustc_hash::FxHashMap as HashMap;
@@ -22,6 +23,8 @@ struct Tile {
     grid: Vec<[f32; 3]>,
     heights: Vec<f32>,
     water: Vec<bool>,
+    /// one `surface::Surface` byte per MASK cell (sources.rs TileData::surface)
+    surface: Vec<u8>,
     /// how much of the ocean's long waves the water shows (sources.rs TileData::sea)
     sea: Vec<f32>,
     /// any water on the tile, so the ocean fft can idle without it.
@@ -43,6 +46,8 @@ struct BTile {
     footprints: Vec<Footprint>,
     last_used: u64,
     net: RoadNet,
+    #[allow(dead_code)]
+    road_index: RoadIndex,
     cars: Vec<Car>,
     parked: Vec<Parked>,
     trees: Vec<TreeInst>,
@@ -541,9 +546,11 @@ impl World {
         self.photo().draws(cam)
     }
 
-    /// Height of our own terrain surface (or water surface) at a lat/lon, from
-    /// the most detailed tile currently loaded there.
-    pub fn terrain_ground(&self, lat: f64, lon: f64) -> Option<Ground> {
+    /// Height of our own terrain surface (or water surface) and its gameplay
+    /// class at a lat/lon, from the most detailed tile currently loaded there.
+    /// Shared by `terrain_ground` and `surface_at`, so height and class always
+    /// come from the same tile.
+    fn terrain_sample(&self, lat: f64, lon: f64) -> Option<(Ground, u8)> {
         let (mx, my) = (geo::lon_to_merc_x(lon).rem_euclid(1.0), geo::lat_to_merc_y(lat));
         for z in (2..=self.max_zoom).rev() {
             let id = TileId::at_merc(mx, my, z);
@@ -576,7 +583,11 @@ impl World {
                         }
                     }
                 }
-                return Some(Ground { h, water: w });
+                // Nearest mask cell, as the plan specifies: the class is a label,
+                // not a field to interpolate.
+                let (sx, sy) = (((x / GRID as f64) * MASK as f64) as usize, ((y / GRID as f64) * MASK as f64) as usize);
+                let surface = t.surface.get(sy.min(MASK - 1) * MASK + sx.min(MASK - 1)).copied().unwrap_or(Surface::Grass as u8);
+                return Some((Ground { h, water: w }, surface));
             }
         }
         let mut h = self.flat?;
@@ -593,7 +604,58 @@ impl World {
                 }
             }
         }
-        Some(Ground { h, water: false })
+        Some((Ground { h, water: false }, Surface::Grass as u8))
+    }
+
+    /// Height of our own terrain surface (or water surface) at a lat/lon.
+    pub fn terrain_ground(&self, lat: f64, lon: f64) -> Option<Ground> {
+        self.terrain_sample(lat, lon).map(|(g, _)| g)
+    }
+
+    /// The road index hit under a lat/lon, from the loaded detail tile.
+    #[allow(dead_code)]
+    pub fn road_hit(&self, lat: f64, lon: f64) -> Option<RoadHit> {
+        let id = TileId::at(lat, lon, DATA_ZOOM);
+        let Some(BSlot::Ready(b)) = self.builds.get(&id) else { return None };
+        let (u, v) = id.frac(lat, lon);
+        let ext = b.road_index.ext();
+        b.road_index.query(&b.net, [(u * ext as f64) as f32, (v * ext as f64) as f32])
+    }
+
+    /// The shared surface query: terrain height and class, refined by the road
+    /// index. `body` is the querying body's altitude; a deck more than 2.5 m
+    /// above it (a bridge overhead) is ignored, so a body under the bridge
+    /// stays on the terrain. `None` means the tile selection had no ground.
+    #[allow(dead_code)]
+    fn surface_hit(&self, lat: f64, lon: f64, body: Option<f64>) -> Option<SurfaceHit> {
+        let (g, class) = self.terrain_sample(lat, lon)?;
+        let kind = Surface::from_u8(class);
+        let mut hit = SurfaceHit { h: g.h, kind, water: g.water || kind == Surface::Water, road: false, sidewalk: false, bridge: false };
+        if let Some(r) = self.road_hit(lat, lon) {
+            if !r.hidden && body.is_none_or(|alt| r.h - alt <= 2.5) {
+                hit.kind = r.kind;
+                hit.h = r.h;
+                hit.road = true;
+                hit.sidewalk = r.sidewalk;
+                hit.bridge = r.bridge;
+                hit.water = r.kind == Surface::Water;
+            }
+        }
+        Some(hit)
+    }
+
+    /// The surface under a world position: the gameplay query. It applies the
+    /// bridge-height filter against the body's own altitude.
+    #[allow(dead_code)]
+    pub fn surface_at(&self, p: DVec3) -> Option<SurfaceHit> {
+        let (lat, lon, alt) = geo::pos_to_lla(p);
+        self.surface_hit(lat, lon, Some(alt))
+    }
+
+    /// Diagnostic surface query at a lat/lon, without the bridge-height filter.
+    #[allow(dead_code)]
+    pub fn surface(&self, lat: f64, lon: f64) -> Option<SurfaceHit> {
+        self.surface_hit(lat, lon, None)
     }
 
     /// Building or bridge deck over a lat/lon.
@@ -983,7 +1045,7 @@ impl World {
                     let slot = match res {
                         Ok(td) => {
                             bytes += crate::render::tile_bytes(&td);
-                            Slot::Ready(Box::new(Tile { center: td.center, radius: td.radius, gpu: r.upload_tile(&td), grid: td.verts[..GV * GV].iter().map(|v| v.pos).collect(), heights: td.heights, wet: td.water.iter().any(|w| *w), water: td.water, sea: td.sea, last_used: self.frame, generation: td.imagery_gen, refreshing: false }))
+                            Slot::Ready(Box::new(Tile { center: td.center, radius: td.radius, gpu: r.upload_tile(&td), grid: td.verts[..GV * GV].iter().map(|v| v.pos).collect(), heights: td.heights, wet: td.water.iter().any(|w| *w), water: td.water, surface: td.surface, sea: td.sea, last_used: self.frame, generation: td.imagery_gen, refreshing: false }))
                         }
                         Err(e) => {
                             log::debug!("tile {id:?} failed: {e}");
@@ -1274,7 +1336,7 @@ impl World {
             let main = bd.cls[0];
             let tall = (0..buildings::HCLASS.len()).find(|&c| main[c] > if c == 0 { 0 } else { main[c - 1] }).map_or(1.0, |c| buildings::HCLASS[c].1);
             let cars = cars::spawn(&bd.net, id.x.wrapping_mul(2246822519) ^ id.y.wrapping_mul(3266489917));
-            self.builds.insert(id, BSlot::Ready(Box::new(BTile { center: bd.center, radius: bd.radius, gpu: Some(gpu), footprints: bd.footprints, last_used: self.frame, net: bd.net, cars, parked: bd.parked, trees: bd.trees, tree_var: bd.tree_var, chunks: bd.chunks, under: bd.under, cells: bd.cells, near_idx: bd.near_idx, ax: bd.ax, ay: bd.ay, shown: 0.0, mid_t: 0.0, fine_t: 0.0, tall })));
+            self.builds.insert(id, BSlot::Ready(Box::new(BTile { center: bd.center, radius: bd.radius, gpu: Some(gpu), footprints: bd.footprints, last_used: self.frame, net: bd.net, road_index: bd.road_index, cars, parked: bd.parked, trees: bd.trees, tree_var: bd.tree_var, chunks: bd.chunks, under: bd.under, cells: bd.cells, near_idx: bd.near_idx, ax: bd.ax, ay: bd.ay, shown: 0.0, mid_t: 0.0, fine_t: 0.0, tall })));
         }
         bytes
     }
@@ -1805,6 +1867,229 @@ impl World {
     }
 }
 
+/// What character and vehicle physics need from the world. Test worlds can
+/// implement it without a GPU or streamed tiles.
+#[allow(dead_code)]
+pub trait WorldQuery {
+    fn surface_at(&self, p: DVec3) -> Option<SurfaceHit>;
+    /// Correction that pushes a sphere out of a building (planet frame).
+    fn building_push_sphere(&self, p: DVec3, radius: f64) -> Option<DVec3>;
+    /// Correction that pushes an oriented box out of a building.
+    fn building_push_box(&self, p: DVec3, half: [f64; 2], yaw: f64) -> Option<DVec3>;
+    /// Correction that pushes a sphere out of a tree trunk.
+    fn tree_push_sphere(&self, p: DVec3, radius: f64) -> Option<DVec3>;
+    /// Correction that pushes an oriented box out of a tree trunk.
+    fn tree_push_box(&self, p: DVec3, half: [f64; 2], yaw: f64) -> Option<DVec3>;
+}
+
+impl WorldQuery for World {
+    fn surface_at(&self, p: DVec3) -> Option<SurfaceHit> {
+        World::surface_at(self, p)
+    }
+
+    fn building_push_sphere(&self, p: DVec3, radius: f64) -> Option<DVec3> {
+        let (_, _, alt) = geo::pos_to_lla(p);
+        let (e, n) = enu_of(p);
+        let mut best: Option<DVec3> = None;
+        for (ring, base, top, bridge) in self.footprints_near(p, radius + 40.0) {
+            if bridge || alt > top || alt + radius < base {
+                continue;
+            }
+            if let Some(v) = push_circle(&ring, p, radius, e, n) {
+                if best.is_none_or(|b| v.length() > b.length()) {
+                    best = Some(v);
+                }
+            }
+        }
+        best
+    }
+
+    fn building_push_box(&self, p: DVec3, half: [f64; 2], yaw: f64) -> Option<DVec3> {
+        let (_, _, alt) = geo::pos_to_lla(p);
+        let (e, n) = enu_of(p);
+        let radius = half[0].hypot(half[1]);
+        let mut best: Option<DVec3> = None;
+        for (ring, base, top, bridge) in self.footprints_near(p, radius + 40.0) {
+            if bridge || alt > top || alt + 1.0 < base {
+                continue;
+            }
+            if let Some(v) = obb_ring_push(&ring, p, half, yaw, e, n) {
+                if best.is_none_or(|b| v.length() > b.length()) {
+                    best = Some(v);
+                }
+            }
+        }
+        best
+    }
+
+    fn tree_push_sphere(&self, p: DVec3, radius: f64) -> Option<DVec3> {
+        let (_, _, alt) = geo::pos_to_lla(p);
+        let up = p.normalize();
+        let mut trees = Vec::new();
+        self.trees_near(p, radius + 40.0, &mut trees);
+        let mut best: Option<DVec3> = None;
+        for t in trees {
+            let base = t.pos.length() - geo::R;
+            if alt > base + t.height || alt + radius < base {
+                continue;
+            }
+            let d = p - t.pos;
+            let horiz = d - up * d.dot(up);
+            let r = t.trunk_r + radius;
+            let l = horiz.length();
+            if l < r {
+                let dir = if l > 1e-9 {
+                    horiz / l
+                } else {
+                    let some = if up.cross(DVec3::X).length_squared() > 1e-6 { up.cross(DVec3::X) } else { up.cross(DVec3::Z) };
+                    some.normalize()
+                };
+                let push = dir * (r - l);
+                if best.is_none_or(|b| push.length() > b.length()) {
+                    best = Some(push);
+                }
+            }
+        }
+        best
+    }
+
+    fn tree_push_box(&self, p: DVec3, half: [f64; 2], yaw: f64) -> Option<DVec3> {
+        let (_, _, alt) = geo::pos_to_lla(p);
+        let (e, n) = enu_of(p);
+        let (c, s) = (yaw.cos(), yaw.sin());
+        let (hx, hz) = (half[0].max(0.0), half[1].max(0.0));
+        let mut trees = Vec::new();
+        self.trees_near(p, hx.hypot(hz) + 40.0, &mut trees);
+        let mut best: Option<DVec3> = None;
+        for t in trees {
+            let base = t.pos.length() - geo::R;
+            if alt > base + t.height || alt + 1.0 < base {
+                continue;
+            }
+            let d = t.pos - p;
+            let (x, z) = (d.dot(e), d.dot(n));
+            let (bx, bz) = (c * x + s * z, -s * x + c * z);
+            let (qx, qz) = (bx.clamp(-hx, hx), bz.clamp(-hz, hz));
+            let (dx, dz) = (qx - bx, qz - bz);
+            let dist = dx.hypot(dz);
+            if dist >= t.trunk_r {
+                continue;
+            }
+            let (mut ux, mut uz) = if dist > 1e-9 { (-dx / dist, -dz / dist) } else { (-bx, -bz) };
+            let ul = ux.hypot(uz);
+            if ul < 1e-9 {
+                (ux, uz) = (1.0, 0.0);
+            } else {
+                (ux, uz) = (ux / ul, uz / ul);
+            }
+            let amount = t.trunk_r - dist;
+            let wx = c * ux - s * uz;
+            let wz = s * ux + c * uz;
+            let push = (e * wx + n * wz) * amount;
+            if best.is_none_or(|b| push.length() > b.length()) {
+                best = Some(push);
+            }
+        }
+        best
+    }
+}
+
+#[allow(dead_code)]
+fn enu_of(p: DVec3) -> (DVec3, DVec3) {
+    let (e, n, _) = geo::enu(p);
+    (e, n)
+}
+
+/// Push a circle at `p` (radius `radius`) out of the horizontal polygon `ring`.
+#[allow(dead_code)]
+fn push_circle(ring: &[DVec3], p: DVec3, radius: f64, e: DVec3, n: DVec3) -> Option<DVec3> {
+    if ring.len() < 3 {
+        return None;
+    }
+    let local: Vec<glam::DVec2> = ring.iter().map(|q| { let d = *q - p; glam::DVec2::new(d.dot(e), d.dot(n)) }).collect();
+    let mut inside = false;
+    let (mut best_d, mut best_c) = (f64::INFINITY, glam::DVec2::ZERO);
+    let mut j = local.len() - 1;
+    for i in 0..local.len() {
+        let (a, b) = (local[i], local[j]);
+        if (a.y > 0.0) != (b.y > 0.0) && 0.0 < (b.x - a.x) * (0.0 - a.y) / (b.y - a.y) + a.x {
+            inside = !inside;
+        }
+        let d = b - a;
+        let t = ((-a).dot(d) / d.length_squared().max(1e-12)).clamp(0.0, 1.0);
+        let c = a + d * t;
+        let dist = c.length();
+        if dist < best_d {
+            (best_d, best_c) = (dist, c);
+        }
+        j = i;
+    }
+    if !inside && best_d >= radius {
+        return None;
+    }
+    let (dir, amount) = if inside {
+        if best_d < 1e-9 {
+            return None;
+        }
+        (best_c / best_d, best_d + radius)
+    } else {
+        let dir = -best_c;
+        let l = dir.length();
+        if l < 1e-9 {
+            return None;
+        }
+        (dir / l, radius - best_d)
+    };
+    Some((e * dir.x + n * dir.y) * amount)
+}
+
+/// Push an oriented box at `p` out of the horizontal polygon `ring` with the
+/// minimum translation over the box axes and the ring's edge normals.
+#[allow(dead_code)]
+fn obb_ring_push(ring: &[DVec3], p: DVec3, half: [f64; 2], yaw: f64, e: DVec3, n: DVec3) -> Option<DVec3> {
+    if ring.len() < 3 {
+        return None;
+    }
+    let (c, s) = (yaw.cos(), yaw.sin());
+    let (hx, hz) = (half[0].max(0.0), half[1].max(0.0));
+    let local: Vec<glam::DVec2> = ring.iter().map(|q| {
+        let d = *q - p;
+        let (x, z) = (d.dot(e), d.dot(n));
+        glam::DVec2::new(c * x + s * z, -s * x + c * z)
+    }).collect();
+    let mut axes: Vec<glam::DVec2> = vec![glam::DVec2::X, glam::DVec2::Y];
+    for i in 0..local.len() {
+        let (a, b) = (local[i], local[(i + 1) % local.len()]);
+        let d = b - a;
+        if d.length_squared() > 1e-12 {
+            axes.push(glam::DVec2::new(-d.y, d.x).normalize());
+        }
+    }
+    let centre = local.iter().fold(glam::DVec2::ZERO, |a, q| a + *q) / local.len() as f64;
+    let (mut overlap, mut axis_out) = (f64::INFINITY, glam::DVec2::X);
+    for axis in axes {
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for q in &local {
+            let d = q.dot(axis);
+            lo = lo.min(d);
+            hi = hi.max(d);
+        }
+        let be = hx * axis.x.abs() + hz * axis.y.abs();
+        let o = hi.min(be) - lo.max(-be);
+        if o <= 0.0 {
+            return None;
+        }
+        if o < overlap {
+            overlap = o;
+            let sign = if (-centre).dot(axis) >= 0.0 { 1.0 } else { -1.0 };
+            axis_out = axis * sign;
+        }
+    }
+    let wx = c * axis_out.x - s * axis_out.y;
+    let wz = s * axis_out.x + c * axis_out.y;
+    Some((e * wx + n * wz) * overlap)
+}
+
 /// Model the second shadow cascade draws trees with, at the least: 20-triangle
 /// icosphere crown (no sub-texel trunk), matching full crown shadow area at 0.73 m/texel.
 const C1_LOD: usize = 3;
@@ -1874,4 +2159,42 @@ pub fn sock_dir(hd: Vec3, up: Vec3, wind_kt: f32, t: f64, k: usize) -> Vec3 {
     let droop = (1.0 - (wind_kt / 15.0).clamp(0.0, 1.0)) * 1.25 + wob;
     let fwd = hd * droop.cos() - up * droop.sin();
     (fwd + hd.cross(up) * wob).normalize()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn flat_world() -> World {
+        let src = Arc::new(crate::sources::Sources::new(crate::fetch::Fetcher::new(std::env::temp_dir().join("gtw-world-surface-test"), true), String::new()));
+        let loader = crate::sources::Loader::new(src, 0);
+        let mut w = World::new(loader, 14);
+        w.flat = Some(0.0);
+        w
+    }
+
+    #[test]
+    fn flat_world_is_grass_at_zero() {
+        let w = flat_world();
+        let p = geo::lla_to_pos(0.0, 0.0, 0.0);
+        let hit = w.surface_at(p).unwrap();
+        assert_eq!(hit.kind, Surface::Grass);
+        assert!(hit.h.abs() < 1e-9);
+        assert!(!hit.water && !hit.road && !hit.sidewalk && !hit.bridge);
+        assert!(!hit.blocked());
+        assert_eq!(w.surface(0.0, 0.0).unwrap().kind, Surface::Grass);
+        assert_eq!(w.terrain_ground(0.0, 0.0).unwrap().h, 0.0);
+    }
+
+    #[test]
+    fn world_query_trait_delegates_to_the_world() {
+        let w = flat_world();
+        let p = geo::lla_to_pos(0.0, 0.0, 0.0);
+        assert_eq!(WorldQuery::surface_at(&w, p).unwrap().kind, Surface::Grass);
+        assert!(WorldQuery::building_push_sphere(&w, p, 0.3).is_none());
+        assert!(WorldQuery::building_push_box(&w, p, [1.0, 0.5], 0.0).is_none());
+        assert!(WorldQuery::tree_push_sphere(&w, p, 0.3).is_none());
+        assert!(WorldQuery::tree_push_box(&w, p, [1.0, 0.5], 0.0).is_none());
+    }
 }
