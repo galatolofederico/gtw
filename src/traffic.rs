@@ -137,8 +137,31 @@ pub struct Traffic {
 
 /// Where the aircraft's origin (between its main wheels) is when parked at a stand.
 fn parked_at(g: &Geo, si: usize, ty: u8) -> (Vec2, Vec2) {
-    let s = &g.stands[si];
-    (s.pos - s.dir * TYPES[ty as usize].nose, s.dir)
+    stand_pose(&g.stands[si], ty)
+}
+
+/// The parked pose of a type at a stand: origin (between the main wheels) and
+/// the direction the nose points, in the airfield's local frame.
+pub fn stand_pose(st: &crate::airports::Stand, ty: u8) -> (Vec2, Vec2) {
+    (st.pos - st.dir * TYPES[ty as usize].nose, st.dir)
+}
+
+/// The built-in aircraft a player takes when this traffic type is parked:
+/// light singles are the C172, business jets the G650. Larger traffic types
+/// are scenery only; the airport menu fallback covers them.
+pub fn player_spec_key(ty: u8) -> Option<&'static str> {
+    match ty {
+        0 => Some("c172"),
+        1 => Some("g650"),
+        _ => None,
+    }
+}
+
+/// The aircraft a fallback start uses for a parked traffic type: the mapped
+/// built-in where one exists, else the caller's chosen type.
+#[allow(dead_code)]
+pub fn fallback_spec_key(ty: u8, chosen: &'static str) -> &'static str {
+    player_spec_key(ty).unwrap_or(chosen)
 }
 
 impl Traffic {
@@ -438,6 +461,18 @@ impl Traffic {
         } else {
             false
         }
+    }
+
+    /// The player takes the aircraft parked at `stand`: it leaves the traffic
+    /// and the stand stays occupied, so arrivals are not put on top of it. A
+    /// second take of the same stand fails (there is nothing left there).
+    pub fn take_parked(&mut self, stand: usize) -> Option<Parked> {
+        let i = self.parked.iter().position(|p| p.stand == stand)?;
+        let p = self.parked.remove(i);
+        if stand < self.taken.len() {
+            self.taken[stand] = true;
+        }
+        Some(p)
     }
 
     /// Someone at a stand pushes back and taxis out.
@@ -762,6 +797,57 @@ pub fn aim_dist(len: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn traffic_with(parked: Vec<Parked>) -> Traffic {
+        Traffic { parked, taken: vec![false; 4], movers: Vec::new(), rng: Rng(1), t: 0.0, next_dep: 0.0, next_arr: 0.0, active: None, lock: None, next_id: 1 }
+    }
+
+    #[test]
+    fn taking_a_parked_aircraft_removes_it_and_keeps_its_identity() {
+        let mut t = traffic_with(vec![
+            Parked { stand: 0, ty: 0, body: 2, fin: 5, leave: 0.0 },
+            Parked { stand: 2, ty: 1, body: 4, fin: 9, leave: 42.0 },
+        ]);
+        let p = t.take_parked(2).expect("the aircraft at stand 2");
+        assert_eq!((p.stand, p.ty, p.body, p.fin, p.leave), (2, 1, 4, 9, 42.0));
+        assert_eq!(t.parked.len(), 1);
+        assert_eq!(t.parked[0].stand, 0);
+        // The stand stays taken so an arrival is not put on top of the player.
+        assert!(t.taken[2]);
+        // There is nothing at that stand any more.
+        assert!(t.take_parked(2).is_none());
+        // A stand that never had one is empty too.
+        assert!(t.take_parked(1).is_none());
+    }
+
+    #[test]
+    fn traffic_types_map_to_built_in_player_aircraft() {
+        assert_eq!(player_spec_key(0), Some("c172"));
+        assert_eq!(player_spec_key(1), Some("g650"));
+        // Regional and larger types are scenery: the runway fallback uses the
+        // aircraft the player chose instead.
+        for ty in 2..=4 {
+            assert_eq!(player_spec_key(ty), None);
+            assert_eq!(fallback_spec_key(ty, "dr400"), "dr400");
+        }
+        // The flyable ones keep their own mapped type.
+        assert_eq!(fallback_spec_key(0, "dr400"), "c172");
+        assert_eq!(fallback_spec_key(1, "dr400"), "g650");
+        // The mapped keys really are built-in types.
+        for ty in 0..=1 {
+            assert!(crate::aircraft::by_key(player_spec_key(ty).unwrap()).is_some());
+        }
+    }
+
+    #[test]
+    fn the_stand_pose_is_in_front_of_the_nose_mark() {
+        let st = crate::airports::Stand { pos: Vec2::new(10.0, 20.0), dir: Vec2::new(0.0, 1.0), size: 1, gate: String::new(), node: 0, terminal: false };
+        let (pos, dir) = stand_pose(&st, 1);
+        assert_eq!(dir, Vec2::Y);
+        assert_eq!(pos, st.pos - Vec2::Y * TYPES[1].nose);
+        // The origin sits the nose length back from the stand's nose mark.
+        assert!(pos.y < st.pos.y);
+    }
 
     /// `AIRPORT=KSFO cargo test --release traffic_runs -- --ignored --nocapture`
     #[test]

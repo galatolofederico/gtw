@@ -140,6 +140,23 @@ pub struct TakenCar {
     pub velocity: DVec3,
 }
 
+/// A parked airport aircraft the player can take: where it stands on the
+/// planet, and which stand and traffic type it is.
+#[derive(Copy, Clone, Debug)]
+pub struct ParkedAircraft {
+    /// Airfield index, as `Traffic`'s field is keyed.
+    pub apt: u32,
+    pub stand: usize,
+    /// Traffic type (0 light single, 1 business jet, larger scenery).
+    pub ty: u8,
+    /// Ground-contact origin in the planet frame (between the main wheels).
+    pub pos: DVec3,
+    /// Bearing: radians from north, clockwise.
+    pub yaw: f64,
+    /// Ground slope along the nose, radians.
+    pub pitch: f64,
+}
+
 /// Whether a [`TrafficBody`] is moving in its lane or parked at the kerb.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum TrafficKind {
@@ -1719,6 +1736,41 @@ impl World {
             Some(FSlot::Ready(f)) => Some(f),
             _ => None,
         }
+    }
+
+    /// The nearest parked airport aircraft within `radius` of `p`, whatever its
+    /// type. `take_parked_aircraft` removes it once the player gets in.
+    pub fn parked_aircraft_near(&self, p: DVec3, radius: f64) -> Option<ParkedAircraft> {
+        let mut best: Option<(f64, ParkedAircraft)> = None;
+        for s in self.fields.values() {
+            let FSlot::Ready(f) = s else { continue };
+            for parked in &f.traffic.parked {
+                let Some(st) = f.geo.stands.get(parked.stand) else { continue };
+                let (lp, dir) = crate::traffic::stand_pose(st, parked.ty);
+                let pos = f.geo.world(lp, f.geo.h(lp) as f64);
+                let d = (pos - p).length();
+                if d > radius || best.as_ref().is_some_and(|(bd, _)| d >= *bd) {
+                    continue;
+                }
+                let slope = (f.geo.h(lp + dir * 3.0) - f.geo.h(lp - dir * 3.0)) as f64 / 6.0;
+                let a = ParkedAircraft {
+                    apt: f.geo.idx,
+                    stand: parked.stand,
+                    ty: parked.ty,
+                    pos,
+                    yaw: (dir.x as f64).atan2(dir.y as f64),
+                    pitch: slope.atan(),
+                };
+                best = Some((d, a));
+            }
+        }
+        best.map(|(_, a)| a)
+    }
+
+    /// Take the aircraft parked at `stand` of airfield `apt` out of the traffic.
+    pub fn take_parked_aircraft(&mut self, apt: u32, stand: usize) -> Option<crate::traffic::Parked> {
+        let Some(FSlot::Ready(f)) = self.fields.get_mut(&apt) else { return None };
+        f.traffic.take_parked(stand)
     }
 
     /// Move the airport traffic on. `player`: the player's aircraft position.
