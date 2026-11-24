@@ -261,9 +261,9 @@ impl Sources {
 
     fn vector_bytes(&self, id: TileId) -> Result<Vec<u8>> {
         let key = format!("vec/{}/{}/{}.pbf", id.z, id.x, id.y);
-        let data = match std::fs::read(self.fetch.root.join(&key)) {
-            Ok(d) if !d.is_empty() => d,
-            _ => {
+        let data = match self.fetch.read_cached(&key) {
+            Some(d) => d,
+            None => {
                 let url = self.vec_template()?.replace("{z}", &id.z.to_string()).replace("{x}", &id.x.to_string()).replace("{y}", &id.y.to_string());
                 self.fetch.get_cached(&key, &url)?
             }

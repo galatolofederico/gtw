@@ -1868,6 +1868,7 @@ impl Game {
             gfx.scale = sc;
         }
         let cache = paths::cache().unwrap_or_else(|| PathBuf::from("."));
+        let legacy_cache = paths::legacy_cache();
         {
             let prune_dir = cache.clone();
             let _ = std::thread::Builder::new().name("cache-prune".into()).spawn(move || {
@@ -1879,7 +1880,7 @@ impl Game {
         // Scripted pictures show the aircraft from the first frame they take.
         r.wait_objs = !args.shots.is_empty() || args.record.is_some();
         // Cached scans load offline too; missing ones keep the procedural layer.
-        r.load_ground_photos(fetch::Fetcher::new(cache.clone(), args.offline));
+        r.load_ground_photos(fetch::Fetcher::new(cache.clone(), args.offline).with_legacy(legacy_cache.clone()));
         let google_key = args.google_key.clone().or_else(|| std::env::var("FABLE_GOOGLE_KEY").ok().filter(|s| !s.is_empty()));
         let google = Arc::new(gmaps::Google::load(google_key));
         if let Some(on) = args.google {
@@ -1891,7 +1892,7 @@ impl Game {
         if let Some(d) = args.photo_detail {
             google.set_detail(d);
         }
-        let src = Arc::new(sources::Sources::with_google(fetch::Fetcher::new(cache, args.offline), args.imagery.clone(), google));
+        let src = Arc::new(sources::Sources::with_google(fetch::Fetcher::new(cache, args.offline).with_legacy(legacy_cache), args.imagery.clone(), google));
         let (mut lat, mut lon, mut status) = (args.lat, args.lon, String::new());
         if let Some(p) = &args.place {
             match geocode(&src.fetch, p) {

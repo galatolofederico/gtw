@@ -79,6 +79,15 @@ pub fn data() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join(LEGACY_NAME))
 }
 
+/// FableFlight's cache, when it is still there beside GTW's own. The fetcher
+/// reads tiles from it that the new cache lacks or got wrong, so a cache that
+/// was already present before the move does not lose the player's tiles.
+pub fn legacy_cache() -> Option<PathBuf> {
+    let current = cache()?;
+    let legacy = dirs::cache_dir()?.join(LEGACY_NAME);
+    (legacy.is_dir() && legacy != current).then_some(legacy)
+}
+
 /// `<base>/gtw`, for callers that already hold the platform's base folder.
 pub fn config_root(base: &Path) -> PathBuf {
     base.join(NAME)

@@ -15,6 +15,9 @@ pub const CACHE_MAX_BYTES: u64 = 3 << 30;
 pub struct Fetcher {
     agent: ureq::Agent,
     pub root: PathBuf,
+    /// FableFlight's old cache, read for tiles the new cache lacks or has
+    /// wrong. What is used is copied across, so the new cache heals as it goes.
+    legacy: Option<PathBuf>,
     missing: Mutex<HashSet<String>>,
     /// Per-host backoff after throttling (429 / 403) or server errors (5xx):
     /// `(retry_after, consecutive_failures)`.
@@ -22,9 +25,36 @@ pub struct Fetcher {
     pub offline: bool,
 }
 
+/// Tile data is immutable and was correct in the old cache; prefer it there.
+/// Time-varying data (radar, snow, clouds) is not, and only falls back to on a
+/// miss.
+fn legacy_first(key: &str) -> bool {
+    ["img/", "elev/", "lc/", "vec/", "ph/", "g3d/", "gimg/"].iter().any(|p| key.starts_with(p))
+}
+
 fn url_host(url: &str) -> &str {
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
     rest.split('/').next().unwrap_or(rest)
+}
+
+/// Whether `data` is the kind of file `key` names. An error page can come back
+/// with `200 OK` (Esri sends an XML `ServiceExceptionReport`), and cached under
+/// a `.jpg` name it would fail to decode for ever. A bad root tile also stops
+/// the terrain quadtree from descending, so every `.jpg`/`.png` must carry its
+/// signature before it is read or written.
+fn looks_like(key: &str, data: &[u8]) -> bool {
+    let Some(first) = data.iter().find(|b| !b.is_ascii_whitespace()) else {
+        return false;
+    };
+    let name = key.to_ascii_lowercase();
+    if name.ends_with(".jpg") || name.ends_with(".jpeg") {
+        data.starts_with(&[0xff, 0xd8, 0xff])
+    } else if name.ends_with(".png") {
+        data.starts_with(b"\x89PNG\r\n\x1a\n")
+    } else {
+        // No binary format cached here (PBF, JSON, GLB, EXR) starts with `<`.
+        *first != b'<'
+    }
 }
 
 impl Fetcher {
@@ -33,7 +63,39 @@ impl Fetcher {
             .timeout_global(Some(Duration::from_secs(20)))
             .user_agent(USER_AGENT)
             .build();
-        Self { agent: cfg.into(), root, missing: Mutex::new(HashSet::new()), backoff: Mutex::new(HashMap::new()), offline }
+        Self { agent: cfg.into(), root, legacy: None, missing: Mutex::new(HashSet::new()), backoff: Mutex::new(HashMap::new()), offline }
+    }
+
+    /// Reads tiles the new cache lacks (or has broken) from the old
+    /// FableFlight cache, copying them across as they are used.
+    pub fn with_legacy(mut self, legacy: Option<PathBuf>) -> Self {
+        self.legacy = legacy;
+        self
+    }
+
+    /// A cache file, if its bytes are the kind of file `key` names. A bad file
+    /// is removed so a later fetch can replace it.
+    fn read_one(path: &std::path::Path, key: &str) -> Option<Vec<u8>> {
+        let data = std::fs::read(path).ok()?;
+        if looks_like(key, &data) {
+            return Some(data);
+        }
+        log::debug!("discarding cached {}: not the expected data", path.display());
+        let _ = std::fs::remove_file(path);
+        None
+    }
+
+    fn write_one(path: &std::path::Path, data: &[u8]) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        // Write to a temp name first so a crash never leaves a half tile.
+        let tmp = path.with_extension(format!("tmp{:?}", std::thread::current().id()).replace(['(', ')'], ""));
+        if std::fs::write(&tmp, data).is_ok() {
+            #[cfg(windows)]
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::rename(&tmp, path);
+        }
     }
 
     fn note_backoff(&self, host: &str, base_secs: u64) {
@@ -70,35 +132,56 @@ impl Fetcher {
         }
     }
 
+    /// The cached bytes for `key`, when they are the file the key expects.
+    /// Immutable tiles come from the old FableFlight cache when it has them:
+    /// the new cache may hold a bad fetch (an error page, or an image of the
+    /// wrong place), while the old one was good. Anything used from the old
+    /// cache is copied across. Bad files are thrown away, so a later fetch can
+    /// replace them.
+    pub fn read_cached(&self, key: &str) -> Option<Vec<u8>> {
+        let path = self.root.join(key);
+        let legacy = self.legacy.as_ref().map(|r| r.join(key));
+        let prefer_legacy = legacy.is_some() && legacy_first(key);
+        if prefer_legacy {
+            if let Some(data) = legacy.as_deref().and_then(|p| Self::read_one(p, key)) {
+                // Copy it only when the new cache differs: do not rewrite every
+                // tile on every start.
+                if Self::read_one(&path, key).as_deref() != Some(data.as_slice()) {
+                    Self::write_one(&path, &data);
+                }
+                return Some(data);
+            }
+        }
+        if let Some(data) = Self::read_one(&path, key) {
+            return Some(data);
+        }
+        if let Some(data) = legacy.as_deref().and_then(|p| Self::read_one(p, key)) {
+            Self::write_one(&path, &data);
+            return Some(data);
+        }
+        None
+    }
+
     /// GET with a disk cache at `<root>/<key>`. Permanently missing tiles
     /// (404 / 204 / 410) are remembered for the session so they are not
     /// retried every frame; throttling (403 / 429) and server errors (5xx)
     /// back off per host instead.
     pub fn get_cached(&self, key: &str, url: &str) -> Result<Vec<u8>> {
-        let path = self.root.join(key);
-        if let Ok(data) = std::fs::read(&path) {
-            if !data.is_empty() {
-                return Ok(data);
-            }
+        if let Some(data) = self.read_cached(key) {
+            return Ok(data);
         }
+        let path = self.root.join(key);
         if self.missing.lock().contains(key) {
             return Err(anyhow!("missing {key}"));
         }
         match self.get(url) {
-            Ok(data) if !data.is_empty() => {
-                if let Some(dir) = path.parent() {
-                    let _ = std::fs::create_dir_all(dir);
-                }
-                // Write to a temp name first so a crash never leaves a half tile.
-                let tmp = path.with_extension(format!("tmp{:?}", std::thread::current().id()).replace(['(', ')'], ""));
-                if std::fs::write(&tmp, &data).is_ok() {
-                    let _ = std::fs::rename(&tmp, &path);
-                }
+            Ok(data) if looks_like(key, &data) => {
+                Self::write_one(&path, &data);
                 Ok(data)
             }
             Ok(_) => {
                 self.missing.lock().insert(key.to_string());
-                Err(anyhow!("empty {key}"))
+                Err(anyhow!("unexpected data for {key}"))
             }
             Err(e) => {
                 if matches!(e.downcast_ref::<ureq::Error>(), Some(ureq::Error::StatusCode(404 | 204 | 410))) {
@@ -191,6 +274,87 @@ mod tests {
         assert!(new.exists(), "newest tile should remain");
         assert!(g3d.exists(), "g3d directory should be untouched");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cached_error_pages_are_not_tiles() {
+        // The real signatures pass.
+        assert!(looks_like("img/2/0/0.jpg", b"\xff\xd8\xff\xe0\x00\x10JFIF"));
+        assert!(looks_like("elev/2/0/0.png", b"\x89PNG\r\n\x1a\n\x00\x00"));
+        assert!(looks_like("vec/2/0/0.pbf", &[0x1a, 0x00, 0x02]));
+        assert!(looks_like("ph/rock/files.json", br#"{"Diffuse": []}"#));
+        // An XML/HTML error page saved under a tile name does not.
+        assert!(!looks_like("img/2/0/0.jpg", b"<?xml version='1.0'?><ServiceExceptionReport/>"));
+        assert!(!looks_like("img/2/0/0.jpg", b"   \n<html>bad gateway</html>"));
+        assert!(!looks_like("elev/2/0/0.png", b"<html>bad gateway</html>"));
+        assert!(!looks_like("vec/2/0/0.pbf", b"  <Error/>"));
+        assert!(!looks_like("img/2/0/0.jpg", b""));
+        assert!(!looks_like("img/2/0/0.jpg", b"   \n"));
+    }
+
+    #[test]
+    fn a_poisoned_cache_entry_is_thrown_away() {
+        let dir = std::env::temp_dir().join(format!("fable-fetch-poison-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let key = "img/2/2/2.jpg";
+        let path = dir.join(key);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"<?xml version='1.0'?><ServiceExceptionReport/>").unwrap();
+        let f = Fetcher::new(dir.clone(), true);
+        assert!(f.read_cached(key).is_none(), "an error page is not a tile");
+        assert!(!path.exists(), "and it is removed so the next fetch replaces it");
+        // A real JPEG is read as it is, without the network.
+        std::fs::write(&path, b"\xff\xd8\xff\xe0real tile").unwrap();
+        assert_eq!(f.read_cached(key).unwrap(), b"\xff\xd8\xff\xe0real tile");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tiles_prefer_the_old_cache_and_heal_the_new_one() {
+        let primary = std::env::temp_dir().join(format!("fable-fetch-new-{}", std::process::id()));
+        let legacy = std::env::temp_dir().join(format!("fable-fetch-old-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&primary);
+        let _ = std::fs::remove_dir_all(&legacy);
+        let key = "img/9/270/186.jpg";
+        let wrong = b"\xff\xd8\xff\xe0a tile of the wrong place";
+        let good = b"\xff\xd8\xff\xe0the right tile";
+        for (root, data) in [(&primary, &wrong[..]), (&legacy, &good[..])] {
+            let p = root.join(key);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, data).unwrap();
+        }
+        let f = Fetcher::new(primary.clone(), true).with_legacy(Some(legacy.clone()));
+        assert_eq!(f.read_cached(key).unwrap(), good, "the old cache's tile wins");
+        assert_eq!(std::fs::read(primary.join(key)).unwrap(), good, "and heals the new cache");
+        // A key the new cache lacks comes across too.
+        let key = "elev/9/1/2.png";
+        let png = b"\x89PNG\r\n\x1a\nold but good";
+        let p = legacy.join(key);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, png).unwrap();
+        assert_eq!(f.read_cached(key).unwrap(), png);
+        assert_eq!(std::fs::read(primary.join(key)).unwrap(), png);
+        let _ = std::fs::remove_dir_all(&primary);
+        let _ = std::fs::remove_dir_all(&legacy);
+    }
+
+    #[test]
+    fn time_varying_data_keeps_the_new_cache() {
+        let primary = std::env::temp_dir().join(format!("fable-fetch-new-radar-{}", std::process::id()));
+        let legacy = std::env::temp_dir().join(format!("fable-fetch-old-radar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&primary);
+        let _ = std::fs::remove_dir_all(&legacy);
+        let key = "radar/coverage/1/2/3.png";
+        let (new, old) = (b"\x89PNG\r\n\x1a\nnew radar", b"\x89PNG\r\n\x1a\nold radar");
+        for (root, data) in [(&primary, &new[..]), (&legacy, &old[..])] {
+            let p = root.join(key);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, data).unwrap();
+        }
+        let f = Fetcher::new(primary.clone(), true).with_legacy(Some(legacy.clone()));
+        assert_eq!(f.read_cached(key).unwrap(), new);
+        let _ = std::fs::remove_dir_all(&primary);
+        let _ = std::fs::remove_dir_all(&legacy);
     }
 
     #[test]
