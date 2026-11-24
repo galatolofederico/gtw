@@ -91,49 +91,49 @@ cargo run --release -- --help
 
 ### Implementation
 
-- [ ] 2.1 Add `Mode::Walk` beside `Menu` and `Fly`; update every exhaustive `Mode` match in `src/main.rs`.
-- [ ] 2.2 Add `Game.character: Character`, `Game.plane_visible: bool`, `Game::focus_pos()`, `Game::focus_yaw()`, and `Game::active_context()`.
-- [ ] 2.3 Add `--start foot|car|plane` and `--flat`; default normal starts to `foot`, `--no-menu` with an aircraft, airport, or altitude flag stays a plane start for existing flight tests and the launcher bench, and `--flat` skips the network start-elevation lookup.
-- [ ] 2.4 Update `Menu::begin` and `Game::goto` so the normal start and “go to place” place the character on the ground, with a safe-point search if the chosen point is water, a building, or missing a tile.
-- [ ] 2.5 Create `src/character.rs`: `Character`, `CharacterControls`, capsule radius 0.30 m, height 1.80 m, eye 1.65 m, walk 1.6 m/s, run 4.5 m/s, sprint 7.0 m/s, jump 1.1 m, step-up 0.35 m, slope limit 40°, and the `step` function over `WorldQuery`.
-- [ ] 2.6 Implement surface speed multipliers, fall damage above 4 m/s impact, health regeneration after 5 s at 2 HP/s, last-safe-point tracking, and nearby respawn on death.
-- [ ] 2.7 Create `src/avatar.rs`: rigid pelvis, torso, head, upper/lower arms, hands, thighs, shins, and feet; material codes for skin, cloth, hair, and shoes; four clothing palettes; procedural idle/walk/run/jump poses.
-- [ ] 2.8 Add the avatar mesh base after `birds::BASE` and append the avatar meshes to the instanced mesh library in `Game::new`.
-- [ ] 2.9 Extend `src/shaders/inst.wgsl` with a character material branch selected by `Inst.ext.w = 2`; keep the existing vehicle and rubble branches unchanged.
-- [ ] 2.10 Add walking third-person over-the-shoulder and first-person cameras, camera collision against ground and buildings, and a C-key toggle; hide the avatar in first person.
-- [ ] 2.11 Replace the global flight binding model with `bind::Context { Foot, Car, Flight }`; add foot actions for move, look, sprint, jump, interact, camera, and first-person toggle.
-- [ ] 2.12 Add context-aware `Bindings::key_of`, `map_key`, and `set_key`; keep global actions available in every context.
-- [ ] 2.13 Add the foot gamepad layout in `src/padmap.rs` and the controls context tabs in `src/settings_ui.rs`.
-- [ ] 2.14 Add foot action labels and HUD strings to the three locale files.
-- [ ] 2.15 Add the health bar to the ground HUD and hide flight instruments when `Mode::Walk`.
-- [ ] 2.16 Branch `Game::frame`, `controls`, camera, weather, world streaming, live traffic, minimap, birds, and multiplayer sending on `focus_pos()`; do not advance or draw the aircraft when `plane_visible` is false.
-- [ ] 2.17 Add `Settings::ground_first_person`, `avatar_style`, and `autosave` with defaults; change `Settings::default().multiplayer` to `false` while leaving the multiplayer code and settings reachable.
-- [ ] 2.18 Add `tests/gtw_smoke.rs` with headless `--flat --start foot --hold` runs; use `CARGO_BIN_EXE_fablegame` until Phase 7 renames the binary.
+- [x] 2.1 Add `Mode::Walk` beside `Menu` and `Fly`; update every exhaustive `Mode` match in `src/main.rs`.
+- [x] 2.2 Add `Game.character: Character`, `Game.plane_visible: bool`, `Game::focus_pos()`, `Game::focus_yaw()`, and `Game::active_context()`.
+- [x] 2.3 Add `--start foot|car|plane` and `--flat`; default normal starts to `foot`, `--no-menu` with an aircraft, airport, or altitude flag stays a plane start for existing flight tests and the launcher bench, and `--flat` skips the network start-elevation lookup.
+- [x] 2.4 Update `Menu::begin` and `Game::goto` so the normal start and “go to place” place the character on the ground, with a safe-point search if the chosen point is water, a building, or missing a tile.
+- [x] 2.5 Create `src/character.rs`: `Character`, `CharacterControls`, capsule radius 0.30 m, height 1.80 m, eye 1.65 m, walk 1.6 m/s, run 4.5 m/s, sprint 7.0 m/s, jump 1.1 m, step-up 0.35 m, slope limit 40°, and the `step` function over `WorldQuery`.
+- [x] 2.6 Implement surface speed multipliers, fall damage above 4 m/s impact, health regeneration after 5 s at 2 HP/s, last-safe-point tracking, and nearby respawn on death.
+- [x] 2.7 Create `src/avatar.rs`: rigid pelvis, torso, head, upper/lower arms, hands, thighs, shins, and feet; material codes for skin, cloth, hair, and shoes; four clothing palettes; procedural idle/walk/run/jump poses.
+- [x] 2.8 Add the avatar mesh base after `birds::BASE` and append the avatar meshes to the instanced mesh library in `Game::new`.
+- [x] 2.9 Extend `src/shaders/inst.wgsl` with a character material branch selected by `Inst.ext.w = 2`; keep the existing vehicle and rubble branches unchanged.
+- [x] 2.10 Add walking third-person over-the-shoulder and first-person cameras, camera collision against ground and buildings, and a C-key toggle; hide the avatar in first person.
+- [x] 2.11 Replace the global flight binding model with `bind::Context { Foot, Car, Flight }`; add foot actions for move, look, sprint, jump, interact, camera, and first-person toggle.
+- [x] 2.12 Add context-aware `Bindings::key_of`, `map_key`, and `set_key`; keep global actions available in every context.
+- [x] 2.13 Add the foot gamepad layout in `src/padmap.rs` and the controls context tabs in `src/settings_ui.rs`.
+- [x] 2.14 Add foot action labels and HUD strings to the three locale files.
+- [x] 2.15 Add the health bar to the ground HUD and hide flight instruments when `Mode::Walk`.
+- [x] 2.16 Branch `Game::frame`, `controls`, camera, weather, world streaming, live traffic, minimap, birds, and multiplayer sending on `focus_pos()`; do not advance or draw the aircraft when `plane_visible` is false.
+- [x] 2.17 Add `Settings::ground_first_person`, `avatar_style`, and `autosave` with defaults; change `Settings::default().multiplayer` to `false` while leaving the multiplayer code and settings reachable.
+- [x] 2.18 Add `tests/gtw_smoke.rs` with headless `--flat --start foot --hold` runs; use `CARGO_BIN_EXE_fablegame` until Phase 7 renames the binary.
 
 ### Tests
 
-- [ ] 2.19 Unit-test character walk, run, and sprint speed on flat ground in `src/character.rs`.
-- [ ] 2.20 Unit-test surface speed multipliers for all six classes in `src/character.rs`.
-- [ ] 2.21 Unit-test step-up at 0.34 m and refusal at 0.36 m in `src/character.rs`.
-- [ ] 2.22 Unit-test slope walking at 39° and sliding at 41° in `src/character.rs`.
-- [ ] 2.23 Unit-test jump apex, landing, fall damage thresholds, health regeneration, death, and nearby respawn in `src/character.rs`.
-- [ ] 2.24 Unit-test that `Character::step` produces finite state under large `dt` and at world bounds in `src/character.rs`.
-- [ ] 2.25 Unit-test avatar part count, palette bounds, and finite matrices for idle/walk/run/jump poses in `src/avatar.rs`.
-- [ ] 2.26 Unit-test context isolation: the same physical key maps to different actions in Foot, Car, and Flight; global actions remain available in all three in `src/bind.rs`.
-- [ ] 2.27 Unit-test `focus_pos()` and `plane_visible` selection for Walk, Drive, and Fly in `src/main.rs`.
-- [ ] 2.28 Unit-test Settings defaults (`multiplayer == false`, ground first-person off, avatar style 0, autosave on), the first-person avatar-hidden state, and health HUD formatting in `src/settings.rs` and `src/main.rs`.
-- [ ] 2.29 Run the headless smoke test for `--start foot` from `tests/gtw_smoke.rs`.
+- [x] 2.19 Unit-test character walk, run, and sprint speed on flat ground in `src/character.rs`.
+- [x] 2.20 Unit-test surface speed multipliers for all six classes in `src/character.rs`.
+- [x] 2.21 Unit-test step-up at 0.34 m and refusal at 0.36 m in `src/character.rs`.
+- [x] 2.22 Unit-test slope walking at 39° and sliding at 41° in `src/character.rs`.
+- [x] 2.23 Unit-test jump apex, landing, fall damage thresholds, health regeneration, death, and nearby respawn in `src/character.rs`.
+- [x] 2.24 Unit-test that `Character::step` produces finite state under large `dt` and at world bounds in `src/character.rs`.
+- [x] 2.25 Unit-test avatar part count, palette bounds, and finite matrices for idle/walk/run/jump poses in `src/avatar.rs`.
+- [x] 2.26 Unit-test context isolation: the same physical key maps to different actions in Foot, Car, and Flight; global actions remain available in all three in `src/bind.rs`.
+- [x] 2.27 Unit-test `focus_pos()` and `plane_visible` selection for Walk, Drive, and Fly in `src/main.rs`.
+- [x] 2.28 Unit-test Settings defaults (`multiplayer == false`, ground first-person off, avatar style 0, autosave on), the first-person avatar-hidden state, and health HUD formatting in `src/settings.rs` and `src/main.rs`.
+- [x] 2.29 Run the headless smoke test for `--start foot` from `tests/gtw_smoke.rs`.
 
 ### Verification
 
-- [ ] Run `cargo check --all-targets`; it exits 0.
-- [ ] Run `cargo test`; it exits 0 and all character, avatar, bind, and focus tests pass.
-- [ ] Run `cargo test --test gtw_smoke`; it exits 0.
-- [ ] Run `cargo test --test shaders`; it exits 0 with the modified `inst.wgsl`.
+- [x] Run `cargo check --all-targets`; it exits 0.
+- [x] Run `cargo test`; it exits 0 and all character, avatar, bind, and focus tests pass.
+- [x] Run `cargo test --test gtw_smoke`; it exits 0.
+- [x] Run `cargo test --test shaders`; it exits 0 with the modified `inst.wgsl`.
 - [ ] Run `cargo run --release -- --place "Buenos Aires" --start foot`; spawn on foot, walk, run, sprint, jump, toggle first person, climb a kerb, and verify deep water blocks.
-- [ ] Run `cargo run --release -- --headless --flat --start foot --hold 5`; it exits 0.
-- [ ] Run `cargo build --release --locked`; it exits 0.
-- [ ] Confirm no new skipped, quarantined, or failing tests.
+- [x] Run `cargo run --release -- --headless --flat --start foot --hold 5`; it exits 0.
+- [x] Run `cargo build --release --locked`; it exits 0.
+- [x] Confirm no new skipped, quarantined, or failing tests.
 
 **Done when:** The player can spawn on foot anywhere, traverse terrain with the specified moveset, take fall damage, die, respawn nearby, and never sees or depends on an aircraft at spawn.
 
