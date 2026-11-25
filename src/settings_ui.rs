@@ -36,6 +36,12 @@ pub enum Section {
 impl Section {
     pub const ALL: [Section; 7] = [Section::General, Section::Graphics, Section::Sound, Section::Camera, Section::Controls, Section::Map, Section::Multiplayer];
 
+    /// Whether the section is offered in this build. Multiplayer is kept in
+    /// the code but hidden until [`mp::ENABLED`] is turned back on.
+    pub fn available(self) -> bool {
+        self != Section::Multiplayer || mp::ENABLED
+    }
+
     /// The name the command line goes by (`--settings graphics`, `--pause-menu settings:graphics`).
     pub fn name(self) -> &'static str {
         match self {
@@ -81,16 +87,23 @@ impl Section {
             "camera" | "view" | "cam" => Section::Camera,
             "controls" | "bindings" | "input" | "keys" => Section::Controls,
             "map" | "data" | "imagery" | "google" => Section::Map,
-            "multiplayer" | "mp" | "online" | "network" => Section::Multiplayer,
+            "multiplayer" | "mp" | "online" | "network" if mp::ENABLED => Section::Multiplayer,
             _ => return None,
         })
     }
 
-    /// The section before or after this one, round and round.
+    /// The section before or after this one, round and round (skipping the
+    /// ones this build does not offer).
     pub fn cycle(self, next: bool) -> Section {
         let n = Section::ALL.len();
-        let i = Section::ALL.iter().position(|s| *s == self).unwrap_or(0);
-        Section::ALL[(i + if next { 1 } else { n - 1 }) % n]
+        let mut i = Section::ALL.iter().position(|s| *s == self).unwrap_or(0);
+        for _ in 0..n {
+            i = (i + if next { 1 } else { n - 1 }) % n;
+            if Section::ALL[i].available() {
+                return Section::ALL[i];
+            }
+        }
+        self
     }
 
     /// A small line icon for the sidebar, `s` points across, centred on `c`.
@@ -235,6 +248,9 @@ pub fn show(ctx: &egui::Context, game: &mut Game, in_flight: bool) -> bool {
 
 impl Game {
     pub(crate) fn settings_screen(&mut self, ctx: &egui::Context, in_flight: bool) -> bool {
+        if !self.settings_sec.available() {
+            self.settings_sec = Section::General;
+        }
         let screen = ctx.content_rect();
         let mut closed = false;
         egui::Area::new(egui::Id::unique("settings_screen")).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
@@ -256,7 +272,7 @@ impl Game {
             // the chosen tab's marker slides to it.
             let marker = s.painter().add(egui::Shape::Noop);
             let mut on_rect = None;
-            for sec in Section::ALL {
+            for sec in Section::ALL.into_iter().filter(|s| s.available()) {
                 let r = self.settings_tab(&mut s, sec);
                 if self.settings_sec == sec {
                     on_rect = Some(r.rect);
@@ -1220,15 +1236,16 @@ mod tests {
 
     #[test]
     fn sections_parse_and_cycle() {
-        for s in Section::ALL {
+        for s in Section::ALL.into_iter().filter(|s| s.available()) {
             assert_eq!(Section::parse(s.name()), Some(s));
             assert_eq!(s.cycle(true).cycle(false), s);
         }
         assert_eq!(Section::parse("bindings"), Some(Section::Controls));
         assert_eq!(Section::parse("Graphics"), Some(Section::Graphics));
-        assert_eq!(Section::Map.cycle(true), Section::Multiplayer);
-        assert_eq!(Section::Multiplayer.cycle(true), Section::General);
-        assert_eq!(Section::parse("mp"), Some(Section::Multiplayer));
+        // Multiplayer is hidden while disabled.
+        assert_eq!(Section::Map.cycle(true), Section::General);
+        assert_eq!(Section::General.cycle(false), Section::Map);
+        assert_eq!(Section::parse("mp").is_some(), mp::ENABLED);
         assert_eq!(Section::parse("nope"), None);
         // `--pause-menu controls` is the key list, not the settings section.
         assert_eq!(crate::menu::Page::parse("controls"), Some(crate::menu::Page::Controls));

@@ -1,5 +1,10 @@
 # Hosting a GTW Multiplayer Relay
 
+> **Multiplayer is disabled in this version.** Current GTW builds do not
+> connect to a relay or read the server list, and the menus have no
+> multiplayer or server settings. This document and the relay code are kept
+> for a future release.
+
 GTW flight multiplayer uses lightweight UDP relay servers, inherited from the upstream FableFlight relay network. You can host one for friends, join the public relay network, or run a separate private network.
 
 ## Quick start
@@ -21,7 +26,7 @@ docker run -d --name gtw-relay --restart unless-stopped \
   ghcr.io/danux-be/fableflight-relay
 ```
 
-Allow inbound **UDP 7480** in your server firewall and hosting provider's firewall. Players can select your relay in **Settings → Multiplayer**, or enter its hostname manually. The game can also use `--mp host[,name]` for testing.
+Allow inbound **UDP 7480** in your server firewall and hosting provider's firewall.
 
 ## Configuration
 

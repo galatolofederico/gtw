@@ -52,7 +52,7 @@ cargo build --release --locked
 - **Ground play:** start on foot anywhere; walk, run, sprint, jump, step up kerbs, and climb or slide on slopes. Six surface classes (asphalt, concrete, gravel, grass, sand, snow/ice) change grip, speed, and footstep audio, and weather modifies them.
 - **Cars:** take any of the eight existing road vehicles while parked or moving, drive them with single-body arcade physics, drift with the handbrake, shove other cars aside in solid two-way collisions, and get out again.
 - **Flight:** the upstream aircraft, cockpits, systems, and flight model: Cessna 172RG, Robin DR400, Beechcraft A36 Bonanza, Boeing 747, Gulfstream G650, F/A-18, F-4, F-22, Concorde, SR-71, Starship, and downloadable [FlightGear aircraft](https://wiki.flightgear.org/FGAddon).
-- **World:** real elevation, OpenStreetMap roads and buildings, ESA WorldCover land cover, satellite imagery, real METAR weather, seasonal and live snow, a satellite/road minimap, live ADS-B traffic, and flight multiplayer.
+- **World:** real elevation, OpenStreetMap roads and buildings, ESA WorldCover land cover, satellite imagery, real METAR weather, seasonal and live snow, a satellite/road minimap, and live ADS-B traffic.
 - **Controls:** remappable keyboard, joystick, throttle, pedals, and gamepad, with separate on-foot, car, and flight contexts in **Settings → Controls**.
 - **Arcade mode:** optional boosts, missiles, and in-flight respawns, flight-only and off by default. Enable it in **Settings → General** or pass `--arcade`.
 - **AI copilot:** optional MCP integration; see [docs/mcp.md](docs/mcp.md).
@@ -62,7 +62,7 @@ The UI supports English (`en`), French (`fr`), and Korean (`ko`). Settings, bind
 
 ## Non-goals (v1)
 
-GTW v1 deliberately has **no** pedestrians, crowds, police or wanted levels, building interiors, missions, economy, swimming or diving, motorcycles, bicycles, boats or trains, ground weapons, or multiplayer ground play. Flight-only arcade weapons remain behind the off-by-default arcade toggle. Tunnels stay at grade and are not enterable.
+GTW v1 deliberately has **no** pedestrians, crowds, police or wanted levels, building interiors, missions, economy, swimming or diving, motorcycles, bicycles, boats or trains, ground weapons, or multiplayer ground play. Flight multiplayer is not available in this version. Flight-only arcade weapons remain behind the off-by-default arcade toggle. Tunnels stay at grade and are not enterable.
 
 ## Starting a run
 
@@ -159,14 +159,7 @@ When using optional Google Maps imagery/3D tiles, prefer setting the `FABLE_GOOG
 
 ## Multiplayer
 
-Flight multiplayer is **off by default**; when on, it uses a random pilot name (such as `SwiftKestrel27`). Change the name, pick a server, or turn it on in the **Multiplayer** settings. Offline and scripted runs (`--offline`, `--shot`, `--record`, `--bench`, `--headless`) stay off the network unless multiplayer is enabled. Ground play is single-player in v1. To host a relay:
-
-```sh
-cd relay
-docker compose up -d
-```
-
-Allow UDP port `7480` through your firewall. Read [docs/relay.md](docs/relay.md) for more info.
+Flight multiplayer is **not available in this version**. The game does not connect to the relay network, does not read its server list, and shows no multiplayer or server options in the menus. The multiplayer protocol, relay and drawing code remain in the source for a future release; see [docs/relay.md](docs/relay.md) for the development notes.
 
 ## Assets & Attributions
 

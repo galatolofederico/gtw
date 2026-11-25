@@ -48,7 +48,8 @@ pub struct Settings {
     pub real_time: bool,
     /// snow lying on the ground (snow.rs)
     pub snow: crate::snow::Mode,
-    /// multiplayer (mp.rs): on, the relay ("host" or "host:port"), our name
+    /// multiplayer (mp.rs): kept for a future release. The game ignores
+    /// these while `mp::ENABLED` is false and never connects.
     pub multiplayer: bool,
     pub mp_server: String,
     pub mp_name: String,
@@ -109,15 +110,14 @@ impl Settings {
     }
 
     /// As `load`, and whether they should be saved at once: a name was just
-    /// made up, or multiplayer just turned on for settings from before it
-    /// was the default (so that both last, without waiting for a change).
+    /// made up, or multiplayer settings from an older release were migrated.
     pub fn load_new() -> (Self, bool) {
         let j = path().and_then(|p| std::fs::read(p).ok()).and_then(|d| serde_json::from_slice::<serde_json::Value>(&d).ok());
         let mut fresh = j.as_ref().is_none_or(|j| j["mp_default_on"].as_bool() != Some(true));
         let mut s = j.map_or_else(Self::default, |j| Self::from_json(&j));
         // Nobody flies nameless: a pilot without a name gets one at random
-        // (kept from then on, and theirs to change in Settings, Multiplayer).
-        if s.mp_name.is_empty() {
+        // (kept for a future release where multiplayer is offered again).
+        if crate::mp::ENABLED && s.mp_name.is_empty() {
             s.mp_name = crate::mp::random_name();
             fresh = true;
         }

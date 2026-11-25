@@ -531,9 +531,10 @@ struct Args {
     cursor: Option<(f64, f64)>,
     clicks: Vec<MouseScript>,
     start_view: Option<u8>,
-    /// --mp server[,name]: multiplayer on, through this relay
+    /// --mp server[,name]: kept for a future release; ignored while
+    /// `mp::ENABLED` is false (the game never connects)
     mp: Option<(String, Option<String>)>,
-    /// --mp-list URL: read the server list from there (testing a relay)
+    /// --mp-list URL: kept for a future release; no list is read while disabled
     mp_list: Option<String>,
     /// --mp-mirror: a copy of our own aircraft flies 25 m off the left wing as
     /// another player would be drawn (to check the drawing, no network)
@@ -1243,9 +1244,10 @@ fn parse_args_from(v: &[String]) -> Result<Args, String> {
     Ok(a)
 }
 
-/// Runs that stay off the network unless `--mp` asks: offline, and the
-/// scripted ones (screenshots, recordings, benchmarks, headless checks),
-/// so they neither show up to the other pilots nor depend on the relays.
+/// Runs that stay off the network (offline, and the scripted screenshots,
+/// recordings, benchmarks and headless checks), so they neither show up to
+/// other pilots nor depend on the relays. Kept for when multiplayer returns;
+/// the shipped client does not connect at all.
 fn mp_kept_off(a: &Args) -> bool {
     a.offline || a.bench.is_some() || !a.shots.is_empty() || std::env::args().any(|x| matches!(x.as_str(), "--headless" | "--record" | "--still"))
 }
@@ -2157,8 +2159,8 @@ impl Game {
             prefs_lang: args.lang.or(prefs.lang),
             prefs_t: 0.0,
             live: live::Live::new(prefs.live_traffic),
-            mp_on: (prefs.multiplayer && !mp_kept_off(args)) || args.mp.is_some(),
-            mp_held: prefs.multiplayer && mp_kept_off(args) && args.mp.is_none(),
+            mp_on: mp::ENABLED && ((prefs.multiplayer && !mp_kept_off(args)) || args.mp.is_some()),
+            mp_held: mp::ENABLED && prefs.multiplayer && mp_kept_off(args) && args.mp.is_none(),
             mp_server: args.mp.as_ref().map_or(prefs.mp_server.clone(), |m| m.0.clone()),
             mp_name: args.mp.as_ref().and_then(|m| m.1.clone()).unwrap_or(prefs.mp_name.clone()),
             mp: None,
@@ -3292,6 +3294,15 @@ impl Game {
     fn update_mp(&mut self, in_menu: bool) {
         if self.mp_mirror {
             self.mp_players = if in_menu || self.mode != Mode::Fly { Vec::new() } else { vec![self.mirror_player()] };
+            return;
+        }
+        // Multiplayer is not available in this version: keep the connection,
+        // server list and drawing code for later, but never go on the network.
+        if !mp::ENABLED {
+            self.mp = None;
+            self.mp_players.clear();
+            self.mp_world.clear();
+            (self.mp_world_total, self.mp_world_known) = (0, false);
             return;
         }
         // "auto": the server that answers fastest, kept once chosen.
@@ -8203,7 +8214,7 @@ impl Game {
             }
             // The other players (multiplayer, connected): an arrow each, the
             // way they fly, with their name; more about them under the mouse.
-            if !self.mp_world.is_empty() {
+            if mp::ENABLED && !self.mp_world.is_empty() {
                 let col = MP_COLOUR;
                 let shade = Color32::from_black_alpha(170);
                 let d = (alt / 111_000.0 * 0.03).clamp(0.002, 0.6);
@@ -8295,7 +8306,7 @@ impl Game {
             }
             // Top middle, while multiplayer is on: how many fly (they are on
             // the globe), or how the connection stands; it opens its settings.
-            if self.mp_on {
+            if mp::ENABLED && self.mp_on {
                 let (col, line) = self.mp_line();
                 let (title, sub) = match self.mp_flying() {
                     Some(n) => (n, line),
@@ -9007,7 +9018,7 @@ impl Game {
         let nearest_live = self.live.planes.iter().min_by(|a, b| (a.pos - me).length().total_cmp(&(b.pos - me).length()));
         let mp_status = self.mp.as_ref().map(|m| m.status());
         let server = self.mp.as_ref().map(|m| self.mp_server_name(&m.server)).unwrap_or_default();
-        cells(ui, 2, 92.0, |ui, i| {
+        cells(ui, if mp::ENABLED { 2 } else { 1 }, 92.0, |ui, i| {
             if i == 0 {
                 tag(ui, t!("game.live_traffic"));
                 if !self.live.enabled() {
@@ -9310,7 +9321,7 @@ impl Game {
                 }
             }
             // The other players: a tag beside each.
-            if let (true, Some((vp, cam))) = (self.show_hud && flying && !self.mp_players.is_empty(), self.live_view) {
+            if let (true, Some((vp, cam))) = (mp::ENABLED && self.show_hud && flying && !self.mp_players.is_empty(), self.live_view) {
                 let screen = ctx.content_rect();
                 let painter = ctx.layer_painter(egui::LayerId::background());
                 let col = Color32::from_rgb(255, 205, 90);

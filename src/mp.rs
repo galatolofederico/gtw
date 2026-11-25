@@ -22,6 +22,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Multiplayer is disabled in this version. The protocol, relay client,
+/// server directory, drawing and menu code are kept for a later release, but
+/// while this is false the game never starts a relay or reads the network's
+/// server list, and the menus do not offer multiplayer.
+pub const ENABLED: bool = false;
+
 /// how far in the past the others are shown (s)
 const DELAY: f64 = 0.15;
 /// how often our state goes out
@@ -93,18 +99,34 @@ pub struct Mp {
 
 impl Mp {
     /// Connects to the relay at `server` ("host" or "host:port") as `name`.
+    /// Does nothing while [`ENABLED`] is false.
     pub fn start(server: &str, name: &str) -> Self {
+        Self::start_with(server, name, ENABLED)
+    }
+
+    /// The tests' direct entry to the relay client, which must keep working
+    /// for a future release even while [`ENABLED`] hides it from players.
+    #[cfg(test)]
+    fn start_for_test(server: &str, name: &str) -> Self {
+        Self::start_with(server, name, true)
+    }
+
+    fn start_with(server: &str, name: &str, network: bool) -> Self {
         let shared = Arc::new(Shared { epoch: Instant::now(), ours: Mutex::new(None), peers: Mutex::new(HashMap::new()), status: Mutex::new(Status::Connecting), stop: AtomicBool::new(false), watching: AtomicBool::new(false), world: Mutex::new(World::default()) });
-        let (sv, nm, sh) = (server.trim().to_string(), proto::clean_name(name), shared.clone());
-        std::thread::Builder::new()
-            .name("multiplayer".into())
-            .spawn(move || {
-                if let Err(e) = run(&sv, &nm, &sh) {
-                    log::warn!("multiplayer: {e}");
-                    *sh.status.lock().unwrap() = Status::Error(e);
-                }
-            })
-            .ok();
+        if network {
+            let (sv, nm, sh) = (server.trim().to_string(), proto::clean_name(name), shared.clone());
+            std::thread::Builder::new()
+                .name("multiplayer".into())
+                .spawn(move || {
+                    if let Err(e) = run(&sv, &nm, &sh) {
+                        log::warn!("multiplayer: {e}");
+                        *sh.status.lock().unwrap() = Status::Error(e);
+                    }
+                })
+                .ok();
+        } else {
+            *shared.status.lock().unwrap() = Status::Error("multiplayer is disabled".into());
+        }
         Mp { server: server.trim().to_string(), name: proto::clean_name(name), auto: false, shared }
     }
 
@@ -341,9 +363,12 @@ pub struct Directory {
 
 impl Directory {
     /// Reads the list from `urls` (the first that answers), keeping a copy
-    /// in `cache` for when none does.
+    /// in `cache` for when none does. Does nothing while [`ENABLED`] is false.
     pub fn start(src: Arc<crate::sources::Sources>, urls: Vec<String>, cache: Option<std::path::PathBuf>) -> Self {
         let shared = Arc::new(DirShared { servers: Mutex::new(Vec::new()), error: Mutex::new(None), stale: AtomicBool::new(false), now: AtomicBool::new(true), stop: AtomicBool::new(false) });
+        if !ENABLED {
+            return Directory { shared };
+        }
         let sh = shared.clone();
         std::thread::Builder::new()
             .name("server list".into())
@@ -554,6 +579,13 @@ mod tests {
     }
 
     #[test]
+    fn multiplayer_is_off_for_players() {
+        assert!(!ENABLED);
+        let c = Mp::start("127.0.0.1:9", "A");
+        assert!(matches!(c.status(), Status::Error(_)), "the shipped client does not connect");
+    }
+
+    #[test]
     fn players_are_smoothed_between_reports_and_carried_on_after() {
         let p = Peer { name: "a".into(), snaps: VecDeque::from([snap(1.0, 0.0, 1), snap(1.1, 5.0, 2)]) };
         assert!((at(1, &p, 1.05).unwrap().pos.y - 2.5).abs() < 1e-6, "halfway");
@@ -621,7 +653,7 @@ mod tests {
         };
         let stop = Arc::new(AtomicBool::new(false));
         let h = tiny_relay(port, stop.clone());
-        let c = Mp::start(&format!("127.0.0.1:{port}"), "A");
+        let c = Mp::start_for_test(&format!("127.0.0.1:{port}"), "A");
         c.set_state(PlayerState { pos: [6_372_000.0, 0.0, 0.0], rot: [0.0, 0.0, 0.0, 1.0], ..Default::default() });
         assert!(wait(&c, Status::Connected, 5), "connects");
         // The relay goes down: the client notices within LOST and starts over.
@@ -710,7 +742,7 @@ mod tests {
     #[test]
     fn on_the_start_screen_the_world_comes_in_and_nothing_goes_out() {
         let (port, states) = watch_relay(true);
-        let c = Mp::start(&format!("127.0.0.1:{port}"), "A");
+        let c = Mp::start_for_test(&format!("127.0.0.1:{port}"), "A");
         c.set_state(PlayerState { pos: [6_372_000.0, 0.0, 0.0], rot: [0.0, 0.0, 0.0, 1.0], ..Default::default() });
         c.set_watching(true);
         let t0 = Instant::now();
@@ -736,7 +768,7 @@ mod tests {
     #[test]
     fn an_older_relay_is_connected_without_a_world_map() {
         let (port, _) = watch_relay(false);
-        let c = Mp::start(&format!("127.0.0.1:{port}"), "A");
+        let c = Mp::start_for_test(&format!("127.0.0.1:{port}"), "A");
         c.set_watching(true);
         let t0 = Instant::now();
         while c.status() != Status::Connected && t0.elapsed() < Duration::from_secs(4) {
@@ -794,7 +826,7 @@ mod tests {
             }
         });
         let server = format!("127.0.0.1:{port}");
-        let (a, b) = (Mp::start(&server, "A"), Mp::start(&server, "B"));
+        let (a, b) = (Mp::start_for_test(&server, "A"), Mp::start_for_test(&server, "B"));
         let s = PlayerState { pos: [6_372_000.0, 0.0, 0.0], rot: [0.0, 0.0, 0.0, 1.0], aircraft: 8, ..Default::default() };
         a.set_state(s);
         b.set_state(s);

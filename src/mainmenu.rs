@@ -1,9 +1,10 @@
-//! the main menu: the wordmark over the world map, settings and multiplayer tiles.
+//! the main menu: the wordmark over the world map and the settings tile.
+//! Multiplayer stays hidden while `mp::ENABLED` is false.
 //! Quit sits small in the bottom left corner. Behind it the renderer draws
 //! space alone (the menu camera looks away from the planet, see `frame`).
 use crate::menu::{self, Screen, ACCENT, DIM, FAINT, TEXT};
 use crate::padui::{self, Hint};
-use crate::{save, settings_ui, t, tr_en, Game};
+use crate::{mp, save, settings_ui, t, tr_en, Game};
 use egui::{pos2, vec2, Align2, Color32, FontId, Painter, Pos2, Rect, Sense, Stroke};
 
 /// The picture behind the WORLD tile, 4:3 at a little over twice the tile's
@@ -44,7 +45,8 @@ impl Game {
             // Darken space towards the foot of the screen, for depth.
             gradient(&p, Rect::from_min_max(pos2(screen.left(), screen.center().y), screen.max), Color32::TRANSPARENT, Color32::from_rgba_premultiplied(4, 6, 10, 200));
 
-            // The tiles: WORLD map hero on the left, Settings + Multiplayer beside it.
+            // The tiles: WORLD map hero on the left, Settings beside it (and
+            // Multiplayer, when this build offers it).
             let gap = 18.0;
             let (fw, fh, sw, sh) = (680.0, 440.0, 320.0, 440.0);
             let total = fw + sw + gap;
@@ -57,8 +59,8 @@ impl Game {
             let lift = |r: Rect, i: usize| r.translate(vec2(0.0, 26.0 * (1.0 - rise(i))));
             let fly = lift(Rect::from_min_size(pos2(x0, cy - fh * 0.5), vec2(fw, fh)), 0);
             let bar_h = 46.0;
-            let set = lift(Rect::from_min_size(pos2(x0 + fw + gap, cy - sh * 0.5), vec2(sw, sh - bar_h - gap)), 1);
-            let mpb = lift(Rect::from_min_size(pos2(set.left(), set.bottom() + gap), vec2(sw, bar_h)), 2);
+            let set_h = if mp::ENABLED { sh - bar_h - gap } else { sh };
+            let set = lift(Rect::from_min_size(pos2(x0 + fw + gap, cy - sh * 0.5), vec2(sw, set_h)), 1);
             let mut pw = p.clone();
             pw.set_opacity(rise(0));
             wordmark(&pw, pos2(x0, fly.top() - 26.0 * k.max(0.7)), x0 + fw + sw + gap, k);
@@ -80,14 +82,17 @@ impl Game {
             if r.clicked() {
                 press = Some(Tile::Settings);
             }
-            let r = ui.interact(mpb, ui.scope_id().with("tile_mp"), Sense::click());
-            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("menu.multiplayer")));
-            let mut pm = p.clone();
-            pm.set_opacity(rise(2));
-            let (col, status) = self.mp_short();
-            mp_bar(&pm, mpb, &r, &status, col);
-            if r.clicked() {
-                press = Some(Tile::Multiplayer);
+            if mp::ENABLED {
+                let mpb = lift(Rect::from_min_size(pos2(set.left(), set.bottom() + gap), vec2(sw, bar_h)), 2);
+                let r = ui.interact(mpb, ui.scope_id().with("tile_mp"), Sense::click());
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t!("menu.multiplayer")));
+                let mut pm = p.clone();
+                pm.set_opacity(rise(2));
+                let (col, status) = self.mp_short();
+                mp_bar(&pm, mpb, &r, &status, col);
+                if r.clicked() {
+                    press = Some(Tile::Multiplayer);
+                }
             }
 
             // Under the map tile: the resume snapshot first, then the last start,
