@@ -510,6 +510,46 @@ fn grade_profile(ground: &[f32], cum: &[f32], max_grade: f32) -> Vec<f32> {
     z
 }
 
+/// Height of the triangulated terrain surface under a detail-tile point. This
+/// deliberately mirrors `sources::build_tile` and `sources::tile_indices`
+/// rather than sampling the finer DEM once more: water is drawn on those coarse
+/// triangles, so a deck that clears only the DEM can still sink through the
+/// water between their vertices.
+fn render_ground(cx: &Ctx, p: [f32; 2]) -> f32 {
+    let grid = GRID as f32;
+    let q = [p[0] / cx.ext * grid, p[1] / cx.ext * grid];
+    let cell = [q[0].floor(), q[1].floor()];
+    let f = [q[0] - cell[0], q[1] - cell[1]];
+    let h = |x: f32, y: f32| cx.ground([(cell[0] + x) / grid * cx.ext, (cell[1] + y) / grid * cx.ext]).max(0.0);
+    let (a, b, c, d) = (h(0.0, 0.0), h(1.0, 0.0), h(0.0, 1.0), h(1.0, 1.0));
+    // tile_indices: (a, c, b), (b, c, d).
+    if f[0] + f[1] <= 1.0 {
+        a + (b - a) * f[0] + (c - a) * f[1]
+    } else {
+        d + (c - d) * (1.0 - f[0]) + (b - d) * (1.0 - f[1])
+    }
+}
+
+/// Height along a bridge deck. The landing heights and extra lengths place
+/// this piece in the whole crossing, so pieces agree at their shared nodes.
+/// Clearance grows with the crossing: a sine arch's initial grade is
+/// `clearance * PI / length`, so a fixed six-metre arch turns a culvert-sized
+/// way into a wall. Long crossings retain the full six metres; short ones get
+/// only as much rise as the road's grade permits, with no arbitrary hump that
+/// would need a matching (and usually nonexistent) approach road.
+fn bridge_profile(ground: &[f32], cum: &[f32], before: f32, after: f32, za: f32, zb: f32, max_grade: f32) -> Vec<f32> {
+    let n = ground.len();
+    let len = cum[n - 1] - cum[0];
+    let total = before + len + after;
+    let camber = (total * 0.012).min(5.0);
+    let clearance = (total * max_grade / std::f32::consts::PI).min(6.0);
+    (0..n).map(|i| {
+        let t = (before + cum[i] - cum[0]) / total.max(1e-3);
+        let clear = (std::f32::consts::PI * t).sin().max(0.0) * clearance;
+        (za + (zb - za) * t + camber * 4.0 * t * (1.0 - t)).max(ground[i] + clear)
+    }).collect()
+}
+
 /// Follow a bridge onward from one of its ends - through other bridge pieces
 /// and across tile borders - to where it lands. Returns the extra length
 /// walked and the ground height at the landing.
@@ -945,21 +985,20 @@ pub fn build(cx: &Ctx, vt: &VecTile, src: &crate::sources::Sources, mesh: &mut M
             let bridge = (line.brunnel == 1 || auto_bridge) && line.class != RC_PATH && line.class != RC_TRACK;
             let mut zs: Vec<f32> = pts.iter().map(|p| cx.ground(*p)).collect();
             let mut pre = 0.0;
+            let max_grade = match line.class { RC_MOTORWAY => 0.06, RC_TRUNK => 0.08, RC_PRIMARY | RC_SECONDARY => 0.09, _ => 0.12 };
             if bridge {
                 let me = own_bridges.iter().position(|b| b[0] == piece[0] && b.len() == piece.len()).unwrap_or(usize::MAX);
                 let (ea, za) = bridge_end(src, cx, &own_bridges, pts[0], me);
                 let (eb, zb) = bridge_end(src, cx, &own_bridges, pts[n - 1], me);
-                let total = ea + len + eb;
-                let camber = (total * 0.012).min(5.0);
                 pre = ea;
-                for i in 0..n {
-                    let t = (ea + cum[i]) / total;
-                    let clear = (std::f32::consts::PI * t).sin().max(0.0) * 6.0;
-                    zs[i] = (za + (zb - za) * t + camber * 4.0 * t * (1.0 - t)).max(zs[i] + clear);
-                }
+                // Match the surface the terrain and water shaders actually draw,
+                // not just independent fine DEM samples. Stay on the shared
+                // centreline: lateral probes could give two pieces that meet at
+                // an angled node different endpoint heights.
+                let floor: Vec<f32> = pts.iter().map(|p| render_ground(cx, *p)).collect();
+                zs = bridge_profile(&floor, &cum, ea, eb, za, zb, max_grade);
             } else {
-                let grade = match line.class { RC_MOTORWAY => 0.06, RC_TRUNK => 0.08, RC_PRIMARY | RC_SECONDARY => 0.09, _ => 0.12 };
-                zs = grade_profile(&zs, &cum, grade);
+                zs = grade_profile(&zs, &cum, max_grade);
             }
 
             if line.brunnel != 2 {
@@ -1396,6 +1435,53 @@ mod tests {
         let idx = RoadIndex::build(&n, 1024.0, 1.0);
         assert!(idx.query_for_body(&n, [250.0, 600.0], 0.0).is_some(), "the sunk body climbs out");
         assert!(idx.query_for_body(&n, [250.0, 600.0], -4.0).is_none(), "a road seven metres up is not its street");
+    }
+
+    #[test]
+    fn a_bridge_clears_the_terrain_triangles_not_just_dem_samples() {
+        // A narrow low DEM sample sits inside a much higher coarse render cell.
+        // The 20 m deck used to trust only the former and sink through the water
+        // surface interpolated from the latter.
+        let id = crate::geo::TileId::new(14, 0, 0);
+        let (lat, lon) = id.lat_lon(0.5, 0.5);
+        let mut h = vec![0.0; 128 * 128];
+        for row in h.chunks_exact_mut(128) {
+            row[31] = 10.0;
+            row[32] = 10.0;
+        }
+        let elev = std::sync::Arc::new(ElevTile { h, n: 128, pad: 0 });
+        let cx = Ctx { id, ext: 1024.0, unit_m: 1.0, center: crate::geo::lla_to_pos(lat, lon, 0.0), elev: Some(elev), atlas: Vec::new(), lat: lat.to_degrees(), lon: lon.to_degrees(), region: crate::buildings::region(lat.to_degrees(), lon.to_degrees()) };
+        let mut tagged = line(vec![[268.0, 100.0], [268.0, 120.0]], RC_MINOR);
+        tagged.brunnel = 1;
+        let vt = tile(vec![tagged]);
+        let src = crate::sources::Sources::new(crate::fetch::Fetcher::new(std::path::PathBuf::new(), true), String::new());
+        let mut mesh = Mesh::default();
+        let mut footprints = Vec::new();
+        let roads = build(&cx, &vt, &src, &mut mesh, &mut footprints, &vec![0; RASTER * RASTER]);
+        let deck = roads.net.paths.iter().find(|p| p.bridge).unwrap();
+        assert!(deck.alt.iter().all(|z| *z >= 2.5), "the coarse water triangle sits at 2.5 m over the whole crossing: {:?}", deck.alt);
+    }
+
+    #[test]
+    fn a_short_bridge_does_not_become_a_six_metre_ramp() {
+        let ground = [10.0; 3];
+        let cum = [0.0, 6.165, 12.33];
+        let z = bridge_profile(&ground, &cum, 0.0, 0.0, 10.0, 10.0, 0.12);
+        assert_eq!((z[0], z[2]), (10.0, 10.0));
+        assert!(z[1] - 10.0 <= 0.5, "a culvert-sized bridge must stay low: {z:?}");
+        for i in 1..z.len() {
+            let grade = (z[i] - z[i - 1]).abs() / (cum[i] - cum[i - 1]);
+            assert!(grade <= 0.120001, "grade {grade:.3} at sample {i}: {z:?}");
+        }
+    }
+
+    #[test]
+    fn a_long_bridge_keeps_its_clearance() {
+        let len = 400.0;
+        let ground = [10.0; 3];
+        let cum = [0.0, len / 2.0, len];
+        let z = bridge_profile(&ground, &cum, 0.0, 0.0, 10.0, 10.0, 0.06);
+        assert!(z[1] >= 15.9, "a long crossing still clears the channel by about 6 m: {z:?}");
     }
 
     #[test]
