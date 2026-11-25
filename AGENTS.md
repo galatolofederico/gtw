@@ -1,13 +1,15 @@
 # Agent instructions for GTW
 
-These instructions apply throughout this repository. GTW (Grand Theft World) is a fork of FableFlight: an open-world sandbox on the real Earth where the player walks, drives, and flies. Keep the upstream aircraft rules below for every flight change.
+These instructions apply throughout this repository. GTW (Grand Theft World) is a fork of FableFlight: an open-world sandbox on the real Earth where the player walks, drives, flies, and fights. Keep the upstream aircraft rules below for every flight change.
 
 ## Project scope
 
-- GTW v1 is single-player on the ground. Do not add pedestrians, crowds, police or wanted levels, building interiors, missions, an economy, swimming, motorcycles, bicycles, boats, trains, ground weapons, or multiplayer ground play.
-- Flight-only arcade weapons stay behind the off-by-default arcade toggle. Do not make them ground weapons or turn them on by default.
+- GTW is a single-player open-world sandbox. Pedestrians, traffic, police and wanted levels, ground combat, and living-world systems are all part of the game.
+- Build it feature by feature. Each feature must be playable from the normal controls and the normal world, and the game must stay runnable and tested after every change.
 - Keep the existing aircraft and flight systems. Do not regress the aircraft flight model, `Plane::step`, or `Mode::Fly` while working on ground play.
-- Tunnels remain at grade and are not enterable; bridges are decks, not separate worlds. Do not add interiors for either.
+- Ground weapons are always available on foot. Aircraft ordnance stays behind the off-by-default arcade toggle until it is deliberately reworked; do not couple the two.
+- Tunnels remain at grade and are not enterable; bridges are decks, not separate worlds.
+- Flight multiplayer stays disabled. Do not reconnect the relay or re-enable the multiplayer menus without a dedicated design.
 - The player-facing product, binaries (`gtw`, `gtw-mcp`, `gtw-launcher`), window titles, config/cache paths (`<config>/gtw/`, `<cache>/gtw/`), README, and credits are GTW. The upstream FableFlight credit, the MIT license, and the ESA WorldCover / Planetary Computer attribution must remain.
 - Get persistent paths from `src/paths.rs`; do not join `gtw` or the legacy `fablegame` folder by hand. The legacy `fablegame` config/cache names are read only by the one-time migration, and `<data>/fablegame/` keeps its historical name for downloaded aircraft and AMD's FSR runtime.
 - Launcher updates must never install an upstream FableFlight release over GTW. Keep automatic update checks off by default and point the repository at `galatolofederico/gtw`.
@@ -18,9 +20,23 @@ These instructions apply throughout this repository. GTW (Grand Theft World) is 
 - Character and vehicle physics use `World::surface_at`, `WorldQuery`, and `SurfaceWeather`. Missing terrain holds the last valid sample; never let the player fall through a loading world.
 - Bindings are context-aware (`bind::Context::{Foot, Car, Flight}`). Add new foot/car actions to the matching table and their `action.<id>` label to `eng.lng` and `fr.lng`; global actions stay available in every context.
 - A clicked or keyed control must do the same thing: hotspots, key bindings, and gamepad layouts drive existing actions, not separate code paths.
-- Ground HUD shows speed, gear, health, and interactions only; hide flight-only instruments outside `Mode::Fly`.
-- Save data is a versioned resume snapshot of the player, current vehicle, and aircraft, not the whole traffic world. Corrupt or future saves are ignored with a message, and writes are atomic.
-- Run `cargo check --all-targets`, `cargo test`, `cargo test --test shaders`, and (from the rebrand on) `cargo test --test mcp` and `cargo test --test gtw_smoke` for ground changes.
+- Ground HUD shows speed, gear, health, weapon state, wanted level, and interactions; hide flight-only instruments outside `Mode::Fly`.
+- Save data is a versioned resume snapshot of the player, current vehicle, and aircraft, not the whole traffic world. Add new persistent player or world state (weapons, wanted level, parked vehicles) to the versioned schema rather than to settings. Corrupt or future saves are ignored with a message, and writes are atomic.
+- Run `cargo check --all-targets`, `cargo test`, `cargo test --test shaders`, `cargo test --test mcp`, and `cargo test --test gtw_smoke` for ground changes.
+
+## Living world
+
+- Pedestrians, traffic, and police are streamed with the world. Do not put them in the resume save unless a feature explicitly needs persistence.
+- Use the same `World`, `WorldQuery`, `RoadNet`, and surface queries the player uses; do not add a parallel world representation for NPCs.
+- Spawn and despawn by distance and density, and keep NPCs out of the player's way while a tile or road is still loading.
+- Collisions, damage, and audio go through the existing player paths: an NPC or traffic car hit by the player should behave like the player's own body hit by a car.
+
+## Ground combat
+
+- Ground weapons live in the `Foot` context and are always available; they do not depend on the arcade setting.
+- Aiming, hit detection, damage, and audio reuse the existing world queries, collision geometry, and damage systems. Do not build a separate physics world for bullets.
+- Weapon, ammo, and wanted state are player state. Add them to the versioned save deliberately and keep the HUD in sync.
+- Aircraft ordnance stays in the aircraft path and behind the arcade toggle.
 
 ## Learn from the existing aircraft
 

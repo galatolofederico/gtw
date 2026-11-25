@@ -1,8 +1,8 @@
 //! The player's avatar: a rigid, multi-part figure posed procedurally.
 //!
-//! There is no skeletal skinning in GTW v1. Sixteen rigid pieces (pelvis,
+//! The avatar is sixteen rigid pieces (pelvis,
 //! torso, head, upper and lower arms, hands, thighs, shins, feet and hair)
-//! are drawn through the instanced solid path (`inst.wgsl`, selected by
+//! drawn through the instanced solid path (`inst.wgsl`, selected by
 //! `Inst.ext.w = 2`). Each piece is a smooth swept surface built around its
 //! joint, with rounded joint caps that overlap the neighbouring piece, so
 //! the figure stays closed as it bends.

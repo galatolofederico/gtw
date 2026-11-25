@@ -1,6 +1,6 @@
 //! The player's car: single-body arcade physics.
 //!
-//! GTW v1 drives one rigid body with four visual wheels. There is no per-wheel
+//! The car is one rigid body with four visual wheels. There is no per-wheel
 //! suspension or tyre model: the body samples the ground at four points for its
 //! height, slope and surface class, then longitudinal forces (engine, brakes,
 //! rolling resistance, drag), a lateral grip circle and a bicycle-model steering

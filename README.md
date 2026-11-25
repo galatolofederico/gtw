@@ -2,9 +2,9 @@
 
 # GTW — Grand Theft World
 
-### An open-world sandbox on the real Earth: walk, drive, and fly
+### An open-world sandbox on the real Earth: walk, drive, fly, and fight
 
-Spawn anywhere on the planet, cross surface-aware terrain on foot, take a parked or moving car, and fly the aircraft you find at an airport. GTW v1 keeps the upstream flight simulator and its aircraft, and adds ground play without pedestrians, police, interiors, or ground weapons.
+Spawn anywhere on the planet, cross surface-aware terrain on foot, take a parked or moving car, and fly the aircraft you find at an airport. GTW builds on the upstream flight simulator and grows into a deeper ground sandbox, one feature at a time.
 
 *GTW is a fork of [FableFlight](https://github.com/Rolandjg/fableflight), built in Rust with wgpu.*
 
@@ -69,10 +69,6 @@ cargo build --release --locked
 - **Upscaling:** bilinear, AMD FSR 1 and FSR 3.1 built in, and AMD FSR 4.1 downloaded from AMD on request (Windows, Radeon RX 6000 or newer), with a suggestion for your GPU. In **Settings → Graphics → Upscaling**; see [docs/upscaling.md](docs/upscaling.md).
 
 The UI supports English (`en`), French (`fr`), and Korean (`ko`). Settings, bindings, and the resume snapshot are saved automatically.
-
-## Non-goals (v1)
-
-GTW v1 deliberately has **no** pedestrians, crowds, police or wanted levels, building interiors, missions, economy, swimming or diving, motorcycles, bicycles, boats or trains, ground weapons, or multiplayer ground play. Flight multiplayer is not available in this version. Flight-only arcade weapons remain behind the off-by-default arcade toggle. Tunnels stay at grade and are not enterable.
 
 ## Starting a run
 
@@ -183,6 +179,10 @@ GTW is a fork of [FableFlight](https://github.com/Rolandjg/fableflight) and keep
 - **Google Maps badge (`assets/google_maps_logo.png`):** Displayed when optional Google Maps Platform imagery or Photorealistic 3D Tiles are enabled, per Google Maps attribution requirements.
 - **Aircraft models, textures, and audio (`assets/*.bin.gz`, `assets/*_paint.jpg`, `assets/audio/`, `assets/ui/`):** Project-authored or procedural assets inherited from FableFlight and bundled with GTW. Optional downloadable aircraft from [FGAddon](https://wiki.flightgear.org/FGAddon) carry their own per-aircraft licenses recorded in each installed aircraft's `source.json`.
 
+## Roadmap
+
+GTW is built one feature at a time, and the [issue tracker](https://github.com/galatolofederico/gtw/issues) is the source of truth. Planned and in-progress work includes vehicle damage and handling, richer cars and characters, traffic AI, pedestrians, ground weapons, police and wanted levels, parachuting, and a more detailed street-level world.
+
 ## Contributing
 
-Contributions are welcome; see [AGENTS.md](AGENTS.md) for guidance on coding agent standards and the project scope.
+Contributions are welcome; see [AGENTS.md](AGENTS.md) for coding standards and the verification steps.
