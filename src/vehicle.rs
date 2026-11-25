@@ -138,6 +138,15 @@ pub fn tuning(model: u8) -> Tuning {
     }
 }
 
+/// How fast the steering goes out towards full lock, and back (per second).
+const STEER_RATE: f64 = 5.0;
+const STEER_RETURN: f64 = 9.0;
+/// Sideways grip, as a share of the tyres' real friction: arcade handling.
+const ARCADE_GRIP: f64 = 1.45;
+/// The fastest the car may turn, as lateral acceleration over the tyres'
+/// friction: a little past [`ARCADE_GRIP`], so the tail can step out.
+const ARCADE_TURN: f64 = 1.7;
+
 /// What the driver is asking for this step. `throttle` and `brake` are 0..1,
 /// `steer` −1 left to +1 right.
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
@@ -459,15 +468,24 @@ impl Vehicle {
         let mut a_long = 0.0;
 
         if self.grounded && !steep {
-            // Steering: a bicycle model, its angle reduced with speed.
-            let steer = (c.steer.clamp(-1.0, 1.0) + self.damage.steer_pull as f64).clamp(-1.0, 1.0);
+            // Steering: a bicycle model, its angle reduced with speed. The
+            // wheel turns at a finite rate (keys are all-or-nothing, and a
+            // full lock in one frame at speed is a twitch, not a turn) and
+            // comes back to centre quicker than it goes out.
+            let want = (c.steer.clamp(-1.0, 1.0) + self.damage.steer_pull as f64).clamp(-1.0, 1.0);
+            let outward = want.abs() > self.steer.abs() && want * self.steer >= 0.0;
+            let rate = if outward { STEER_RATE } else { STEER_RETURN };
+            let steer = self.steer + (want - self.steer).clamp(-rate * h, rate * h);
             self.steer = steer;
-            let max_angle = 0.55 / (1.0 + v_long.abs() * 0.055);
+            let max_angle = 0.62 / (1.0 + v_long.abs() * 0.025);
             let angle = steer * max_angle;
             let mut yaw_rate = v_long * angle.tan() / self.tuning.wheelbase.max(0.5);
-            // The tyres can only turn the car as fast as they can hold it;
-            // with the rear locked the car rotates past that a little.
-            let cap = mu * GRAVITY / v_long.abs().max(2.0);
+            // The tyres can only turn the car as fast as they can hold it
+            // (arcade grip, a good deal above a road car's); the limit sits a
+            // little above what the tyres hold sideways, so a hard turn at
+            // speed lets the tail step out. With the rear locked the car
+            // rotates past that further.
+            let cap = mu * GRAVITY * ARCADE_TURN / v_long.abs().max(2.0);
             let cap = if c.handbrake { (cap * 1.6).max(0.9) } else { cap };
             yaw_rate = yaw_rate.clamp(-cap, cap);
             self.yaw = (self.yaw + yaw_rate * h).rem_euclid(std::f64::consts::TAU);
@@ -514,7 +532,10 @@ impl Vehicle {
             // Lateral grip: cancel sideways motion up to the grip circle,
             // then let the rest slide.
             v_lat += slope_lat * h;
-            let grip = mu * GRAVITY * if c.handbrake { 0.45 } else { 1.0 };
+            // With the wheel straight the tyres bite harder, so a slide
+            // gathers itself up instead of carrying on.
+            let settle = if c.handbrake { 1.0 } else { 1.0 + 0.6 * (1.0 - steer.abs()) };
+            let grip = mu * GRAVITY * ARCADE_GRIP * settle * if c.handbrake { 0.32 } else { 1.0 };
             let max_change = grip * h;
             let slid = (v_lat - v_lat.clamp(-max_change, max_change)).abs();
             v_lat -= v_lat.clamp(-max_change, max_change);
@@ -1068,6 +1089,26 @@ mod tests {
             brake.step(1.0 / 120.0, &VehicleControls::default(), &w, &SurfaceWeather::default(), &[]);
         }
         assert_eq!(brake.gear, 1);
+    }
+
+    #[test]
+    fn the_car_still_turns_hard_at_speed_and_the_wheel_ramps() {
+        // At 100 km/h a second of full lock makes a real turn (a road car's
+        // 0.9 g used to give about 0.3 rad), without spinning or stalling it.
+        let (mut v, w) = car(0, Surface::Asphalt);
+        v.vel = v.forward() * 28.0;
+        let c = VehicleControls { throttle: 0.6, steer: 1.0, ..Default::default() };
+        let first = v.step(1.0 / 120.0, &c, &w, &SurfaceWeather::default(), &[]);
+        assert!(first.steer > 0.0 && first.steer < 0.1, "the wheel ramps out, not snaps: {:.3}", first.steer);
+        let s = drive(&mut v, &w, c, 1.0);
+        let turned = wrap(v.yaw - std::f64::consts::FRAC_PI_2);
+        assert!(turned > 0.45 && turned < 1.2, "turned {turned:.2} rad in a second at speed");
+        assert!(s.speed > 20.0, "kept most of its speed: {:.1}", s.speed);
+        assert!(s.lateral.abs() < 6.0, "a turn, not a spin: {:.1} m/s sideways", s.lateral);
+        // Letting go: the wheel recentres and the slide gathers up.
+        let s = drive(&mut v, &w, VehicleControls { throttle: 0.6, ..Default::default() }, 1.0);
+        assert!(s.steer.abs() < 1e-6, "wheel back to centre: {:.3}", s.steer);
+        assert!(s.lateral.abs() < 0.5, "straight again: {:.2} m/s sideways", s.lateral);
     }
 
     #[test]
