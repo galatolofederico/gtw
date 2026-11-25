@@ -14,6 +14,16 @@ Spawn anywhere on the planet, cross surface-aware terrain on foot, take a parked
 <br>
 </div>
 
+## Trailer
+
+<div align="center">
+
+[![GTW — Grand Theft World trailer](docs/media/trailer.jpg)](https://youtu.be/bpeJLpqGnRM)
+
+[Watch the trailer on YouTube](https://youtu.be/bpeJLpqGnRM) (49 s, 1080p)
+
+</div>
+
 ## Download
 
 There is no packaged GTW release yet: build from source below. Releases, once published, will appear at <https://github.com/galatolofederico/gtw/releases>. The release launcher is **`gtw-launcher`** (`gtw-launcher.exe` on Windows).
