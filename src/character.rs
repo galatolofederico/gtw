@@ -42,8 +42,14 @@ pub const MAX_HEALTH: f32 = 100.0;
 pub const REGEN_DELAY: f64 = 5.0;
 /// Health regained per second once it does.
 pub const REGEN_RATE: f32 = 2.0;
-/// Distance between footsteps (m).
-pub const STRIDE: f64 = 0.9;
+/// Distance between footsteps (m) at `speed` (m/s): short steps at a stroll,
+/// long ones at a sprint, so the cadence stays human (about two steps a
+/// second walking, four sprinting).
+pub fn stride_len(speed: f64) -> f64 {
+    (0.55 + 0.16 * speed.max(0.0)).clamp(0.7, 1.7)
+}
+/// How fast keyboard steering turns the body (rad/s).
+pub const TURN_RATE: f64 = 2.9;
 
 /// How a footstep on a surface sounds: relative level, how bright its scuff
 /// is, and how much of it is a low body thump.
@@ -88,6 +94,12 @@ pub struct CharacterControls {
     /// The direction "forward" means, as a bearing; none uses the body's own
     /// facing (useful for tests).
     pub heading: Option<f64>,
+    /// Keyboard steering, -1..1: turns the body itself at [`TURN_RATE`]
+    /// (right is positive), so the camera can stay behind it.
+    pub turn: f64,
+    /// Keep facing the way the body faces instead of turning to the way it
+    /// moves (backing up with the keyboard).
+    pub hold_facing: bool,
 }
 
 impl CharacterControls {
@@ -126,6 +138,8 @@ pub struct Character {
     pub stride_phase: f64,
     /// Distance walked since the last footstep (m).
     stride: f64,
+    /// 0 on the ground, easing to 1 in the air: the jump pose's share.
+    pub air: f64,
     /// Landing damage is forgiven while the body has just appeared (streaming
     /// may put the ground a little below the spawn estimate).
     spawn_grace: f64,
@@ -162,12 +176,18 @@ impl Character {
     /// Standing at `pos` (feet), facing `yaw` (bearing radians).
     pub fn spawn(pos: DVec3, yaw: f64) -> Self {
         let pos = if pos.is_finite() { pos } else { geo::lla_to_pos(0.0, 0.0, 0.0) };
-        Self { pos, vel: DVec3::ZERO, yaw, grounded: false, health: MAX_HEALTH, last_safe: pos, since_hurt: REGEN_DELAY, stride_phase: 0.0, stride: 0.0, spawn_grace: 2.0, respawns: 0 }
+        Self { pos, vel: DVec3::ZERO, yaw, grounded: false, health: MAX_HEALTH, last_safe: pos, since_hurt: REGEN_DELAY, stride_phase: 0.0, stride: 0.0, air: 0.0, spawn_grace: 2.0, respawns: 0 }
     }
 
     /// The eye in the planet frame.
     pub fn eye(&self) -> DVec3 {
         self.pos + self.pos.normalize() * EYE
+    }
+
+    /// The gait cycle as a continuous angle: a half turn per footstep, and
+    /// the way through the current step in between (for the pose).
+    pub fn gait_phase(&self) -> f64 {
+        self.stride_phase + std::f64::consts::PI * (self.stride / stride_len(self.speed())).clamp(0.0, 1.0)
     }
 
     /// Horizontal speed (m/s).
@@ -281,6 +301,9 @@ impl Character {
         // The intended horizontal velocity: the facing is the camera's, so
         // forward means "away from the camera".
         let wish_len = c.forward.hypot(c.right).clamp(0.0, 1.0);
+        if c.turn.is_finite() && c.turn != 0.0 {
+            self.yaw = (self.yaw + c.turn.clamp(-1.0, 1.0) * TURN_RATE * h).rem_euclid(std::f64::consts::TAU);
+        }
         let heading = c.heading.unwrap_or(self.yaw);
         let (sin_h, cos_h) = heading.sin_cos();
         let wish_dir = if wish_len > 1e-6 { (east * (sin_h * c.forward + cos_h * c.right) + north * (cos_h * c.forward - sin_h * c.right)).normalize() } else { DVec3::ZERO };
@@ -379,7 +402,7 @@ impl Character {
         }
 
         // Facing follows the way the body is going, turning smoothly.
-        if new_vh.length() > 0.25 {
+        if new_vh.length() > 0.25 && !c.hold_facing {
             let target = new_vh.dot(east).atan2(new_vh.dot(north));
             let diff = (target - self.yaw + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI;
             self.yaw = (self.yaw + diff * (12.0 * h).min(1.0)).rem_euclid(std::f64::consts::TAU);
@@ -389,8 +412,9 @@ impl Character {
         let travelled = self.speed() * h;
         if self.grounded {
             self.stride += travelled;
-            while self.stride >= STRIDE {
-                self.stride -= STRIDE;
+            let len = stride_len(self.speed());
+            while self.stride >= len {
+                self.stride -= len;
                 self.stride_phase += std::f64::consts::PI;
                 out.footsteps.push(surface);
             }
@@ -398,6 +422,9 @@ impl Character {
                 self.last_safe = self.pos;
             }
         }
+
+        let air = if self.grounded { 0.0 } else { 1.0 };
+        self.air += (air - self.air) * (h * 9.0).min(1.0);
 
         // Health: a slow mend after a quiet spell.
         if self.health > 0.0 && self.health < MAX_HEALTH && self.since_hurt > REGEN_DELAY {
@@ -630,6 +657,26 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_steering_turns_the_body_and_backing_up_keeps_the_facing() {
+        let w = FlatWorld;
+        // A quarter turn to the right takes a little over half a second.
+        let mut c = at_origin();
+        run(&mut c, &w, CharacterControls { turn: 1.0, ..Default::default() }, std::f64::consts::FRAC_PI_2 / TURN_RATE);
+        assert!((c.yaw - std::f64::consts::PI).abs() < 0.03, "facing south after a right turn from east: {}", c.yaw);
+        // Walking forward while turning curves the path, facing along it.
+        let mut c = at_origin();
+        run(&mut c, &w, CharacterControls { forward: 1.0, turn: -0.5, ..Default::default() }, 1.0);
+        assert!(c.yaw < std::f64::consts::FRAC_PI_2 - 0.5, "turned left while walking: {}", c.yaw);
+        // Backing up does not spin the body round to face the camera.
+        let mut c = at_origin();
+        let start = c.pos;
+        run(&mut c, &w, CharacterControls { forward: -0.4, hold_facing: true, ..Default::default() }, 1.5);
+        assert!((c.yaw - std::f64::consts::FRAC_PI_2).abs() < 1e-9, "still facing east: {}", c.yaw);
+        let (east, _, _) = geo::enu(start);
+        assert!((c.pos - start).dot(east) < -1.0, "moved west, backwards");
+    }
+
+    #[test]
     fn surface_multipliers_apply_to_on_foot_speed() {
         let classes = [(Surface::Asphalt, 1.00), (Surface::Concrete, 1.00), (Surface::Dirt, 0.82), (Surface::Grass, 0.78), (Surface::Sand, 0.58), (Surface::Rock, 0.72)];
         for (kind, factor) in classes {
@@ -787,7 +834,7 @@ mod tests {
             }
         }
         let travelled = c.pos.distance(origin());
-        let want = (travelled / STRIDE).floor() as usize;
+        let want = (travelled / stride_len(RUN)).floor() as usize;
         assert!((steps.len() as i64 - want as i64).abs() <= 1, "{} steps in {travelled:.1} m, want about {want}", steps.len());
         assert!(steps.len() >= 8, "three seconds of jogging: {} steps", steps.len());
     }
@@ -809,7 +856,7 @@ mod tests {
         let w = FlatWorld;
         let mut c = at_origin();
         for dt in [1e9, f64::NAN, f64::INFINITY, -1.0, 0.0] {
-            let s = c.step(dt, &CharacterControls { forward: 1.0, right: -1.0, sprint: true, jump: true, heading: None }, &w, &SurfaceWeather::default());
+            let s = c.step(dt, &CharacterControls { forward: 1.0, right: -1.0, sprint: true, jump: true, heading: None, ..Default::default() }, &w, &SurfaceWeather::default());
             assert!(s.pos.is_finite() && s.vel.is_finite(), "dt {dt}");
             assert!(c.pos.is_finite() && c.vel.is_finite() && c.health.is_finite());
         }

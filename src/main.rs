@@ -3901,14 +3901,27 @@ impl Game {
         let k = |id: &str| self.foot_key_down(id);
         // The pad's left stick walks: pushed forward (the flight axis reads
         // nose down) is forward, and right is right.
+        let sprint = k("sprint") || self.pad_ground_sprint;
+        let jump = k("jump") || self.pad_jump;
+        if !padui::active() {
+            // The keyboard steers the body, and the camera stays behind it
+            // (the camera code follows `character.yaw`): W walks on, A and D
+            // turn, S backs up at a walk without turning round.
+            let (fwd, back) = (k("move_forward"), k("move_back"));
+            let forward = if fwd { 1.0 } else if back { -0.4 } else { 0.0 };
+            let turn = (k("move_right") as i32 - k("move_left") as i32) as f64;
+            return character::CharacterControls { forward, right: 0.0, sprint: sprint && fwd, jump, heading: None, turn, hold_facing: back && !fwd };
+        }
         let forward = (k("move_forward") as i32 - k("move_back") as i32) as f64 - self.pad.pitch;
         let right = (k("move_right") as i32 - k("move_left") as i32) as f64 + self.pad.roll;
         character::CharacterControls {
             forward: forward.clamp(-1.0, 1.0),
             right: right.clamp(-1.0, 1.0),
-            sprint: k("sprint") || self.pad_ground_sprint,
-            jump: k("jump") || self.pad_jump,
-            heading: None,
+            sprint,
+            jump,
+            // (The camera's bearing points the way forward with the pad.)
+            heading: Some(self.cam_yaw),
+            ..Default::default()
         }
     }
 
@@ -3935,8 +3948,6 @@ impl Game {
     fn step_walk(&mut self, dt: f64) {
         let c = self.foot_controls();
         let wx = self.ground_weather();
-        // (The camera's bearing points the way forward on the ground.)
-        let c = character::CharacterControls { heading: Some(self.cam_yaw), ..c };
         let s = self.character.step(dt, &c, &self.world, &wx);
         self.pad_jump = false;
         // Footsteps: one sound per step, placed at the body and timed by the
@@ -7239,6 +7250,12 @@ impl Game {
             let look_y = (self.foot_key_down("look_down") as i32 - self.foot_key_down("look_up") as i32) as f64;
             self.cam_yaw = (self.cam_yaw + look_x * 1.6 * dt).rem_euclid(std::f64::consts::TAU);
             self.cam_pitch = (self.cam_pitch + look_y * 1.1 * dt).clamp(-1.35, 1.35);
+            // With the keyboard the body steers and the view stays behind it;
+            // a mouse drag or the look keys look round, and the view swings
+            // back behind once they let go. The pad keeps its free camera.
+            if !padui::active() && look_x == 0.0 && look_y == 0.0 && !self.drag {
+                self.cam_yaw = follow_angle(self.cam_yaw, c.yaw, 6.0, dt).rem_euclid(std::f64::consts::TAU);
+            }
             let up = c.pos.normalize();
             let (east, north, _) = geo::enu(c.pos);
             let bearing = self.cam_yaw;
@@ -7935,18 +7952,10 @@ impl Game {
             }
             // The player on foot: the rigid avatar, unless the eyes are in it.
             if avatar_drawn(self.mode, self.ground_first_person) {
-                let speed = self.character.speed();
-                let gait = if !self.character.grounded {
-                    avatar::Gait::Jump
-                } else if speed < 0.2 {
-                    avatar::Gait::Idle
-                } else if speed > 3.0 {
-                    avatar::Gait::Run
-                } else {
-                    avatar::Gait::Walk
-                };
-                let rig = avatar::pose(gait, self.character.stride_phase);
-                avatar::instances(cam, self.character.pos, self.character.yaw, &rig, self.avatar_style, &mut insts);
+                let c = &self.character;
+                let motion = avatar::Motion { phase: c.gait_phase(), speed: c.speed(), air: c.air, time: self.real };
+                let rig = avatar::pose(&motion);
+                avatar::instances(cam, c.pos, c.yaw, &rig, self.avatar_style, &mut insts);
             }
             self.destr.instances(cam, &mut insts, &mut fall);
             self.destr.skin_frame(cam);
