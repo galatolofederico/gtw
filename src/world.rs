@@ -1852,6 +1852,34 @@ impl World {
         best.map(|(_, a)| a)
     }
 
+    /// The airfields loaded within `radius` of `p` (their indices).
+    pub fn fields_near(&self, p: DVec3, radius: f64) -> Vec<u32> {
+        self.fields.values().filter_map(|s| if let FSlot::Ready(f) = s { Some(f) } else { None }).filter(|f| (f.geo.center - p).length() < radius + f.geo.radius as f64).map(|f| f.geo.idx).collect()
+    }
+
+    /// A loaded airfield's layout.
+    pub fn field_geo(&self, apt: u32) -> Option<std::sync::Arc<crate::airports::Geo>> {
+        match self.fields.get(&apt) {
+            Some(FSlot::Ready(f)) => Some(f.geo.clone()),
+            _ => None,
+        }
+    }
+
+    /// The stands of airfield `apt` the traffic is not using.
+    pub fn free_stands(&self, apt: u32) -> Vec<usize> {
+        match self.fields.get(&apt) {
+            Some(FSlot::Ready(f)) => f.traffic.free_stands(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Keep a stand of airfield `apt` from the traffic.
+    pub fn reserve_stand(&mut self, apt: u32, stand: usize) {
+        if let Some(FSlot::Ready(f)) = self.fields.get_mut(&apt) {
+            f.traffic.reserve(stand);
+        }
+    }
+
     /// Take the aircraft parked at `stand` of airfield `apt` out of the traffic.
     pub fn take_parked_aircraft(&mut self, apt: u32, stand: usize) -> Option<crate::traffic::Parked> {
         let Some(FSlot::Ready(f)) = self.fields.get_mut(&apt) else { return None };

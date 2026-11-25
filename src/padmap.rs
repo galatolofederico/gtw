@@ -193,7 +193,7 @@ const ROCKET: [(&str, &str); 3] = [("ap", "autoland"), ("master_arm", "engines")
 /// Settings › Controls › On foot; the pad's flying layout is unchanged.
 pub const FOOT_LAYOUT: &[(&str, Chord)] = {
     use PadBtn::*;
-    &[("sprint", b(RB)), ("jump", b(A)), ("interact", b(X)), ("first_person", b(R3))]
+    &[("sprint", b(RB)), ("jump", b(A)), ("interact", b(Y)), ("first_person", b(R3))]
 };
 
 /// What the pad does on foot, as the controls list shows it: (input, does).
@@ -206,12 +206,12 @@ pub fn foot_rows() -> Vec<(String, &'static str)> {
 }
 
 /// The pad in a car: the left stick steers, A accelerates, X brakes and
-/// reverses, and a button each for the handbrake, getting out, the camera and
-/// the horn. Shown in Settings › Controls › In a car; the flying and on-foot
+/// reverses, Y gets out (as it gets in on foot), and a button each for the
+/// handbrake, the camera and the horn. Shown in Settings › Controls › In a car; the flying and on-foot
 /// layouts are unchanged.
 pub const CAR_LAYOUT: &[(&str, Chord)] = {
     use PadBtn::*;
-    &[("car_throttle", b(A)), ("car_brake", b(X)), ("car_handbrake", b(RB)), ("car_enter_exit", b(B)), ("camera", b(R3)), ("car_horn", b(L3))]
+    &[("car_throttle", b(A)), ("car_brake", b(X)), ("car_handbrake", b(RB)), ("car_enter_exit", b(Y)), ("camera", b(R3)), ("car_horn", b(L3))]
 };
 
 /// What the pad does in a car, as the controls list shows it: (input, does).
@@ -940,7 +940,7 @@ mod tests {
         assert!(rows.iter().any(|(k, what)| k == "A" && *what == label("car_throttle")));
         assert!(rows.iter().any(|(k, what)| k == "X" && *what == label("car_brake")));
         assert!(rows.iter().any(|(k, what)| k == "RB" && *what == label("car_handbrake")));
-        assert!(rows.iter().any(|(k, what)| k == "B" && *what == label("car_enter_exit")));
+        assert!(rows.iter().any(|(k, what)| k == "Y" && *what == label("car_enter_exit")));
     }
 
     #[test]

@@ -223,7 +223,7 @@ pub const CAR_ACTIONS: &[Action] = &[
     act("car_brake", KeyCode::KeyS),
     act("car_steer_left", KeyCode::KeyA),
     act("car_steer_right", KeyCode::KeyD),
-    act("car_handbrake", KeyCode::Space),
+    act("car_handbrake", KeyCode::ShiftLeft),
     act("car_enter_exit", KeyCode::KeyE),
     act("car_horn", KeyCode::KeyB),
 ];

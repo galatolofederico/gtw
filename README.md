@@ -96,7 +96,7 @@ All bindings can be customized in **Settings → Controls**, which has separate 
 | --- | --- |
 | Throttle / brake and reverse | `W` / `S` |
 | Steer left / right | `A` / `D` |
-| Handbrake | `Space` |
+| Handbrake | `Left Shift` |
 | Get out | `E` |
 | Horn | `B` |
 

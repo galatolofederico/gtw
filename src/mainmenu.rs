@@ -249,8 +249,8 @@ fn wordmark(p: &Painter, at: Pos2, right: f32, k: f32) {
     let size = 60.0 * k.max(0.7);
     let mut job = egui::text::LayoutJob::default();
     let fmt = |col| egui::TextFormat { font_id: menu::bold(size), color: col, extra_letter_spacing: 3.0 * k, ..Default::default() };
-    job.append("GT", 0.0, fmt(Color32::WHITE));
-    job.append("W", 0.0, fmt(ACCENT));
+    // one colour for the whole word.
+    job.append("GTW", 0.0, fmt(Color32::WHITE));
     let g = p.layout_job(job);
     let r = Align2::LEFT_BOTTOM.anchor_size(at, g.size());
     let w = g.size().x;

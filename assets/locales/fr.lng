@@ -1337,6 +1337,7 @@ ground.chase_view = "Vue poursuite"
 ground.camera = "Caméra"
 ground.damage = "Dégâts"
 ground.enter_aircraft = "Monter dans cet avion"
+ground.get_in_named_aircraft = "Monter dans le {}"
 ground.re_enter_aircraft = "Remonter dans l’avion"
 ground.airport_start = "Démarrer un avion ici"
 

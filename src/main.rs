@@ -34,6 +34,7 @@ mod jsbsim;
 mod landcover;
 mod live;
 mod radar;
+mod ramp;
 mod livewx;
 mod mp;
 mod mp_proto;
@@ -1721,6 +1722,10 @@ struct Game {
     mp_list: Vec<String>,
     /// the near ones' stand-in aircraft, for posing their models (by player id)
     mp_puppets: std::collections::HashMap<u32, Plane>,
+    /// the player's own types parked at the fields near by (ramp.rs)
+    ramp: Vec<ramp::RampPlane>,
+    /// the fields `ramp` has been filled for
+    ramp_filled: HashSet<u32>,
     /// --mp-mirror (see Args)
     mp_mirror: bool,
     /// real weather (sets `wx` while `wx.live` is on)
@@ -2172,6 +2177,8 @@ impl Game {
             mp_custom: false,
             mp_list: args.mp_list.iter().cloned().chain(mp::DIRECTORY_URLS.iter().map(|u| u.to_string())).collect(),
             mp_puppets: std::collections::HashMap::new(),
+            ramp: Vec::new(),
+            ramp_filled: HashSet::new(),
             mp_mirror: args.mp_mirror,
             live_view: None,
             cursor: args.cursor,
@@ -2488,24 +2495,35 @@ impl Game {
             self.board_aircraft();
             return true;
         }
+        // One of the game's own types parked on the ramp (ramp.rs).
+        if let Some(i) = self.ramp_in_reach() {
+            self.board_ramp(i);
+            return true;
+        }
         let Some(a) = self.world.parked_aircraft_near(self.character.pos, AIRCRAFT_REACH) else { return false };
         let Some(spec) = traffic::player_spec_key(a.ty).and_then(aircraft::by_key) else { return false };
         let Some(_p) = self.world.take_parked_aircraft(a.apt, a.stand) else { return false };
-        self.set_aircraft(spec);
         let (lat, lon, h) = geo::pos_to_lla(a.pos);
-        self.respawn_ground(lat, lon, h, a.yaw, a.pitch);
+        self.take_controls(spec, lat, lon, h, a.yaw, a.pitch);
+        true
+    }
+
+    /// Put the player at the controls of a `spec` standing on the ground at
+    /// (lat, lon radians, ground height h), facing `yaw` on a `pitch` slope.
+    fn take_controls(&mut self, spec: &'static aircraft::Spec, lat: f64, lon: f64, h: f64, yaw: f64, pitch: f64) {
+        self.set_aircraft(spec);
+        self.respawn_ground(lat, lon, h, yaw, pitch);
         self.plane_visible = true;
         self.character.pos = self.plane.pos;
         self.character.vel = DVec3::ZERO;
         self.character.grounded = false;
         self.mode = Mode::Fly;
-        self.cam_yaw = a.yaw;
+        self.cam_yaw = yaw;
         self.cam_pitch = 0.0;
         self.cam_pos = self.plane.pos - self.plane.forward() * self.spec.cam_dist;
         self.cam_dir = -self.plane.forward();
         self.status = t!("ground.in_the_aircraft", spec.name).into();
         self.status_until = self.real + 2.0;
-        true
     }
 
     /// Take the controls of the aircraft already on the ground beside the player.
@@ -4364,9 +4382,10 @@ impl Game {
         c.throttle = (c.throttle + self.pad.throttle).clamp(-1.0, 1.0);
 
         // (With the flight panel open the right stick scrolls it instead.)
-        // On the ground the pad's buttons work: X interacts on foot, B gets
-        // out of a car (padmap::FOOT_LAYOUT/CAR_LAYOUT); in flight X is the
-        // way out of the aircraft.
+        // On the ground the pad's buttons work: Y gets into a car or an
+        // aircraft on foot and out of a car (padmap::FOOT_LAYOUT/CAR_LAYOUT);
+        // in flight Y is the flying modifier, so X is the way out of the aircraft.
+        let mut y_on_ground = false;
         if self.mode == Mode::Fly && !self.pause_open && pressed.contains(&padmap::PadBtn::X.gilrs()) {
             self.interact();
         }
@@ -4377,9 +4396,9 @@ impl Game {
             self.cam_yaw = (self.cam_yaw + look_x * rate).rem_euclid(std::f64::consts::TAU);
             self.cam_pitch = (self.cam_pitch + look_y * rate * 0.8).clamp(-1.35, 1.35);
             // The pad's on-foot buttons (padmap::FOOT_LAYOUT): RB sprints, A
-            // jumps, X interacts and R3 swaps the camera. In a car (padmap::
+            // jumps, Y gets in and R3 swaps the camera. In a car (padmap::
             // CAR_LAYOUT) the left stick steers, A accelerates, X brakes and
-            // reverses, RB is the handbrake, B gets out, R3 swaps the view and
+            // reverses, RB is the handbrake, Y gets out, R3 swaps the view and
             // L3 sounds the horn.
             use padmap::PadBtn;
             if self.mode == Mode::Drive {
@@ -4387,7 +4406,8 @@ impl Game {
                 self.pad_car_brake = down.contains(&PadBtn::X);
                 self.pad_car_handbrake = down.contains(&PadBtn::RB);
                 self.pad_ground_sprint = false;
-                if pressed.contains(&PadBtn::B.gilrs()) {
+                if pressed.contains(&PadBtn::Y.gilrs()) {
+                    y_on_ground = true;
                     self.interact();
                 }
                 if pressed.contains(&PadBtn::R3.gilrs()) {
@@ -4404,7 +4424,8 @@ impl Game {
                 if pressed.contains(&PadBtn::A.gilrs()) {
                     self.pad_jump = true;
                 }
-                if pressed.contains(&PadBtn::X.gilrs()) {
+                if pressed.contains(&PadBtn::Y.gilrs()) {
+                    y_on_ground = true;
                     self.interact();
                 }
                 if pressed.contains(&PadBtn::R3.gilrs()) {
@@ -4440,7 +4461,9 @@ impl Game {
         // Y on its own, let go without having been used with another button.
         if pressed.contains(&Button::North) {
             self.pad_y = true;
-            self.pad_y_combo = false;
+            // A Y that got the player into an aircraft is spent: letting it go
+            // must not fire the flying layout's Y-alone action.
+            self.pad_y_combo = y_on_ground;
         }
         if self.pad_y && pressed.iter().any(|b| *b != Button::North) {
             self.pad_y_combo = true;
@@ -5358,7 +5381,9 @@ impl Game {
             // A skips the loading screen (the scenery goes on loading), as Enter does.
             (_, Button::South) if self.loading.as_ref().is_some_and(|l| l.done.is_none()) => self.key(KeyCode::Enter),
             (_, Button::South) if self.crashed => self.respawn_here(),
-            // Menu pauses, unless Y + Menu is given something to do.
+            // Menu goes back to the start menu on the ground; in flight it
+            // pauses, unless Y + Menu is given something to do.
+            (_, Button::Start) if self.mode.ground() && !self.crashed => self.to_main_menu(),
             (_, Button::Start) if !(modifier && self.binds.pad.has_y(padmap::PadBtn::Menu)) => self.set_pause_menu(true),
             // Everything else that flies is in Settings › Controls › Gamepad (pad_fly_buttons).
             _ => {}
@@ -5452,6 +5477,7 @@ impl Game {
             // Esc closes a pop-up window first; otherwise it pauses.
             KeyCode::Escape if self.show_help => self.show_help = false,
             KeyCode::Escape if self.minimap.full => self.minimap.full = false,
+            KeyCode::Escape if self.mode.ground() => self.to_main_menu(),
             KeyCode::Escape => self.set_pause_menu(true),
             KeyCode::KeyR if self.mode.ground() => {
                 let at = self.character.last_safe;
@@ -5658,6 +5684,30 @@ impl Game {
                 m.surrender_focus(id);
             }
         });
+    }
+
+    /// Esc or the pad's Menu on the ground: save the run and go back to the
+    /// start menu, which offers it again under Continue. (In flight the same
+    /// buttons pause, and the pause menu has the way back.)
+    fn to_main_menu(&mut self) {
+        if !self.mode.ground() {
+            return;
+        }
+        self.save_now();
+        self.save = Some(self.snapshot());
+        self.info_open = false;
+        self.goto_open = false;
+        self.minimap.full = false;
+        self.show_help = false;
+        (self.pad_car_throttle, self.pad_car_brake, self.pad_car_handbrake, self.pad_ground_sprint) = (false, false, false, false);
+        let (lat, lon, _) = geo::pos_to_lla(self.focus_pos());
+        self.menu.look_at(lat.to_degrees(), lon.to_degrees(), 60_000.0);
+        self.menu.pick = Some((lat.to_degrees(), lon.to_degrees()));
+        self.menu.hour = (self.utc + lon.to_degrees() / 15.0).rem_euclid(24.0);
+        self.menu.starting = false;
+        self.menu.screen = menu::Screen::Main;
+        self.mode = Mode::Menu;
+        self.pad_home = true;
     }
 
     /// Back to the globe, looking at where we were.
@@ -8005,6 +8055,8 @@ impl Game {
         }
         self.update_mp(in_menu);
         if !in_menu {
+            self.update_ramp();
+            self.draw_ramp(cam, &mut objs);
             let full = self.draw_mp_planes(cam, dt_real, &mut objs);
             mp::instances(&self.mp_players, &full, cam, &mut insts, &mut air_lights);
         }
@@ -8623,20 +8675,22 @@ impl Game {
             });
         }
         // What the interact action does from here (controller button or bound key).
-        let prompt = match self.mode {
+        let prompt: Option<String> = match self.mode {
             Mode::Walk => {
                 let in_reach = self.last_car.as_ref().is_some_and(|v| (v.pos - self.character.pos).length() < 4.0);
                 let own_aircraft = self.plane_visible && self.plane.on_ground && (self.plane.pos - self.character.pos).length() < AIRCRAFT_REACH;
                 if in_reach {
-                    Some(t!("ground.re_enter_car"))
+                    Some(t!("ground.re_enter_car").into())
                 } else if self.traffic_in_reach(TALK_RADIUS) {
-                    Some(t!("ground.take_moving_car"))
+                    Some(t!("ground.take_moving_car").into())
                 } else if self.world.nearest_parked_car(self.character.pos, TALK_RADIUS).is_some() {
-                    Some(t!("ground.take_car"))
+                    Some(t!("ground.take_car").into())
                 } else if own_aircraft {
-                    Some(t!("ground.re_enter_aircraft"))
+                    Some(t!("ground.re_enter_aircraft").into())
+                } else if let Some(p) = self.ramp_prompt() {
+                    Some(p)
                 } else if self.world.parked_aircraft_near(self.character.pos, AIRCRAFT_REACH).is_some() {
-                    Some(t!("ground.enter_aircraft"))
+                    Some(t!("ground.enter_aircraft").into())
                 } else {
                     None
                 }
@@ -8644,7 +8698,7 @@ impl Game {
             _ => None,
         };
         if let Some(what) = prompt {
-            let (ctx_kind, act_id, pad_spec) = (bind::Context::Foot, "interact", padmap::FOOT_LAYOUT.iter().find(|(id, _)| *id == "interact").map(|(_, c)| c.spec()).unwrap_or_else(|| "X".to_string()));
+            let (ctx_kind, act_id, pad_spec) = (bind::Context::Foot, "interact", padmap::FOOT_LAYOUT.iter().find(|(id, _)| *id == "interact").map(|(_, c)| c.spec()).unwrap_or_else(|| "Y".to_string()));
             let key_label = bind::action_in(ctx_kind, act_id)
                 .and_then(|a| self.binds.key_of(ctx_kind, a))
                 .map(bind::key_name)

@@ -476,6 +476,19 @@ impl Traffic {
         Some(p)
     }
 
+    /// The stands nobody is at or heading for.
+    pub fn free_stands(&self) -> Vec<usize> {
+        (0..self.taken.len()).filter(|i| !self.taken[*i]).collect()
+    }
+
+    /// Keep `stand` for something else (one of the player's own types parked
+    /// there): no arrival is sent to it.
+    pub fn reserve(&mut self, stand: usize) {
+        if stand < self.taken.len() {
+            self.taken[stand] = true;
+        }
+    }
+
     /// Someone at a stand pushes back and taxis out.
     fn depart(&mut self, g: &Geo) {
         let t = self.t;
