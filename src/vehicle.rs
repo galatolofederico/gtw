@@ -1422,4 +1422,86 @@ mod tests {
         assert!((spot - v.pos).dot(right) < -0.5, "the building side gives way");
         assert!(character::standable(&walled, spot).is_some());
     }
+
+    /// Flat asphalt with vertical tree trunks at the given planet-frame
+    /// positions and radii.
+    struct TreesWorld(Vec<(DVec3, f64)>);
+
+    impl WorldQuery for TreesWorld {
+        fn surface_at(&self, _p: DVec3) -> Option<SurfaceHit> {
+            Some(SurfaceHit { h: 0.0, kind: Surface::Asphalt, water: false, road: false, sidewalk: false, bridge: false })
+        }
+        fn building_push_sphere(&self, _p: DVec3, _r: f64) -> Option<DVec3> {
+            None
+        }
+        fn building_push_box(&self, _p: DVec3, _h: [f64; 2], _y: f64) -> Option<DVec3> {
+            None
+        }
+        fn tree_push_sphere(&self, _p: DVec3, _r: f64) -> Option<DVec3> {
+            None
+        }
+        fn tree_push_box(&self, p: DVec3, half: [f64; 2], yaw: f64) -> Option<DVec3> {
+            let (e, n, _) = geo::enu(p);
+            let mut best: Option<DVec3> = None;
+            for &(trunk, r) in &self.0 {
+                if let Some(push) = crate::world::tree_box_push(trunk, r, p, half, yaw, e, n) {
+                    if best.is_none_or(|b| push.length() > b.length()) {
+                        best = Some(push);
+                    }
+                }
+            }
+            best
+        }
+    }
+
+    #[test]
+    fn a_tree_at_the_tail_does_not_pin_the_car() {
+        // A trunk just off the rear corner used to be pulled into the car and
+        // cancelled every forward step: the car sat at full throttle and 0 km/h.
+        let (east, north, _) = geo::enu(origin());
+        let w = TreesWorld(vec![(origin() + east * -0.5 - north * 2.4, 0.25)]);
+        let mut v = Vehicle::spawn(0, [0.5; 3], origin(), 0.0);
+        v.grounded = true;
+        v.spawn_grace = 0.0;
+        let s = drive(&mut v, &w, VehicleControls { throttle: 1.0, ..Default::default() }, 3.0);
+        assert!(s.speed > 10.0, "it drives away: {:.1} m/s", s.speed);
+        assert!((v.pos - origin()).dot(north) > 15.0, "made distance: {:.1} m", (v.pos - origin()).dot(north));
+    }
+
+    #[test]
+    fn a_car_placed_over_a_trunk_is_pushed_clear() {
+        // A save, a streamed-in tile or a shove can leave a trunk inside the
+        // box: the car must be popped out, not held there.
+        let (east, north, _) = geo::enu(origin());
+        let trunk = origin() + east * -0.5 - north * 2.0;
+        let w = TreesWorld(vec![(trunk, 0.3)]);
+        let mut v = Vehicle::spawn(0, [0.5; 3], origin(), 0.0);
+        v.grounded = true;
+        v.spawn_grace = 0.0;
+        drive(&mut v, &w, VehicleControls::default(), 1.0);
+        let d = trunk - v.pos;
+        let (lx, lz) = (d.dot(v.right()), d.dot(v.forward()));
+        let half = v.half();
+        let gap = ((lx - lx.clamp(-half[0], half[0])).powi(2) + (lz - lz.clamp(-half[1], half[1])).powi(2)).sqrt();
+        assert!(gap > 0.29, "the trunk is {gap:.2} m from the box, not inside it");
+    }
+
+    #[test]
+    fn a_tree_ahead_stops_the_car_and_reverse_frees_it() {
+        let (_, north, _) = geo::enu(origin());
+        let trunk = origin() + north * 8.0;
+        let w = TreesWorld(vec![(trunk, 0.3)]);
+        let mut v = Vehicle::spawn(0, [0.5; 3], origin(), 0.0);
+        v.grounded = true;
+        v.spawn_grace = 0.0;
+        let s = drive(&mut v, &w, VehicleControls { throttle: 1.0, ..Default::default() }, 4.0);
+        assert!(s.speed.abs() < 0.5, "the trunk stops it: {:.2} m/s", s.speed);
+        let stopped = (v.pos - origin()).dot(north);
+        assert!((5.0..5.8).contains(&stopped), "nose at the trunk, centre at {stopped:.2} m");
+        // Reverse away: the tree is solid, but it does not trap the car.
+        let s = drive(&mut v, &w, VehicleControls { brake: 1.0, ..Default::default() }, 2.0);
+        assert!(s.speed < -1.0, "it backs away: {:.1} m/s", s.speed);
+        let back = (v.pos - origin()).dot(north);
+        assert!(back < stopped - 2.0, "reversed clear: {back:.2} m");
+    }
 }

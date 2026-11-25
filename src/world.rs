@@ -2450,7 +2450,6 @@ impl WorldQuery for World {
     fn tree_push_box(&self, p: DVec3, half: [f64; 2], yaw: f64) -> Option<DVec3> {
         let (_, _, alt) = geo::pos_to_lla(p);
         let (e, n) = enu_of(p);
-        let (c, s) = (yaw.cos(), yaw.sin());
         let (hx, hz) = (half[0].max(0.0), half[1].max(0.0));
         let mut trees = Vec::new();
         self.trees_near(p, hx.hypot(hz) + 40.0, &mut trees);
@@ -2460,33 +2459,49 @@ impl WorldQuery for World {
             if alt > base + t.height || alt + 1.0 < base {
                 continue;
             }
-            let d = t.pos - p;
-            let (x, z) = (d.dot(e), d.dot(n));
-            // `right = e*c - n*s`, `fwd = e*s + n*c` for clockwise bearing `yaw`.
-            let (bx, bz) = (c * x - s * z, s * x + c * z);
-            let (qx, qz) = (bx.clamp(-hx, hx), bz.clamp(-hz, hz));
-            let (dx, dz) = (qx - bx, qz - bz);
-            let dist = dx.hypot(dz);
-            if dist >= t.trunk_r {
-                continue;
-            }
-            let (mut ux, mut uz) = if dist > 1e-9 { (-dx / dist, -dz / dist) } else { (-bx, -bz) };
-            let ul = ux.hypot(uz);
-            if ul < 1e-9 {
-                (ux, uz) = (1.0, 0.0);
-            } else {
-                (ux, uz) = (ux / ul, uz / ul);
-            }
-            let amount = t.trunk_r - dist;
-            let wx = c * ux + s * uz;
-            let wz = -s * ux + c * uz;
-            let push = (e * wx + n * wz) * amount;
-            if best.is_none_or(|b| push.length() > b.length()) {
-                best = Some(push);
+            if let Some(push) = tree_box_push(t.pos, t.trunk_r, p, half, yaw, e, n) {
+                if best.is_none_or(|b| push.length() > b.length()) {
+                    best = Some(push);
+                }
             }
         }
         best
     }
+}
+
+/// Push an oriented box at `p` (half extents `half`, bearing `yaw`) out of the
+/// vertical trunk at `trunk` with radius `trunk_r`. The push moves the box away
+/// from the trunk; `e` and `n` are the east and north axes at `p`.
+pub(crate) fn tree_box_push(trunk: DVec3, trunk_r: f64, p: DVec3, half: [f64; 2], yaw: f64, e: DVec3, n: DVec3) -> Option<DVec3> {
+    let (c, s) = (yaw.cos(), yaw.sin());
+    let (hx, hz) = (half[0].max(0.0), half[1].max(0.0));
+    let d = trunk - p;
+    let (x, z) = (d.dot(e), d.dot(n));
+    // The trunk in the box's own frame: +x right, +z forward.
+    let (bx, bz) = (c * x - s * z, s * x + c * z);
+    let (qx, qz) = (bx.clamp(-hx, hx), bz.clamp(-hz, hz));
+    // From the trunk towards its nearest point on the box: the way the box
+    // must move to part from it.
+    let (dx, dz) = (qx - bx, qz - bz);
+    let dist = dx.hypot(dz);
+    let (ux, uz, amount) = if dist > 1e-9 {
+        if dist >= trunk_r {
+            return None;
+        }
+        (dx / dist, dz / dist, trunk_r - dist)
+    } else {
+        // The trunk centre is inside the box: leave by the nearest face,
+        // far enough for the radius to clear the box altogether.
+        let (px, pz) = (hx - bx.abs(), hz - bz.abs());
+        if px < pz {
+            (-bx.signum(), 0.0, px + trunk_r)
+        } else {
+            (0.0, -bz.signum(), pz + trunk_r)
+        }
+    };
+    let wx = c * ux + s * uz;
+    let wz = -s * ux + c * uz;
+    Some((e * wx + n * wz) * amount)
 }
 
 #[allow(dead_code)]
@@ -2846,6 +2861,39 @@ mod tests {
         assert!(WorldQuery::building_push_box(&w, p, [1.0, 0.5], 0.0).is_none());
         assert!(WorldQuery::tree_push_sphere(&w, p, 0.3).is_none());
         assert!(WorldQuery::tree_push_box(&w, p, [1.0, 0.5], 0.0).is_none());
+    }
+
+    #[test]
+    fn tree_box_push_moves_the_box_away_from_the_trunk() {
+        let p = origin();
+        let (e, n, _) = geo::enu(p);
+        let half = [0.9, 2.2];
+        let push = |at: DVec3, r: f64| tree_box_push(p + at, r, p, half, 0.0, e, n);
+        // A trunk just ahead of the front bumper pushes the box back.
+        let v = push(n * 2.4, 0.25).expect("the trunk touches the front");
+        assert!(v.dot(n) < -0.04 && v.dot(e).abs() < 1e-9, "backwards: {v:?}");
+        // A trunk beside the right-hand side pushes the box left.
+        let v = push(e * 1.0, 0.25).expect("the trunk touches the side");
+        assert!(v.dot(e) < -0.14 && v.dot(n).abs() < 1e-9, "to the left: {v:?}");
+        // A trunk behind the rear bumper pushes the box forwards, not into it:
+        // a car with a tree at its tail must still be able to drive away.
+        let v = push(e * -0.5 + n * -2.35, 0.25).expect("the trunk touches the tail");
+        assert!(v.dot(n) > 0.09 && v.dot(e).abs() < 0.01, "forwards: {v:?}");
+        // The trunk centre inside the box leaves by the nearest face, clear of
+        // its radius.
+        let v = push(e * 0.5, 0.25).expect("the trunk is inside");
+        assert!((v.dot(e) + 0.65).abs() < 1e-9 && v.dot(n).abs() < 1e-9, "out the right face: {v:?}");
+        let v = push(e * -0.5 + n * -2.0, 0.25).expect("the trunk is inside");
+        assert!((v.dot(n) - 0.45).abs() < 1e-9 && v.dot(e).abs() < 1e-9, "out the back: {v:?}");
+        // The same holds with the box at a bearing.
+        let yaw = std::f64::consts::FRAC_PI_4;
+        let fwd = e * yaw.sin() + n * yaw.cos();
+        let right = e * yaw.cos() - n * yaw.sin();
+        let v = tree_box_push(p + fwd * 2.4, 0.25, p, half, yaw, e, n).expect("contact at 45 degrees");
+        assert!(v.dot(fwd) < -0.04 && v.dot(right).abs() < 1e-9, "back along the box's axis: {v:?}");
+        // Clear of the trunk: no correction.
+        assert!(push(n * 2.6, 0.25).is_none());
+        assert!(push(e * 1.2, 0.25).is_none());
     }
 
     #[test]
