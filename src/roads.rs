@@ -1030,16 +1030,32 @@ pub fn build(cx: &Ctx, vt: &VecTile, src: &crate::sources::Sources, mesh: &mut M
                     let thick = if len + pre > 300.0 { 1.8 } else { 1.0 };
                     let sty = [(half * 4.0).min(255.0) as u8, (kind & 255) as u8, (kind >> 8) as u8, 0];
                     let grey = [150, 148, 142, K_PLAIN];
+                    // The building pass that cannot discard (`p_build_whole`)
+                    // culls counter-clockwise faces: like the roofs, the deck
+                    // top must wind clockwise seen from above, or it vanishes
+                    // and the water or grass under the bridge shows through
+                    // (which way it winds otherwise depends on the direction
+                    // the OSM way was drawn in). The thin parapets and the
+                    // soffit are seen from both sides, so they get both faces.
+                    let up_m = upv;
+                    let top_cw = |quad: [(Vec3, [f32; 2]); 4]| {
+                        let n = (quad[1].0 - quad[0].0).cross(quad[2].0 - quad[0].0);
+                        if n.dot(up_m) > 0.0 { [quad[3], quad[2], quad[1], quad[0]] } else { quad }
+                    };
+                    let both = |mesh: &mut Mesh, quad: [(Vec3, [f32; 2]); 4], col: [u8; 4], sty: [u8; 4]| {
+                        mesh.poly(false, &quad, col, sty, None);
+                        mesh.poly(false, &[quad[3], quad[2], quad[1], quad[0]], col, sty, None);
+                    };
                     for i in 0..n - 1 {
                         let c = |k: usize, s: f32, dz: f32| cx.pos(side(k, s, half), zs[k] + dz);
                         let (al0, al1) = (pre + cum[i], pre + cum[i + 1]);
-                        mesh.poly(false, &[(c(i, 1.0, 0.0), [-half, al0]), (c(i, -1.0, 0.0), [half, al0]), (c(i + 1, -1.0, 0.0), [half, al1]), (c(i + 1, 1.0, 0.0), [-half, al1])], [0, 0, 0, K_DECK], sty, Some(upv));
+                        mesh.poly(false, &top_cw([(c(i, 1.0, 0.0), [-half, al0]), (c(i, -1.0, 0.0), [half, al0]), (c(i + 1, -1.0, 0.0), [half, al1]), (c(i + 1, 1.0, 0.0), [-half, al1])]), [0, 0, 0, K_DECK], sty, Some(upv));
                         for s in [1.0f32, -1.0] {
-                            mesh.poly(false, &[(c(i, s, -thick), [al0, 0.0]), (c(i + 1, s, -thick), [al1, 0.0]), (c(i + 1, s, 0.9), [al1, 1.9]), (c(i, s, 0.9), [al0, 1.9])], grey, [90, 0, 120, 0], None);
+                            both(mesh, [(c(i, s, -thick), [al0, 0.0]), (c(i + 1, s, -thick), [al1, 0.0]), (c(i + 1, s, 0.9), [al1, 1.9]), (c(i, s, 0.9), [al0, 1.9])], grey, [90, 0, 120, 0]);
                             let cap = |k: usize, dz: f32| cx.pos(side(k, s, half), zs[k] + dz);
-                            mesh.poly(false, &[(cap(i, 0.92), [al0, 0.0]), (cap(i + 1, 0.92), [al1, 0.0]), (cap(i + 1, 1.08), [al1, 0.16]), (cap(i, 1.08), [al0, 0.16])], [172, 174, 173, K_PLAIN], [90, 0, 120, 0], None);
+                            both(mesh, [(cap(i, 0.92), [al0, 0.0]), (cap(i + 1, 0.92), [al1, 0.0]), (cap(i + 1, 1.08), [al1, 0.16]), (cap(i, 1.08), [al0, 0.16])], [172, 174, 173, K_PLAIN], [90, 0, 120, 0]);
                         }
-                        mesh.poly(false, &[(c(i, 1.0, -thick), [0.0, al0]), (c(i, -1.0, -thick), [1.0, al0]), (c(i + 1, -1.0, -thick), [1.0, al1]), (c(i + 1, 1.0, -thick), [0.0, al1])], grey, [90, 0, 120, 0], None);
+                        both(mesh, [(c(i, 1.0, -thick), [0.0, al0]), (c(i, -1.0, -thick), [1.0, al0]), (c(i + 1, -1.0, -thick), [1.0, al1]), (c(i + 1, 1.0, -thick), [0.0, al1])], grey, [90, 0, 120, 0]);
                         let ring: Vec<[f32; 2]> = [side(i, 1.0, half), side(i, -1.0, half), side(i + 1, -1.0, half), side(i + 1, 1.0, half)].iter().map(|p| [p[0] / ext, p[1] / ext]).collect();
                         let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
                         for p in &ring {
@@ -1508,6 +1524,39 @@ mod tests {
         let roads = build(&cx, &vt, &src, &mut mesh, &mut footprints, &vec![0; RASTER * RASTER]);
         let deck = roads.net.paths.iter().find(|p| p.bridge).unwrap();
         assert!(deck.alt.iter().all(|z| *z >= 2.5), "the coarse water triangle sits at 2.5 m over the whole crossing: {:?}", deck.alt);
+    }
+
+    #[test]
+    fn a_bridge_deck_faces_up_whichever_way_the_way_runs() {
+        // The no-discard building pass culls counter-clockwise faces (render.rs
+        // mode 14): a deck top wound that way from above vanished, and the
+        // water under the bridge showed through. Both directions of the way
+        // must give a clockwise (roof-like) top.
+        let id = crate::geo::TileId::new(14, 0, 0);
+        let (lat, lon) = id.lat_lon(0.5, 0.5);
+        let elev = std::sync::Arc::new(ElevTile { h: vec![0.0; 128 * 128], n: 128, pad: 0 });
+        let cx = Ctx { id, ext: 1024.0, unit_m: 1.0, center: crate::geo::lla_to_pos(lat, lon, 0.0), elev: Some(elev), atlas: Vec::new(), lat: lat.to_degrees(), lon: lon.to_degrees(), region: crate::buildings::region(lat.to_degrees(), lon.to_degrees()) };
+        let src = crate::sources::Sources::new(crate::fetch::Fetcher::new(std::path::PathBuf::new(), true), String::new());
+        let up = cx.center.as_vec3().normalize();
+        for pts in [vec![[300.0, 500.0], [360.0, 500.0]], vec![[360.0, 500.0], [300.0, 500.0]], vec![[500.0, 300.0], [500.0, 360.0]]] {
+            let mut tagged = line(pts.clone(), RC_MINOR);
+            tagged.brunnel = 1;
+            let vt = tile(vec![tagged]);
+            let mut mesh = Mesh::default();
+            let mut footprints = Vec::new();
+            build(&cx, &vt, &src, &mut mesh, &mut footprints, &vec![0; RASTER * RASTER]);
+            let mut tops = 0;
+            for t in mesh.main.chunks(3) {
+                let v = |k: usize| &mesh.v[t[k] as usize];
+                if v(0).col[3] != K_DECK {
+                    continue;
+                }
+                let (a, b, c) = (Vec3::from(v(0).pos), Vec3::from(v(1).pos), Vec3::from(v(2).pos));
+                assert!((b - a).cross(c - a).dot(up) < 0.0, "deck top of {pts:?} winds counter-clockwise from above");
+                tops += 1;
+            }
+            assert!(tops > 0, "a deck was built for {pts:?}");
+        }
     }
 
     #[test]
