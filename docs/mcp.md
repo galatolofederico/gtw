@@ -99,7 +99,6 @@ Units are feet, knots, ft/min, degrees true, hPa and kg.
 | `get_aircraft_state` | Position, altitude and AGL, heading/pitch/roll, IAS/TAS/GS, vertical speed, Mach, angle of attack, load factor, stall/overspeed, throttle, flaps, gear, speedbrake, trim, mixture, engine, fuel and endurance, electrics, failures, damage, warnings, radios and time. |
 | `get_navigation` | NAV1 and ADF stations and readings, CDI, TO/FROM, glide slope, DME, OBS, altimeter setting, nearest airports, VORs, NDBs and ILS. Optional `radius_nm` and `limit`. |
 | `get_environment` | Cloud cover/base/depth/ceiling, storms, haze, visibility, wind and gusts, QNH, turbulence and updraughts, the live METAR source, UTC/local time, day and time rate. |
-| `get_traffic` | Live ADS-B contacts around the aircraft: callsign, type, altitude, speed, vertical speed, distance and bearing. Optional `radius_nm` and `limit`. |
 | `get_airport_info` | The loaded airport or one named by ICAO/IATA code: runways, active runway, ILS, wind, and structured approach guidance (distance, centreline offset, height above threshold, glide-path deviation, on centreline/glide path). |
 
 ### Changing the aircraft

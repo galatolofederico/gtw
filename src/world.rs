@@ -6,7 +6,6 @@ use crate::geo::{self, TileId};
 use crate::render::{BuildGpu, DetailDraw, Inst, NearDraw, Renderer, TessCells, TileGpu, TreeDraw, TreeInst, MAX_NEAR};
 use crate::roads::{RoadHit, RoadIndex, RoadNet};
 use crate::trees::{tree_jit, NearCell, TreeDim, Under, CARDS, CARD_RANGE, IMP_DIST, LODS, LOD_JITTER, TREE_SPECIES, VARIANTS};
-use crate::weapons::{Target, TargetKey};
 use crate::sources::{Job, JobResult, Loader, DATA_ZOOM, GRID, GV, MASK};
 use crate::surface::{Surface, SurfaceHit};
 use glam::{DMat4, DVec3, DVec4, Vec3};
@@ -86,7 +85,6 @@ pub struct Field {
     scenery: Vec<crate::scenery::Placed>,
     /// floodlights that light the ground: lamp (relative to `geo.center`), beam direction
     floods: Vec<(Vec3, Vec3)>,
-    pub traffic: crate::traffic::Traffic,
     last_used: u64,
 }
 enum FSlot {
@@ -142,23 +140,6 @@ pub struct TakenCar {
     pub yaw: f64,
     /// Velocity in the planet frame (m/s); zero for a parked car.
     pub velocity: DVec3,
-}
-
-/// A parked airport aircraft the player can take: where it stands on the
-/// planet, and which stand and traffic type it is.
-#[derive(Copy, Clone, Debug)]
-pub struct ParkedAircraft {
-    /// Airfield index, as `Traffic`'s field is keyed.
-    pub apt: u32,
-    pub stand: usize,
-    /// Traffic type (0 light single, 1 business jet, larger scenery).
-    pub ty: u8,
-    /// Ground-contact origin in the planet frame (between the main wheels).
-    pub pos: DVec3,
-    /// Bearing: radians from north, clockwise.
-    pub yaw: f64,
-    /// Ground slope along the nose, radians.
-    pub pitch: f64,
 }
 
 /// Whether a [`TrafficBody`] is moving in its lane or parked at the kerb.
@@ -1530,9 +1511,8 @@ impl World {
                         Ok((geo, mesh)) => {
                             bytes += Renderer::field_bytes(&mesh);
                             let gpu = r.upload_field(&mesh);
-                            let traffic = crate::traffic::Traffic::new(&geo, i.wrapping_mul(2654435761) ^ 0x5bd1e995);
                             log::info!("airfield {} ready: {} runways, {} stands, {} lights", geo.apt().ident, geo.runways.len(), geo.stands.len(), mesh.lights.len());
-                            self.fields.insert(i, FSlot::Ready(Box::new(Field { geo, gpu, props: mesh.props, socks: mesh.socks, scenery: mesh.scenery, floods: mesh.floods, traffic, last_used: self.frame })));
+                            self.fields.insert(i, FSlot::Ready(Box::new(Field { geo, gpu, props: mesh.props, socks: mesh.socks, scenery: mesh.scenery, floods: mesh.floods, last_used: self.frame })));
                         }
                         Err(e) => {
                             log::debug!("airfield {i} failed: {e}");
@@ -1823,35 +1803,6 @@ impl World {
         }
     }
 
-    /// The nearest parked airport aircraft within `radius` of `p`, whatever its
-    /// type. `take_parked_aircraft` removes it once the player gets in.
-    pub fn parked_aircraft_near(&self, p: DVec3, radius: f64) -> Option<ParkedAircraft> {
-        let mut best: Option<(f64, ParkedAircraft)> = None;
-        for s in self.fields.values() {
-            let FSlot::Ready(f) = s else { continue };
-            for parked in &f.traffic.parked {
-                let Some(st) = f.geo.stands.get(parked.stand) else { continue };
-                let (lp, dir) = crate::traffic::stand_pose(st, parked.ty);
-                let pos = f.geo.world(lp, f.geo.h(lp) as f64);
-                let d = (pos - p).length();
-                if d > radius || best.as_ref().is_some_and(|(bd, _)| d >= *bd) {
-                    continue;
-                }
-                let slope = (f.geo.h(lp + dir * 3.0) - f.geo.h(lp - dir * 3.0)) as f64 / 6.0;
-                let a = ParkedAircraft {
-                    apt: f.geo.idx,
-                    stand: parked.stand,
-                    ty: parked.ty,
-                    pos,
-                    yaw: (dir.x as f64).atan2(dir.y as f64),
-                    pitch: slope.atan(),
-                };
-                best = Some((d, a));
-            }
-        }
-        best.map(|(_, a)| a)
-    }
-
     /// The airfields loaded within `radius` of `p` (their indices).
     pub fn fields_near(&self, p: DVec3, radius: f64) -> Vec<u32> {
         self.fields.values().filter_map(|s| if let FSlot::Ready(f) = s { Some(f) } else { None }).filter(|f| (f.geo.center - p).length() < radius + f.geo.radius as f64).map(|f| f.geo.idx).collect()
@@ -1865,60 +1816,12 @@ impl World {
         }
     }
 
-    /// The stands of airfield `apt` the traffic is not using.
+    /// The stands of an airfield, all free now that no AI traffic uses them.
     pub fn free_stands(&self, apt: u32) -> Vec<usize> {
         match self.fields.get(&apt) {
-            Some(FSlot::Ready(f)) => f.traffic.free_stands(),
+            Some(FSlot::Ready(f)) => (0..f.geo.stands.len()).collect(),
             _ => Vec::new(),
         }
-    }
-
-    /// Keep a stand of airfield `apt` from the traffic.
-    pub fn reserve_stand(&mut self, apt: u32, stand: usize) {
-        if let Some(FSlot::Ready(f)) = self.fields.get_mut(&apt) {
-            f.traffic.reserve(stand);
-        }
-    }
-
-    /// Take the aircraft parked at `stand` of airfield `apt` out of the traffic.
-    pub fn take_parked_aircraft(&mut self, apt: u32, stand: usize) -> Option<crate::traffic::Parked> {
-        let Some(FSlot::Ready(f)) = self.fields.get_mut(&apt) else { return None };
-        f.traffic.take_parked(stand)
-    }
-
-    /// Move the airport traffic on. `player`: the player's aircraft position.
-    pub fn update_airports(&mut self, dt: f32, wind_from: f32, wind_kt: f32, activity: f32, player: Option<DVec3>, focus: DVec3) {
-        for s in self.fields.values_mut() {
-            let FSlot::Ready(f) = s else { continue };
-            if (f.geo.center - focus).length() > 40_000.0 {
-                continue;
-            }
-            let pl = player.map(|p| {
-                let lp = f.geo.local(p);
-                (lp, geo::pos_to_lla(p).2 as f32 - f.geo.h(lp))
-            });
-            f.traffic.step(&f.geo, dt, wind_from, wind_kt, activity, pl);
-        }
-    }
-
-    /// The airborne aircraft at nearby airports, as missile targets.
-    pub fn air_targets(&self, near: DVec3) -> Vec<Target> {
-        let mut out = Vec::new();
-        for s in self.fields.values() {
-            let FSlot::Ready(f) = s else { continue };
-            if (f.geo.center - near).length() > 40_000.0 {
-                continue;
-            }
-            f.traffic.targets(&f.geo, &mut out);
-        }
-        out
-    }
-
-    /// A missile hit an airport mover: take it out of the traffic.
-    pub fn down_air_target(&mut self, key: &TargetKey) -> bool {
-        let TargetKey::Airport { apt, mover } = key else { return false };
-        let Some(FSlot::Ready(f)) = self.fields.get_mut(apt) else { return false };
-        f.traffic.down(*mover)
     }
 
     /// Pavement to draw: each airfield with its centre relative to the camera.
@@ -1937,7 +1840,7 @@ impl World {
         out.into_iter().take(crate::render::MAX_FIELDS).map(|x| (x.1, x.2)).collect()
     }
 
-    /// Fixed airport objects, parked and moving aircraft and their lights.
+    /// Fixed airport objects: fixtures, windsocks and scenery-pack objects.
     /// `scenery` takes the hand-made scenery packs' objects (scenery.rs).
     /// `wind`: where it blows from (degrees) and how hard (knots).
     /// The eight floodlights nearest the camera within 3 km, for Globals
@@ -1963,7 +1866,7 @@ impl World {
         }
     }
 
-    pub fn airport_instances(&self, cam: DVec3, wind: (f32, f32), t: f64, out: &mut Vec<(u32, Inst)>, scenery: &mut Vec<(u32, Inst)>, lights: &mut Vec<crate::airfield::Light>) {
+    pub fn airport_instances(&self, cam: DVec3, wind: (f32, f32), t: f64, out: &mut Vec<(u32, Inst)>, scenery: &mut Vec<(u32, Inst)>) {
         let (wind_from, wind_kt) = wind;
         let fr = self.frustum.as_ref();
         for s in self.fields.values() {
@@ -2023,7 +1926,6 @@ impl World {
                 let rnd = ((pi as u32).wrapping_mul(2_654_435_761) >> 8) as f32 / 16_777_216.0;
                 scenery.push((p.mesh, Inst { m, tint: [p.tint[0], p.tint[1], p.tint[2], 0.0], ext: [0.0, rnd, 0.0, 1.0] }));
             }
-            f.traffic.draw(g, cam, t, out, lights);
         }
     }
 

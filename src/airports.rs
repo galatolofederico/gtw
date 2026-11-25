@@ -5,8 +5,7 @@
 //! OpenStreetMap vector tiles give the layout as it lies on the imagery:
 //! runway and taxiway centrelines, aprons, gates. `Geo` joins the two into
 //! one airfield in a local east/north frame, with the taxi graph and parking
-//! stands the traffic uses; `mesh` turns it into pavement, paint, lights and
-//! parked aircraft.
+//! stands; `mesh` turns it into pavement, paint, lights and parked aircraft.
 use crate::geo::{self, TileId};
 use crate::sources::{Sources, DATA_ZOOM};
 use anyhow::{anyhow, Result};
@@ -350,6 +349,16 @@ pub fn right_of(d: Vec2) -> Vec2 {
 pub fn bearing(d: Vec2) -> f32 {
     d.x.atan2(d.y).to_degrees().rem_euclid(360.0)
 }
+/// How far past the threshold an arrival aims (the painted aiming point).
+pub fn aim_dist(len: f32) -> f32 {
+    if len >= 2400.0 {
+        400.0
+    } else if len >= 1200.0 {
+        300.0
+    } else {
+        (len * 0.22).max(120.0)
+    }
+}
 
 impl Runway {
     /// (distance along from `a`, distance right of the centreline)
@@ -380,7 +389,6 @@ pub struct Node {
 pub struct Edge {
     pub a: u32,
     pub b: u32,
-    pub len: f32,
     /// the runway this is the centreline of
     pub rwy: Option<u16>,
 }
@@ -399,46 +407,6 @@ impl Graph {
             .filter(|n| !taxi_only || self.nodes[*n as usize].edges.iter().any(|e| self.edges[*e as usize].rwy.is_none()))
             .min_by(|a, b| (self.nodes[*a as usize].p - p).length_squared().total_cmp(&(self.nodes[*b as usize].p - p).length_squared()))
     }
-    /// Shortest way from one node to another, as the nodes passed. Rolling
-    /// down a runway costs more than a taxiway, so traffic uses the taxiways
-    /// where there are any.
-    pub fn path(&self, from: u32, to: u32) -> Option<Vec<u32>> {
-        let n = self.nodes.len();
-        let mut dist = vec![f32::INFINITY; n];
-        let mut prev = vec![u32::MAX; n];
-        let mut heap = std::collections::BinaryHeap::new();
-        dist[from as usize] = 0.0;
-        heap.push((std::cmp::Reverse(0u32), from));
-        while let Some((std::cmp::Reverse(d), u)) = heap.pop() {
-            if u == to {
-                break;
-            }
-            if d as f32 > dist[u as usize] * 10.0 + 1.0 {
-                continue;
-            }
-            for &e in &self.nodes[u as usize].edges {
-                let ed = &self.edges[e as usize];
-                let v = self.other(e, u);
-                let nd = dist[u as usize] + ed.len * if ed.rwy.is_some() { 3.0 } else { 1.0 };
-                if nd < dist[v as usize] {
-                    dist[v as usize] = nd;
-                    prev[v as usize] = u;
-                    heap.push((std::cmp::Reverse((nd * 10.0) as u32), v));
-                }
-            }
-        }
-        if !dist[to as usize].is_finite() {
-            return None;
-        }
-        let mut out = vec![to];
-        let mut cur = to;
-        while cur != from {
-            cur = prev[cur as usize];
-            out.push(cur);
-        }
-        out.reverse();
-        Some(out)
-    }
 }
 
 /// Where an aircraft parks.
@@ -451,8 +419,6 @@ pub struct Stand {
     /// read by the stand layout probe in the tests.
     #[cfg_attr(not(test), allow(dead_code))]
     pub gate: String,
-    /// taxi graph node it is reached from
-    pub node: u32,
     /// at a terminal (a gate is near): airliners, a jet bridge
     pub terminal: bool,
 }
@@ -987,10 +953,9 @@ fn build_graph(g: &mut Geo) {
         for p in &seq[1..] {
             let cur = node(&mut graph, *p);
             if cur != prev {
-                let len = (graph.nodes[cur as usize].p - graph.nodes[prev as usize].p).length();
                 let dup = graph.nodes[prev as usize].edges.iter().any(|e| graph.other(*e, prev) == cur);
                 if !dup {
-                    graph.edges.push(Edge { a: prev, b: cur, len, rwy: l.rwy });
+                    graph.edges.push(Edge { a: prev, b: cur, rwy: l.rwy });
                     let ei = graph.edges.len() as u32 - 1;
                     graph.nodes[prev as usize].edges.push(ei);
                     graph.nodes[cur as usize].edges.push(ei);
@@ -1002,7 +967,7 @@ fn build_graph(g: &mut Geo) {
     g.graph = graph;
 }
 
-/// How far from the centreline traffic holds short of a runway.
+/// How far from the centreline an aircraft holds short of a runway.
 pub fn hold_dist(r: &Runway) -> f32 {
     r.width * 0.5 + [22.0, 38.0, 55.0][r.class as usize]
 }
@@ -1090,7 +1055,7 @@ fn find_stands(g: &mut Geo, blds: &[(Vec2, Vec2, Vec<Vec2>)]) {
         if dir == Vec2::ZERO {
             continue;
         }
-        stands.push(Stand { pos: nd.p, dir, size: top, gate: gate.map(|g| g.1.clone()).unwrap_or_default(), node: ni as u32, terminal: gate.is_some() });
+        stands.push(Stand { pos: nd.p, dir, size: top, gate: gate.map(|g| g.1.clone()).unwrap_or_default(), terminal: gate.is_some() });
     }
     // Gates no taxi lane was drawn to: the aircraft stands nose-in before them.
     if apt.kind >= 1 {
@@ -1105,7 +1070,7 @@ fn find_stands(g: &mut Geo, blds: &[(Vec2, Vec2, Vec<Vec2>)]) {
                 continue;
             }
             let out = (q - *gp) / d;
-            stands.push(Stand { pos: *gp + out * 14.0, dir: -out, size: top, gate: name.clone(), node, terminal: true });
+            stands.push(Stand { pos: *gp + out * 14.0, dir: -out, size: top, gate: name.clone(), terminal: true });
         }
     }
     // Light aircraft tie-downs in rows on the aprons, where nothing better is known.
@@ -1139,8 +1104,8 @@ fn find_stands(g: &mut Geo, blds: &[(Vec2, Vec2, Vec<Vec2>)]) {
                 if !fits || g.taxiways.iter().any(|t| t.0.windows(2).any(|w| seg_dist(p, w[0], w[1]) < t.1 * 0.5 + 9.0)) || near_rwy(p, 40.0) || stands.iter().any(|s| (s.pos - p).length() < 13.0) {
                     continue;
                 }
-                let Some(node) = gr.nearest(p, true).or_else(|| gr.nearest(p, false)) else { break 'rows };
-                stands.push(Stand { pos: p, dir: facing, size: 0, gate: String::new(), node, terminal: false });
+                let Some(_node) = gr.nearest(p, true).or_else(|| gr.nearest(p, false)) else { break 'rows };
+                stands.push(Stand { pos: p, dir: facing, size: 0, gate: String::new(), terminal: false });
                 ties += 1;
                 if ties >= want {
                     break 'rows;
@@ -1152,7 +1117,7 @@ fn find_stands(g: &mut Geo, blds: &[(Vec2, Vec2, Vec<Vec2>)]) {
     let in_bld = |p: Vec2| blds.iter().any(|(lo, hi, r)| p.cmpge(*lo).all() && p.cmple(*hi).all() && in_poly(p, std::slice::from_ref(r)));
     let on_pavement = |p: Vec2| near_apron(p, 25.0) || g.taxiways.iter().any(|t| t.0.windows(2).any(|w| seg_dist(p, w[0], w[1]) < t.1 * 0.5 + 25.0));
     stands.retain(|s| {
-        let ty = &crate::airmodels::TYPES[s.size as usize];
+        let ty = &crate::airmodels::STAND_DIMS[s.size as usize];
         let o = s.pos - s.dir * ty.nose;
         let side = right_of(s.dir) * ty.span * 0.45;
         let body = [s.pos - s.dir * 6.0, o, o - s.dir * (ty.len - ty.nose) * 0.9, o + side, o - side];
@@ -1240,8 +1205,7 @@ mod tests {
                 let (la, lo) = g.lla(q);
                 println!("  probe at {:.6}, {:.6}", la.to_degrees(), lo.to_degrees());
                 for (i, st) in g.stands.iter().enumerate().filter(|(_, st)| (st.pos - q).length() < 150.0) {
-                    let nd = g.graph.nodes[st.node as usize].p;
-                    println!("  stand {i} pos {:.0?} dir {:.2?} size {} gate '{}' terminal {} node {:.0?} deg {}", st.pos, st.dir, st.size, st.gate, st.terminal, nd, g.graph.nodes[st.node as usize].edges.len());
+                    println!("  stand {i} pos {:.0?} dir {:.2?} size {} gate '{}' terminal {}", st.pos, st.dir, st.size, st.gate, st.terminal);
                 }
                 for gt in g.gates.iter().filter(|gt| (gt.0 - q).length() < 150.0) {
                     println!("  gate {} at {:.0?}", gt.1, gt.0);

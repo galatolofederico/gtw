@@ -11,11 +11,8 @@
 //!
 //! Nothing is sent unless multiplayer is switched on; what is sent is the
 //! aircraft's state and the name the player chose.
-use crate::airmodels::{self as am, TYPES};
 use crate::mp_proto::{self as proto, Msg, PlayerState, Spot};
-use crate::airfield::{Light, L_GREEN, L_RED, L_STROBE, L_WHITE};
-use crate::render::Inst;
-use glam::{DQuat, DVec3, Vec3};
+use glam::{DQuat, DVec3};
 use std::collections::{HashMap, VecDeque};
 use std::net::{ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -83,7 +80,6 @@ pub struct Remote {
     pub pos: DVec3,
     pub rot: DQuat,
     pub vel: DVec3,
-    pub gear: f32,
     pub flags: u8,
     /// the report nearest that instant (controls, flaps, throttle…)
     pub state: PlayerState,
@@ -219,7 +215,7 @@ fn at(id: u32, p: &Peer, t: f64) -> Option<Remote> {
         let u = ((t - t0) / (t1 - t0).max(1e-6)).clamp(0.0, 1.0);
         (v3(a.pos).lerp(v3(b.pos), u), quat(a.rot).slerp(quat(b.rot), u), if u < 0.5 { a } else { b })
     };
-    Some(Remote { id, name: p.name.clone(), aircraft: s.aircraft, pos, rot, vel: v3(s.vel.map(|x| x as f64)), gear: s.gear as f32 / 255.0, flags: s.flags, state: s })
+    Some(Remote { id, name: p.name.clone(), aircraft: s.aircraft, pos, rot, vel: v3(s.vel.map(|x| x as f64)), flags: s.flags, state: s })
 }
 
 /// The network side, until told to stop.
@@ -503,71 +499,6 @@ fn ping(server: &str) -> Option<u32> {
         }
     }
     best
-}
-
-/// Which traffic model stands for each of our aircraft (airmodels::TYPES:
-/// light single, business jet, regional, narrow-body, wide-body).
-pub fn size_of(aircraft: u8) -> u8 {
-    match aircraft {
-        0 | 8 => 0,
-        1 => 4,
-        6 => 2,
-        _ => 1,
-    }
-}
-
-/// How far below the body frame's origin the wheels touch, for an aircraft id
-/// (the traffic models stand on their wheels at their origin).
-fn wheels_below(aircraft: u8) -> f64 {
-    crate::aircraft::BUILTIN.iter().find(|s| s.id == aircraft as u32).map_or(1.2, |s| -s.gear.iter().map(|l| l.at.y - l.wheel_r).fold(0.0, f64::min))
-}
-
-/// The other players as traffic models with their lights (as live.rs draws
-/// the real traffic). Those `full` are drawn with their own model already
-/// (main.rs `draw_mp_planes`): only their lights' glow is added here.
-pub fn instances(players: &[Remote], full: &[bool], cam: DVec3, out: &mut Vec<(u32, Inst)>, lights: &mut Vec<Light>) {
-    for (i, p) in players.iter().enumerate() {
-        let own_model = full.get(i).copied().unwrap_or(false);
-        if (p.pos - cam).length() > 40_000.0 {
-            continue;
-        }
-        let (x, y, z) = ((p.rot * DVec3::X).as_vec3(), (p.rot * DVec3::Y).as_vec3(), (p.rot * DVec3::Z).as_vec3());
-        let base = p.pos + p.rot * DVec3::new(0.0, -wheels_below(p.aircraft), 0.0);
-        let o = (base - cam).as_vec3();
-        let inst = |tint: [f32; 3]| Inst { m: [[x.x, y.x, z.x, o.x], [x.y, y.y, z.y, o.y], [x.z, y.z, z.z, o.z]], tint: [tint[0], tint[1], tint[2], 0.0], ext: [0.0; 4] };
-        let size = size_of(p.aircraft);
-        let m = am::M_BODY + 3 * size as u32;
-        // Each player gets a fin colour of their own.
-        if !own_model {
-            out.push((m, inst(crate::traffic::BODY[0])));
-            out.push((m + 1, inst(crate::traffic::FIN[p.id as usize % crate::traffic::FIN.len()])));
-            if p.gear > 0.5 {
-                out.push((m + 2, inst([0.5; 3])));
-            }
-        }
-        let ty = TYPES[size as usize];
-        let at = |q: Vec3| -> [f32; 3] { (o + x * q.x + y * q.y - z * q.z).into() };
-        let mut l = |q: Vec3, inten: f32, col: [u8; 3], fx: [u8; 4]| {
-            if lights.len() < crate::render::MAX_DYN_LIGHTS {
-                lights.push(Light { pos: at(q), inten, dir: [0.0; 3], spread: 0.0, col: [col[0], col[1], col[2], 0], fx });
-            }
-        };
-        let steady = [0, 0, 255, 1];
-        let ph = ((i * 53) % 255) as u8;
-        if p.flags & proto::F_NAV != 0 {
-            l(Vec3::new(-ty.tip.x, ty.tip.y, -ty.tip.z), 40.0, L_RED, steady);
-            l(Vec3::new(ty.tip.x, ty.tip.y, -ty.tip.z), 40.0, L_GREEN, steady);
-            l(Vec3::new(0.0, ty.tail.y * 0.35, -ty.tail.z), 25.0, L_WHITE, steady);
-        }
-        if p.flags & proto::F_BEACON != 0 {
-            l(Vec3::new(0.0, ty.cy + ty.rf + 0.1, 0.0), 120.0, L_RED, [12, ph, 25, 1]);
-        }
-        if p.flags & proto::F_STROBE != 0 {
-            for sx in [-1.0f32, 1.0] {
-                l(Vec3::new(sx * ty.tip.x, ty.tip.y, -ty.tip.z), 1600.0, L_STROBE, [11, ph.wrapping_add(60), 7, 1]);
-            }
-        }
-    }
 }
 
 #[cfg(test)]

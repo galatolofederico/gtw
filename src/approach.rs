@@ -1,5 +1,5 @@
 //! Optional visual aid for the nearby airfield's active runway.
-use crate::{airports, geo, traffic};
+use crate::{airports, geo};
 use egui::{Color32, Pos2, Stroke, Vec2};
 use glam::{DVec3, Mat4};
 
@@ -40,7 +40,7 @@ impl Guide {
             threshold: g.world(threshold, g.h(threshold) as f64),
             direction: (g.e * direction.x as f64 + g.n * direction.y as f64).normalize(),
             up: g.u,
-            aim: traffic::aim_dist(r.len) as f64,
+            aim: airports::aim_dist(r.len) as f64,
             width: (r.width as f64 * 0.75).max(35.0),
         }
     }

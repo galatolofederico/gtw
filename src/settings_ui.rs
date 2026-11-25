@@ -411,14 +411,6 @@ impl Game {
                 menu::switch(ui, &mut self.autosave);
             });
         });
-        card(ui, t!("settings.air_traffic"), |ui| {
-            row(ui, t!("settings.live_air_traffic"), t!("settings.real_aircraft_around_you_from"), |ui| {
-                let mut on = self.live.enabled();
-                if menu::switch(ui, &mut on).changed() {
-                    self.live.set_enabled(on);
-                }
-            });
-        });
         let t = if padui::active() { t!("settings.in_flight_view_switches_the") } else { t!("settings.shortcuts_in_flight_u_sound") };
         note(ui, t);
     }
@@ -642,12 +634,6 @@ impl Game {
             });
             row(ui, t!("settings.real_time"), t!("settings.the_sun_where_you_are"), |ui| {
                 menu::switch(ui, &mut self.wx.real_time);
-            });
-            row(ui, t!("settings.live_air_traffic"), t!("settings.real_aircraft_around_you_from"), |ui| {
-                let mut on = self.live.enabled();
-                if menu::switch(ui, &mut on).changed() {
-                    self.live.set_enabled(on);
-                }
             });
         });
     }

@@ -162,7 +162,7 @@ pub struct Graphics {
     /// storm cell rendering detail (separate from ordinary clouds so heavy
     /// thunderstorm, supercell and squall-line skies can be tuned on their own)
     pub storms: Level,
-    /// condensation trails behind the player's aircraft and AI/live traffic
+    /// condensation trails behind the player's aircraft and other players
     pub contrails: bool,
     pub terrain: Level,
     /// how far out buildings and trees are loaded

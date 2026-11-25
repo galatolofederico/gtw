@@ -2,7 +2,7 @@
 //! `assets/navaids.tsv.gz`, rebuilt by `assets/mknav.py`), and an ILS on each
 //! paved runway end of 1500 m and more at the medium and large airports, made
 //! from the runway itself (localizer at the far end, a 3° glide slope down to
-//! the aiming point the airport traffic flies to, see `traffic::aim_dist`). What the needles show is worked out the way the receivers
+//! the aiming point arrivals fly to, see `airports::aim_dist`). What the needles show is worked out the way the receivers
 //! do: the radial from a VOR against the OBS, the angle off a localizer and
 //! above a glide slope antenna, the bearing to an NDB.
 //!
@@ -145,7 +145,7 @@ fn ils_near(lat: f64, lon: f64, radius: f64) -> Vec<(Station, f64)> {
                 let elev = a.elev as f64 / 3.28084;
                 let t = geo::lla_to_pos(thr.0.to_radians(), thr.1.to_radians(), elev);
                 let f = geo::lla_to_pos(far.0.to_radians(), far.1.to_radians(), elev);
-                let st = Station { kind: Kind::Ils, ident: r.ident[e].clone(), name: a.ident.clone(), freq_khz: 0, lat: far.0, lon: far.1, elev, dme: true, course: bearing(t, f), thr, aim: crate::traffic::aim_dist(r.len) as f64 };
+                let st = Station { kind: Kind::Ils, ident: r.ident[e].clone(), name: a.ident.clone(), freq_khz: 0, lat: far.0, lon: far.1, elev, dme: true, course: bearing(t, f), thr, aim: crate::airports::aim_dist(r.len) as f64 };
                 out.push((st, dist_m((lat, lon), thr)));
             }
         }

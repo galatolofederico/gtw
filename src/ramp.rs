@@ -40,7 +40,6 @@ pub(crate) struct RampPlane {
 /// the grass. `size` is the largest stand class it can take.
 #[derive(Clone, Copy)]
 struct Spot {
-    stand: Option<usize>,
     size: u8,
     /// nose point and facing
     pos: Vec2,
@@ -294,10 +293,10 @@ impl Game {
         for i in (1..free.len()).rev() {
             free.swap(i, rng.pick(i + 1));
         }
-        let mut spots: Vec<Spot> = free.iter().take(PER_FIELD).filter_map(|&si| g.stands.get(si).map(|s| Spot { stand: Some(si), size: s.size, pos: s.pos, dir: s.dir })).collect();
+        let mut spots: Vec<Spot> = free.iter().take(PER_FIELD).filter_map(|&si| g.stands.get(si).map(|s| Spot { size: s.size, pos: s.pos, dir: s.dir })).collect();
         let extra = overflow_needed(&spots);
         if extra > 0 {
-            spots.extend(overflow_spots(&g, extra).into_iter().map(|(pos, dir)| Spot { stand: None, size: 1, pos, dir }));
+            spots.extend(overflow_spots(&g, extra).into_iter().map(|(pos, dir)| Spot { size: 1, pos, dir }));
         }
         // Keep the widest spots when there are more than PER_FIELD: a full
         // field of tie-downs must not crowd out the overflow that gives the
@@ -315,9 +314,6 @@ impl Game {
             let yaw = (spot.dir.x as f64).atan2(spot.dir.y as f64);
             let mut plane = Plane::spawn_ground(spec, lat, lon, h, yaw, slope.atan());
             plane.cold_and_dark();
-            if let Some(si) = spot.stand {
-                self.world.reserve_stand(apt, si);
-            }
             self.ramp.push(RampPlane { apt, spec, plane, at: (lat, lon, h, yaw, slope.atan()) });
         }
         let names: Vec<_> = self.ramp[before..].iter().map(|r| r.spec.keys[0]).collect();
@@ -432,7 +428,7 @@ mod tests {
     }
 
     fn spot(size: u8) -> Spot {
-        Spot { stand: None, size, pos: Vec2::ZERO, dir: Vec2::X }
+        Spot { size, pos: Vec2::ZERO, dir: Vec2::X }
     }
 
     #[test]

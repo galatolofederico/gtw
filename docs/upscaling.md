@@ -67,7 +67,7 @@ fps native to 83.7 fps with FSR 3.1 at 50% and 97.4 fps with FSR 1 at 50%.
 
 Known limitations:
 
-- Cars, live traffic, other aircraft and birds move through the world without
+- Cars, other aircraft and birds move through the world without
   motion vectors of their own (the game's temporal AA has the same gap), so
   they can smear behind themselves under FSR 3.1, more so at low resolutions.
 - There is no transparency and composition mask (AMD's default, zero).

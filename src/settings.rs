@@ -40,8 +40,6 @@ pub struct Settings {
     /// the moving map's VFR chart layers
     pub map_airports: bool,
     pub map_navaids: bool,
-    /// real air traffic (see live.rs)
-    pub live_traffic: bool,
     /// real weather (see livewx.rs)
     pub live_weather: bool,
     /// the clock follows the real time and date
@@ -95,7 +93,7 @@ impl LastStart {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { lang: None, sound_on: true, volume: 1.0, cam_mode: 0, cockpit_fov: crate::cockpit::FOV, look_sens: 1.0, invert_look_cockpit: false, invert_look_outside_x: false, invert_look_outside_y: false, show_hud: true, hud_cockpit: false, path_marker: false, minimap: true, landing_guidance: true, arcade: false, minimap_plan: false, minimap_heading_up: false, minimap_zoom: 12, minimap_size: 280.0, minimap_height: 280.0, map_airports: true, map_navaids: true, taa: true, live_traffic: true, live_weather: true, real_time: true, snow: crate::snow::Mode::Auto, last: None, multiplayer: false, mp_server: "auto".into(), mp_name: String::new(), ground_first_person: false, avatar_style: 0, autosave: true }
+        Self { lang: None, sound_on: true, volume: 1.0, cam_mode: 0, cockpit_fov: crate::cockpit::FOV, look_sens: 1.0, invert_look_cockpit: false, invert_look_outside_x: false, invert_look_outside_y: false, show_hud: true, hud_cockpit: false, path_marker: false, minimap: true, landing_guidance: true, arcade: false, minimap_plan: false, minimap_heading_up: false, minimap_zoom: 12, minimap_size: 280.0, minimap_height: 280.0, map_airports: true, map_navaids: true, taa: true, live_weather: true, real_time: true, snow: crate::snow::Mode::Auto, last: None, multiplayer: false, mp_server: "auto".into(), mp_name: String::new(), ground_first_person: false, avatar_style: 0, autosave: true }
     }
 }
 
@@ -152,7 +150,6 @@ impl Settings {
             map_airports: b("map_airports", d.map_airports),
             map_navaids: b("map_navaids", d.map_navaids),
             minimap_zoom: f("minimap_zoom", d.minimap_zoom as f64).clamp(3.0, 17.0) as u8,
-            live_traffic: b("live_traffic", d.live_traffic),
             live_weather: b("live_weather", d.live_weather),
             real_time: b("real_time", d.real_time),
             snow: j["terrain_snow"].as_str().and_then(crate::snow::Mode::parse).unwrap_or(d.snow),
@@ -193,7 +190,6 @@ impl Settings {
             "minimap_height": self.minimap_height,
             "map_airports": self.map_airports,
             "map_navaids": self.map_navaids,
-            "live_traffic": self.live_traffic,
             "live_weather": self.live_weather,
             "real_time": self.real_time,
             "terrain_snow": self.snow.code(),
@@ -228,7 +224,7 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let s = Settings { lang: Lang::parse("fr"), sound_on: false, volume: 0.4, cam_mode: 1, cockpit_fov: 50.0, look_sens: 1.5, invert_look_cockpit: true, invert_look_outside_x: true, invert_look_outside_y: false, show_hud: false, hud_cockpit: true, path_marker: true, minimap: false, landing_guidance: false, arcade: true, minimap_plan: true, minimap_heading_up: true, minimap_zoom: 15, minimap_size: 420.0, minimap_height: 300.0, map_airports: false, map_navaids: false, taa: false, live_traffic: false, live_weather: false, real_time: false, snow: crate::snow::Mode::Always, last: Some(LastStart { lat: 37.6, lon: -122.4, name: "KSFO".into(), airport: Some("KSFO".into()), start: "approach".into(), runway: Some("28L".into()), aircraft: "c172".into() }), multiplayer: true, mp_server: "example.org:7000".into(), mp_name: "Dany".into(), ground_first_person: true, avatar_style: 2, autosave: false };
+        let s = Settings { lang: Lang::parse("fr"), sound_on: false, volume: 0.4, cam_mode: 1, cockpit_fov: 50.0, look_sens: 1.5, invert_look_cockpit: true, invert_look_outside_x: true, invert_look_outside_y: false, show_hud: false, hud_cockpit: true, path_marker: true, minimap: false, landing_guidance: false, arcade: true, minimap_plan: true, minimap_heading_up: true, minimap_zoom: 15, minimap_size: 420.0, minimap_height: 300.0, map_airports: false, map_navaids: false, taa: false, live_weather: false, real_time: false, snow: crate::snow::Mode::Always, last: Some(LastStart { lat: 37.6, lon: -122.4, name: "KSFO".into(), airport: Some("KSFO".into()), start: "approach".into(), runway: Some("28L".into()), aircraft: "c172".into() }), multiplayer: true, mp_server: "example.org:7000".into(), mp_name: "Dany".into(), ground_first_person: true, avatar_style: 2, autosave: false };
         assert_eq!(Settings::from_json(&s.to_json()), s);
         // Multiplayer is off by default now, while still reachable; settings
         // saved before the change keep whatever they had.

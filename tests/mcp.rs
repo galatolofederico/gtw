@@ -80,7 +80,6 @@ fn handshake_tools_and_offline_error() {
         "get_aircraft_state",
         "get_navigation",
         "get_environment",
-        "get_traffic",
         "get_airport_info",
         "set_aircraft_config",
         "set_engine",

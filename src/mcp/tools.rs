@@ -15,7 +15,6 @@ pub enum Tool {
     GetAircraftState,
     GetNavigation,
     GetEnvironment,
-    GetTraffic,
     GetAirportInfo,
     SetAircraftConfig,
     SetEngine,
@@ -27,11 +26,10 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const ALL: [Tool; 12] = [
+    pub const ALL: [Tool; 11] = [
         Tool::GetAircraftState,
         Tool::GetNavigation,
         Tool::GetEnvironment,
-        Tool::GetTraffic,
         Tool::GetAirportInfo,
         Tool::SetAircraftConfig,
         Tool::SetEngine,
@@ -47,7 +45,6 @@ impl Tool {
             "get_aircraft_state" => Tool::GetAircraftState,
             "get_navigation" => Tool::GetNavigation,
             "get_environment" => Tool::GetEnvironment,
-            "get_traffic" => Tool::GetTraffic,
             "get_airport_info" => Tool::GetAirportInfo,
             "set_aircraft_config" => Tool::SetAircraftConfig,
             "set_engine" => Tool::SetEngine,
@@ -65,7 +62,6 @@ impl Tool {
             Tool::GetAircraftState => "get_aircraft_state",
             Tool::GetNavigation => "get_navigation",
             Tool::GetEnvironment => "get_environment",
-            Tool::GetTraffic => "get_traffic",
             Tool::GetAirportInfo => "get_airport_info",
             Tool::SetAircraftConfig => "set_aircraft_config",
             Tool::SetEngine => "set_engine",
@@ -82,7 +78,6 @@ impl Tool {
             Tool::GetAircraftState => "Read the complete live state of the aircraft and the simulation: position, attitude, speeds, configuration, engine, fuel, electrics, failures, damage, warnings, radios and time. Read-only. Units are feet, knots, ft/min, degrees true, hPa and kg.",
             Tool::GetNavigation => "Read the radios and navigation situation: NAV1 and ADF, CDI, TO/FROM, glide slope and DME, plus the nearest VORs, NDBs, ILS and airports. Read-only.",
             Tool::GetEnvironment => "Read the weather and clock: wind, gusts, clouds, visibility, QNH, turbulence, the live-weather report and the time of day. Read-only.",
-            Tool::GetTraffic => "Read the live ADS-B traffic around the aircraft: callsign, type, altitude, speed, distance and bearing. Read-only.",
             Tool::GetAirportInfo => "Read the current or a named airport: runways, active runway, ILS, and on an approach the distance, centreline error and glide-path deviation. Read-only.",
             Tool::SetAircraftConfig => "Change the aircraft's configuration: throttle/power lever, flaps notch or delta, gear, speedbrake, parking brake, mixture and trim. It cannot move the stick. Returns the resulting configuration.",
             Tool::SetEngine => "Start or stop the engine, or set the magnetos/fuel control and the starters. Returns the resulting engine state.",
@@ -96,7 +91,7 @@ impl Tool {
 
     pub fn annotations(self) -> Value {
         match self {
-            Tool::GetAircraftState | Tool::GetNavigation | Tool::GetEnvironment | Tool::GetTraffic | Tool::GetAirportInfo => {
+            Tool::GetAircraftState | Tool::GetNavigation | Tool::GetEnvironment | Tool::GetAirportInfo => {
                 json!({ "readOnlyHint": true, "openWorldHint": false })
             }
             _ => json!({ "readOnlyHint": false, "destructiveHint": true, "openWorldHint": false }),
@@ -121,14 +116,6 @@ impl Tool {
             Tool::GetEnvironment => json!({
                 "type": "object",
                 "properties": {},
-                "additionalProperties": false
-            }),
-            Tool::GetTraffic => json!({
-                "type": "object",
-                "properties": {
-                    "radius_nm": { "type": "number", "minimum": 1.0, "maximum": 200.0, "default": 40.0, "description": "How far around the aircraft to look, nautical miles." },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 15, "description": "Most contacts to return, nearest first." }
-                },
                 "additionalProperties": false
             }),
             Tool::GetAirportInfo => json!({
@@ -241,13 +228,6 @@ impl Tool {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NavigationArgs {
-    pub radius_nm: Option<f64>,
-    pub limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TrafficArgs {
     pub radius_nm: Option<f64>,
     pub limit: Option<usize>,
 }

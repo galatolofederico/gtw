@@ -661,7 +661,7 @@ fn furniture(b: &mut B) {
             continue;
         }
         let Some((gp, _)) = g.gates.iter().filter(|gt| (gt.0 - s.pos).length() < 95.0).min_by(|a, b| (a.0 - s.pos).length().total_cmp(&(b.0 - s.pos).length())) else { continue };
-        let ty = am::TYPES[s.size as usize];
+        let ty = am::STAND_DIMS[s.size as usize];
         // Passengers board on the left.
         let left = -right_of(s.dir);
         let door = s.pos - s.dir * (ty.nose - ty.door) + left * (ty.rf + 2.6);

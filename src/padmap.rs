@@ -8,8 +8,8 @@
 //!   its key does, and its key is held while it is. A few are the pad's own:
 //!   the quick views and recentring the view.
 //! - A binding is a button, or Y + a button. While Y is held, a button with
-//!   a Y binding does that and not its own; Y on its own acts when let go
-//!   without having been used with another button.
+//!   a Y binding does that and not its own; Y on its own, let go in flight
+//!   without having been used with another button, gets out of the aircraft.
 //! - The menus' buttons are not part of it: the d-pad and left stick move,
 //!   A presses, B goes back, LB / RB turn the page, the right stick scrolls,
 //!   so the pad can always find its way back here. In flight only Menu is
@@ -182,7 +182,7 @@ const LAYOUT: &[(&str, Chord)] = {
         ("canopy", y(Menu)),
         ("master_arm", y(Left)),
         ("target_lock", y(Right)),
-        ("fire_missile", Y_ALONE),
+        ("fire_missile", y(RT)),
     ]
 };
 
@@ -875,7 +875,8 @@ mod tests {
         let m = PadMap::default();
         assert_eq!(m.chord("throttle_up"), Some(b(A)));
         assert_eq!(m.chord("parking_brake"), Some(y(B)));
-        assert_eq!(m.action_at(Y_ALONE), Some("fire_missile"));
+        assert_eq!(m.action_at(Y_ALONE), None);
+        assert_eq!(m.action_at(y(RT)), Some("fire_missile"));
         assert_eq!(m.action_at(y(RB)), Some("ap"));
         assert_eq!(m.chord("minimap"), None);
         assert!(m.has_y(B) && !m.has_y(LT));

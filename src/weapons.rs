@@ -47,12 +47,12 @@ const FUSE_MARGIN: f64 = 12.0;
 const G0: f64 = 9.80665;
 
 /// What an aircraft is, as far as a missile is concerned.
+#[allow(dead_code)] // the synthetic key is used by the seeker tests; the game has no AI aircraft
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TargetKey {
-    /// A live ADS-B aircraft, by its ICAO address.
-    Live(String),
-    /// A moving aircraft at an airport: which airfield, and the mover's id.
-    Airport { apt: u32, mover: u32 },
+    /// A synthetic target used by the missile tests; the game has no AI
+    /// aircraft for the seeker to lock onto.
+    Test(String),
 }
 
 /// One target a seeker may lock onto.
@@ -105,7 +105,6 @@ pub enum Event {
         pos: DVec3,
         power: f32,
         size: f32,
-        target: Option<TargetKey>,
     },
 }
 
@@ -431,7 +430,6 @@ impl Missile {
                 pos: self.pos,
                 power: 0.4,
                 size: 0.5,
-                target: None,
             });
             self.alive = false;
             return;
@@ -451,7 +449,6 @@ impl Missile {
                     pos: self.pos,
                     power: blast_power(t.size),
                     size: t.size as f32,
-                    target: Some(t.key.clone()),
                 });
                 self.alive = false;
                 return;
@@ -466,7 +463,6 @@ impl Missile {
                     pos: geo::lla_to_pos(lat, lon, g.h),
                     power: 0.8,
                     size: 0.6,
-                    target: None,
                 });
                 self.alive = false;
             }
@@ -475,7 +471,6 @@ impl Missile {
                 pos: self.pos,
                 power: 0.6,
                 size: 0.5,
-                target: None,
             });
             self.alive = false;
         }
@@ -551,8 +546,7 @@ impl Missile {
 /// How far from a target's centre its fuse should fire (m): its half span,
 /// with a little room to spare.
 fn target_radius(size: u8) -> f64 {
-    let ty = &crate::airmodels::TYPES[size.min(4) as usize];
-    (ty.span as f64 * 0.5).max(5.0)
+    (crate::airports::SIZE_SPAN[size.min(4) as usize] as f64 * 0.5).max(5.0)
 }
 
 fn blast_power(size: u8) -> f32 {
@@ -598,7 +592,7 @@ mod tests {
         let mut w = Weapons::new(&crate::aircraft::fa18::SPEC, &pieces);
         w.armed = true;
         let target = Target {
-            key: TargetKey::Live("TEST123".into()),
+            key: TargetKey::Test("TEST123".into()),
             pos: plane.pos + plane.forward() * 5_000.0,
             vel: plane.vel,
             size: 2,
@@ -631,7 +625,7 @@ mod tests {
         let mut w = Weapons::new(&crate::aircraft::fa18::SPEC, &pieces);
         w.armed = true;
         let target = Target {
-            key: TargetKey::Live("TEST123".into()),
+            key: TargetKey::Test("TEST123".into()),
             pos: plane.pos + plane.forward() * 5_000.0,
             vel: plane.vel,
             size: 2,
@@ -667,7 +661,7 @@ mod tests {
             alive: true,
         };
         let mut t = Target {
-            key: TargetKey::Live("LEAD".into()),
+            key: TargetKey::Test("LEAD".into()),
             pos: start + DVec3::new(2_000.0, 0.0, -1_000.0),
             vel: DVec3::NEG_Z * 200.0,
             size: 2,
@@ -697,7 +691,7 @@ mod tests {
             alive: true,
         };
         let target = Target {
-            key: TargetKey::Live("TURN".into()),
+            key: TargetKey::Test("TURN".into()),
             pos: DVec3::new(1_000.0, 0.0, -1_000.0),
             vel: DVec3::ZERO,
             size: 2,

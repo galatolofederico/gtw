@@ -1,5 +1,5 @@
 //! Intelligent, physically grounded contrail simulation and adaptive-LOD ribbon
-//! builder for the player's aircraft, live ADS-B traffic, airport AI traffic,
+//! builder for the player's aircraft, other players,
 //! and multiplayer aircraft.
 //!
 //! Formation follows the Schmidt–Appleman criterion (Schumann 1996) using the
@@ -20,14 +20,12 @@
 //! Resolution adapts automatically with distance: high vertex density right
 //! behind the player's engines (capturing tight fighter maneuvers), progressive
 //! chord-error decimation as trails age and recede, and merged single-ribbon
-//! trails for distant traffic. All visible segments draw in one instanced pass
+//! trails for other players. All visible segments draw in one instanced pass
 //! (`src/shaders/contrails.wgsl`).
 
 use crate::aircraft::{Engine, Spec};
 use crate::airframe::{G_ENGINE, G_FUSE, G_LWING, G_RWING, G_TAIL};
-use crate::airmodels::TYPES;
 use crate::geo;
-use crate::live;
 use crate::mp::Remote;
 use crate::plane::{self, Plane};
 use crate::snow;
@@ -39,9 +37,9 @@ use std::collections::HashMap;
 pub const MAX_NODES: usize = 8192;
 pub const MAX_SEGS: usize = 6144;
 
-/// Maximum distance from camera (m) to track/draw traffic contrails.
+/// Maximum distance from camera (m) to track/draw other players' contrails.
 const MAX_TRAFFIC_DIST: f64 = 145_000.0;
-/// Distance (m) beyond which multi-engine traffic merges into one thicker trail.
+/// Distance (m) beyond which multi-engine aircraft merge into one thicker trail.
 const TRAFFIC_MERGE_DIST: f64 = 5_500.0;
 /// Maximum distance (m) from camera to draw any contrail segment.
 const MAX_DRAW_DIST: f64 = 200_000.0;
@@ -501,8 +499,6 @@ pub fn spec_engines(spec: &Spec, stage: usize) -> Vec<EngineMount> {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum TrailKey {
     Player(u8),
-    Live(u64, u8),
-    Airport(u32, u32, u8),
     Mp(u32, u8),
 }
 
@@ -599,7 +595,7 @@ impl Trail {
     }
 }
 
-/// Active contrail emitter for one engine (or merged distant traffic aircraft).
+/// Active contrail emitter for one engine (or a merged distant aircraft).
 struct ActiveEmitter {
     key: TrailKey,
     pos: DVec3,
@@ -643,7 +639,7 @@ impl Contrails {
     }
 
     /// Advance all contrails by `dt` seconds: advect existing trails with wind aloft,
-    /// emit new high-res nodes for the player and LOD nodes for traffic/multiplayer,
+    /// emit new high-res nodes for the player and LOD nodes for multiplayer,
     /// and adaptively decimate distant/aged segments.
     #[allow(clippy::too_many_arguments)]
     pub fn step(
@@ -653,8 +649,6 @@ impl Contrails {
         wx: &Weather,
         doy: f64,
         player: Option<(&Plane, bool)>,
-        live_planes: &[live::Plane],
-        airport_airborne: &[(u32, u32, u8, DVec3, DVec3)],
         mp_players: &[Remote],
     ) {
         if dt <= 0.0 {
@@ -697,7 +691,7 @@ impl Contrails {
             }
         }
 
-        // 2. Gather active emitters: player, live ADS-B traffic, airport traffic, multiplayer.
+        // 2. Gather active emitters: player and multiplayer.
         let mut emitters: Vec<ActiveEmitter> = Vec::with_capacity(64);
 
         // 2a. Player aircraft.
@@ -748,143 +742,6 @@ impl Contrails {
                             preseed: false,
                         });
                     }
-                }
-            }
-        }
-
-        // 2b. Live ADS-B air traffic (real airliners cruising overhead at FL280–FL430!).
-        for p in live_planes {
-            if p.downed > 0.0 {
-                continue;
-            }
-            let dist = (p.pos - cam).length();
-            if dist > MAX_TRAFFIC_DIST {
-                continue;
-            }
-            let spd = p.vel.length();
-            if spd < 45.0 {
-                continue;
-            }
-            let sz = (p.size as usize).min(TYPES.len() - 1);
-            let eta = if sz == 0 { 0.22 } else { 0.36 };
-            let ei = if sz == 0 { 1.40 } else { 1.25 };
-            let env = atmosphere_at(p.pos, wx, doy, eta, ei);
-            if env.strength <= 0.02 {
-                continue;
-            }
-            let id_hash = hash_str(&p.hex);
-            let fwd = p.vel / spd;
-            let up = p.pos.normalize();
-            let right = fwd.cross(up).normalize_or_zero();
-            let ty = TYPES[sz];
-            // Detect 4-engine wide-bodies (B747, A380, A340) from ICAO type code!
-            let quad = sz == 4 && (p.ty.starts_with("B74") || p.ty.starts_with("A38") || p.ty.starts_with("A34"));
-            // Size scaling: light single -> bizjet -> regional -> narrow-body -> wide-body.
-            let (r_base, d_base) = match sz {
-                0 => (0.35f32, 0.34f32),
-                1 => (0.78, 0.68),
-                2 => (0.98, 0.80),
-                3 => (1.28, 0.95),
-                _ => (1.68, 1.15),
-            };
-            let gap = (18.0 + spd * 0.075).clamp(18.0, 42.0);
-            if dist >= TRAFFIC_MERGE_DIST || sz == 0 {
-                // Distant traffic LOD: single merged composite trail (2–4x fewer segments!).
-                let mult = if quad { 1.55 } else if sz >= 1 { 1.30 } else { 1.0 };
-                emitters.push(ActiveEmitter {
-                    key: TrailKey::Live(id_hash, 0),
-                    pos: p.pos - fwd * (ty.len as f64 * 0.3 + gap) + up * (ty.cy as f64 * 0.7),
-                    vel: p.vel,
-                    env,
-                    radius0: r_base * mult,
-                    density0: (d_base * env.strength * if quad { 1.2 } else { 1.08 }).clamp(0.05, 1.55),
-                    is_player: false,
-                    preseed: true,
-                });
-            } else {
-                // Nearby traffic: distinct engine contrails!
-                let xs: &[f64] = if quad {
-                    &[-19.5, -10.5, 10.5, 19.5]
-                } else {
-                    match sz {
-                        1 => &[-1.45, 1.45],
-                        2 => &[-2.20, 2.20],
-                        3 => &[-5.75, 5.75],
-                        _ => &[-9.60, 9.60],
-                    }
-                };
-                for (ei_idx, &ex) in xs.iter().enumerate() {
-                    emitters.push(ActiveEmitter {
-                        key: TrailKey::Live(id_hash, ei_idx as u8),
-                        pos: p.pos + right * ex - fwd * (ty.len as f64 * 0.15 + gap) + up * (ty.cy as f64 * 0.65),
-                        vel: p.vel,
-                        env,
-                        radius0: r_base,
-                        density0: (d_base * env.strength).clamp(0.05, 1.45),
-                        is_player: false,
-                        preseed: true,
-                    });
-                }
-            }
-        }
-
-        // 2c. Airport AI traffic (climbing/approaching movers — forms contrails in cold/high climates!).
-        for &(apt_idx, mover_id, size, pos, vel) in airport_airborne {
-            let dist = (pos - cam).length();
-            if dist > MAX_TRAFFIC_DIST {
-                continue;
-            }
-            let spd = vel.length();
-            if spd < 35.0 {
-                continue;
-            }
-            let sz = (size as usize).min(TYPES.len() - 1);
-            let eta = if sz == 0 { 0.22 } else { 0.36 };
-            let ei = if sz == 0 { 1.40 } else { 1.25 };
-            let env = atmosphere_at(pos, wx, doy, eta, ei);
-            if env.strength <= 0.02 {
-                continue;
-            }
-            let fwd = vel / spd;
-            let up = pos.normalize();
-            let right = fwd.cross(up).normalize_or_zero();
-            let (r_base, d_base) = match sz {
-                0 => (0.35f32, 0.34f32),
-                1 => (0.78, 0.68),
-                2 => (0.98, 0.80),
-                3 => (1.28, 0.95),
-                _ => (1.68, 1.15),
-            };
-            let gap = (15.0 + spd * 0.07).clamp(15.0, 38.0);
-            if dist >= TRAFFIC_MERGE_DIST || sz == 0 {
-                emitters.push(ActiveEmitter {
-                    key: TrailKey::Airport(apt_idx, mover_id, 0),
-                    pos: pos - fwd * gap,
-                    vel,
-                    env,
-                    radius0: r_base * if sz >= 1 { 1.28 } else { 1.0 },
-                    density0: (d_base * env.strength).clamp(0.05, 1.45),
-                    is_player: false,
-                    preseed: false,
-                });
-            } else {
-                let ex = match sz {
-                    1 => 1.45,
-                    2 => 2.20,
-                    3 => 5.75,
-                    _ => 9.60,
-                };
-                for (ei_idx, sx) in [-1.0f64, 1.0].into_iter().enumerate() {
-                    emitters.push(ActiveEmitter {
-                        key: TrailKey::Airport(apt_idx, mover_id, ei_idx as u8),
-                        pos: pos + right * (sx * ex) - fwd * gap,
-                        vel,
-                        env,
-                        radius0: r_base,
-                        density0: (d_base * env.strength).clamp(0.05, 1.4),
-                        is_player: false,
-                        preseed: false,
-                    });
                 }
             }
         }
@@ -943,7 +800,7 @@ impl Contrails {
             trail.active = true;
 
             // Pre-seed a realistic trailing contrail behind newly spotted cruising live planes
-            // so the sky immediately shows overhead traffic contrails on startup/arrival.
+            // so the sky immediately shows overhead contrails on startup/arrival.
             if em.preseed && trail.nodes.is_empty() && em.vel.length() > 60.0 {
                 preseed_trail(trail, &em);
             }
@@ -1090,14 +947,14 @@ impl Contrails {
         // Farther trails first (back-to-front).
         self.order.sort_by(|a, b| b.1.total_cmp(&a.1));
 
-        // Reserve room for player trails so heavy traffic can never starve the player's own contrails.
+        // Reserve room for player trails so multiplayer can never starve the player's own contrails.
         let player_need: usize = self
             .trails
             .values()
             .filter(|t| t.is_player && t.nodes.len() >= 2)
             .map(|t| t.nodes.len())
             .sum();
-        let traffic_node_cap = MAX_NODES.saturating_sub(player_need.min(MAX_NODES / 2));
+        let other_node_cap = MAX_NODES.saturating_sub(player_need.min(MAX_NODES / 2));
 
         for &(key, _) in &self.order {
             let Some(trail) = self.trails.get(&key) else { continue };
@@ -1105,7 +962,7 @@ impl Contrails {
             if n < 2 {
                 continue;
             }
-            if !trail.is_player && out.nodes.len() >= traffic_node_cap {
+            if !trail.is_player && out.nodes.len() >= other_node_cap {
                 continue;
             }
             // Quick trail-level distance cull.
@@ -1198,8 +1055,8 @@ impl Contrails {
     }
 }
 
-/// Pre-seed a natural trailing history behind a newly observed high-altitude live aircraft
-/// so overhead cruising traffic already displays wind-drifted contrails immediately.
+/// Pre-seed a natural trailing history behind a newly observed high-altitude aircraft
+/// so overhead cruising aircraft already displays wind-drifted contrails immediately.
 fn preseed_trail(trail: &mut Trail, em: &ActiveEmitter) {
     let max_age = (em.env.life * 0.65).min(150.0);
     if max_age < 6.0 {
@@ -1297,20 +1154,9 @@ fn decimate_trail(trail: &mut Trail, cam: DVec3) {
     trail.nodes.truncate(write);
 }
 
-fn hash_str(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0100_0000_01b3);
-    }
-    h
-}
-
 fn seed_for_key(key: TrailKey) -> f32 {
     let x: u32 = match key {
         TrailKey::Player(e) => 0x1111_0000u32 ^ (e as u32).wrapping_mul(2_654_435_761),
-        TrailKey::Live(id, e) => (id as u32) ^ ((id >> 32) as u32) ^ (e as u32).wrapping_mul(19_349_663),
-        TrailKey::Airport(a, m, e) => a.wrapping_mul(73_856_093) ^ m.wrapping_mul(19_349_663) ^ (e as u32).wrapping_mul(83_492_791),
         TrailKey::Mp(id, e) => id.wrapping_mul(2_654_435_761) ^ (e as u32).wrapping_mul(83_492_791),
     };
     (shash(x) & 0xffff) as f32 / 65535.0
@@ -1404,7 +1250,7 @@ mod tests {
             let dt = 0.1;
             plane.pos += plane.vel * dt;
             let cam = plane.pos - north * 120.0;
-            ct.step(dt, cam, &wx, 170.0, Some((&plane, true)), &[], &[], &[]);
+            ct.step(dt, cam, &wx, 170.0, Some((&plane, true)), &[]);
             if step == 5 {
                 first_pos = Some(ct.trails[&TrailKey::Player(0)].nodes[0].pos);
             }
@@ -1420,51 +1266,5 @@ mod tests {
         assert!(t0.nodes.len() >= 10, "should keep smooth nodes, got {}", t0.nodes.len());
     }
 
-    #[test]
-    fn live_traffic_preseeds_scales_by_size_and_merges_at_distance() {
-        let mut wx = Weather::new(0.6);
-        wx.alto = 0.75;
-        wx.wind = 15.0;
-        let cam = geo::lla_to_pos(40f64.to_radians(), -100f64.to_radians(), 10_500.0);
-        let (east, north, up) = geo::enu(cam);
-        let make_live = |hex: &str, ty: &str, size: u8, off: DVec3| {
-            live::Plane::test_cruise(hex, ty, size, cam + off, north * 235.0)
-        };
-        // Nearby B747 (3 km away): should emit 4 separate engine trails, pre-seeded immediately!
-        // Distant A320 (25 km away): should merge into 1 composite LOD trail!
-        let planes = vec![
-            make_live("a00001", "B744", 4, east * 3_000.0),
-            make_live("a00002", "A320", 3, east * 25_000.0),
-        ];
-        let mut ct = Contrails::new();
-        ct.step(0.1, cam, &wx, 180.0, None, &planes, &[], &[]);
-        // 4 trails for nearby B747 + 1 merged trail for distant A320 = 5 trails total!
-        assert_eq!(ct.trail_count(), 5, "expected 4 near B747 + 1 merged distant A320 trails");
-        assert!(ct.total_nodes() >= 40, "live cruising traffic should pre-seed trailing history immediately");
 
-        // Stress test: 60 cruising live airliners should stay cleanly within GPU caps!
-        let swarm: Vec<live::Plane> = (0..60)
-            .map(|k| {
-                let a = k as f64 * 0.11;
-                let dist = 8_000.0 + (k as f64) * 1_800.0;
-                make_live(&format!("f{:05x}", k), "B77W", 4, (east * a.cos() + north * a.sin()) * dist)
-            })
-            .collect();
-        ct.clear();
-        for _ in 0..20 {
-            ct.step(0.25, cam, &wx, 180.0, None, &swarm, &[], &[]);
-        }
-        let mut draw = DrawData::default();
-        let view = Mat4::from_cols(
-            east.as_vec3().extend(0.0),
-            up.as_vec3().extend(0.0),
-            (-north).as_vec3().extend(0.0),
-            Vec4::W,
-        )
-        .transpose();
-        let vp = crate::perspective_rev(60f32.to_radians(), 16.0 / 9.0, 1.0) * view;
-        ct.build_draw(cam, vp, &mut draw);
-        assert!(draw.nodes.len() <= MAX_NODES && draw.segs.len() <= MAX_SEGS);
-        assert!(!draw.segs.is_empty(), "visible live traffic contrails should emit GPU segments");
-    }
 }

@@ -1,5 +1,5 @@
-//! The copilot's game-side half: read the live aircraft, weather, radios and
-//! traffic, and carry out the tool calls the MCP bridge sends us.
+//! The copilot's game-side half: read the aircraft, weather and radios,
+//! and carry out the tool calls the MCP bridge sends us.
 //!
 //! Everything here runs on the game's main thread, from `Game::pump_mcp`, so
 //! the handlers can use the aircraft, the world and the weather directly.  A
@@ -9,7 +9,6 @@
 use crate::airports;
 use crate::geo;
 use crate::nav;
-use crate::traffic;
 use crate::{Game, Mode};
 use gtw::mcp::{rpc, tools};
 use glam::{DVec3, Vec2};
@@ -168,7 +167,6 @@ impl Game {
             tools::Tool::GetAircraftState => Ok(self.mcp_state()),
             tools::Tool::GetNavigation => self.mcp_navigation(args),
             tools::Tool::GetEnvironment => Ok(self.mcp_environment()),
-            tools::Tool::GetTraffic => self.mcp_traffic(args),
             tools::Tool::GetAirportInfo => self.mcp_airport(args),
             tools::Tool::SetAircraftConfig => self.mcp_set_config(args),
             tools::Tool::SetEngine => self.mcp_set_engine(args),
@@ -581,47 +579,6 @@ impl Game {
         })
     }
 
-    fn mcp_traffic(&self, args: &Value) -> Result<Value, String> {
-        let args: tools::TrafficArgs = tools::parse(args)?;
-        let radius_nm = args.radius_nm.unwrap_or(40.0).clamp(1.0, 200.0);
-        let limit = args.limit.unwrap_or(15).clamp(1, 50);
-        let radius = radius_nm * 1852.0;
-        let (_, _, alt) = geo::pos_to_lla(self.plane.pos);
-        let mut contacts: Vec<(f64, Value)> = self
-            .live
-            .planes
-            .iter()
-            .filter_map(|p| {
-                let d = (p.pos - self.plane.pos).length();
-                if d > radius {
-                    return None;
-                }
-                Some((
-                    d,
-                    json!({
-                        "callsign": p.call,
-                        "type": p.ty,
-                        "hex": p.hex,
-                        "altitude_ft": num(p.alt_ft),
-                        "relative_altitude_ft": num(p.alt_ft - alt * 3.28084),
-                        "ground_speed_kt": num(p.gs_kt),
-                        "vertical_speed_fpm": num(p.vs_fpm),
-                        "distance_nm": num(d / 1852.0),
-                        "bearing_deg": num(nav::bearing(self.plane.pos, p.pos)),
-                    }),
-                ))
-            })
-            .collect();
-        contacts.sort_by(|a, b| a.0.total_cmp(&b.0));
-        Ok(json!({
-            "enabled": self.live.enabled(),
-            "error": self.live.error(),
-            "count_total": self.live.planes.len(),
-            "radius_nm": radius_nm,
-            "contacts": contacts.into_iter().take(limit).map(|(_, v)| v).collect::<Vec<_>>(),
-        }))
-    }
-
     fn mcp_airport(&self, args: &Value) -> Result<Value, String> {
         let args: tools::AirportArgs = tools::parse(args)?;
         if let Some(code) = args.code.as_deref() {
@@ -765,7 +722,7 @@ impl Game {
         let (thr, dir) = r.end(e);
         let x = (lp - thr).dot(airports::right_of(dir));
         let h = alt - g.h(thr) as f64;
-        let aim = (along + traffic::aim_dist(r.len)).max(1.0);
+        let aim = (along + airports::aim_dist(r.len)).max(1.0);
         let gs = h.atan2(aim as f64).to_degrees();
         let dev = gs - 3.0;
         json!({
