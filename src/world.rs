@@ -1424,7 +1424,7 @@ impl World {
             if fr.map(|f| f.sphere(pos - cam, 8.0)).unwrap_or(true) {
                 let right = fwd.cross(up).normalize_or_zero();
                 let upv = right.cross(fwd);
-                out.push((model as u32, Inst { m: [[right.x, upv.x, -fwd.x, o.x], [right.y, upv.y, -fwd.y, o.y], [right.z, upv.z, -fwd.z, o.z]], tint: [col[0], col[1], col[2], 0.0], ext: [0.0, 0.0, 0.0, 1.0] }));
+                out.push((model as u32, Inst { m: [[right.x, upv.x, -fwd.x, o.x], [right.y, upv.y, -fwd.y, o.y], [right.z, upv.z, -fwd.z, o.z]], tint: [col[0], col[1], col[2], 0.0], ext: [0.0, 1.0, 0.0, 1.0] }));
             }
         };
         let photo = self.photo.as_deref().filter(|_| sun < 0.15);

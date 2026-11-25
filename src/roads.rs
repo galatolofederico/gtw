@@ -60,6 +60,9 @@ impl Path {
 /// Sidewalk band width outside the carriageway (metres), as in `cfg`.
 pub const SIDEWALK_W: f32 = 1.9;
 
+/// Overlapping ribbons closer in height than this are one street surface
+/// (the top one is what is drawn); further apart, they are separate levels.
+const OVERLAP_STEP: f64 = 0.9;
 /// A bridge deck more than this above a body is a bridge it is under, not the
 /// street it stands on (metres).
 const BRIDGE_CLEARANCE: f64 = 2.5;
@@ -196,7 +199,21 @@ impl RoadIndex {
                 best = Some((hit, rank));
             }
         }
-        best.map(|(hit, _)| hit)
+        let (mut hit, _) = best?;
+        // Where ribbons at that level overlap (a junction, a side street
+        // joining at an angle, a slip road), the drawn street is the top one:
+        // stand on it, or the feet and wheels sink into the asphalt.
+        for &pi in &self.cells[cy * Self::N + cx] {
+            let Some(other) = self.path_hit(net, pi, q) else { continue };
+            if other.hidden || other.h <= hit.h || other.h - hit.h > OVERLAP_STEP {
+                continue;
+            }
+            let limit = if other.bridge { BRIDGE_CLEARANCE } else { ROAD_CLEARANCE };
+            if other.h - alt <= limit {
+                hit = RoadHit { h: other.h, ..hit };
+            }
+        }
+        Some(hit)
     }
 
     /// The nearest point on one path's ribbon to `q`. `None` when `q` lies
@@ -891,7 +908,13 @@ pub fn build(cx: &Ctx, vt: &VecTile, src: &crate::sources::Sources, mesh: &mut M
         }
     }
     for (p, radius, class) in pads.into_iter().take(2048) {
-        let center = cx.pos(p.into(), cx.ground(p.into()) + 0.15);
+        // At the height the roads meeting here end at (grade_profile pins
+        // them to the ground at the node), dipping with the ground where it
+        // falls away but never rising above them: a pad standing proud of the
+        // ribbons buries the feet and wheels of whatever stands on them.
+        let node = cx.ground(p.into());
+        let pad_h = |q: Vec2| node + 0.10 + (cx.ground(q.into()) - node).min(0.0);
+        let center = cx.pos(p.into(), node + 0.10);
         let start = out.verts.len() as u32;
         let kind = class as u32 | (yellow as u32) << 5 | (left as u32) << 13;
         let vertex = |position: Vec3, across: f32| RoadVertex { pos: position.into(), q: [across, 0.0, radius, 1e4], kind: kind as f32 };
@@ -900,7 +923,7 @@ pub fn build(cx: &Ctx, vt: &VecTile, src: &crate::sources::Sources, mesh: &mut M
         for i in 0..=count {
             let a = i as f32 / count as f32 * std::f32::consts::TAU;
             let offset = Vec2::new(a.cos(), a.sin()) * radius;
-            let position = cx.pos((p + offset / um).into(), cx.ground((p + offset / um).into()) + 0.15);
+            let position = cx.pos((p + offset / um).into(), pad_h(p + offset / um));
             out.radius = out.radius.max(position.length());
             out.verts.push(vertex(position, offset.x));
         }
@@ -1151,7 +1174,7 @@ pub fn build(cx: &Ctx, vt: &VecTile, src: &crate::sources::Sources, mesh: &mut M
                 }
                 out.net.total_len += len;
                 out.net.paths.push(Path {
-                    pts: (0..n).map(|i| cx.pos(pts[i], zs[i] + if bridge { 0.02 } else { 0.14 })).collect(),
+                    pts: (0..n).map(|i| cx.pos(pts[i], zs[i] + if bridge { 0.09 } else { 0.14 })).collect(),
                     cum,
                     len,
                     class: line.class,
@@ -1165,7 +1188,7 @@ pub fn build(cx: &Ctx, vt: &VecTile, src: &crate::sources::Sources, mesh: &mut M
                     walk: cf.walk,
                     bridge,
                     local: pts.clone(),
-                    alt: (0..n).map(|i| zs[i] + if bridge { 0.02 } else { 0.14 }).collect(),
+                    alt: (0..n).map(|i| zs[i] + if bridge { 0.09 } else { 0.14 }).collect(),
                     nodes,
                     edge: edges,
                     junctions: Vec::new(),
@@ -1435,6 +1458,31 @@ mod tests {
         let idx = RoadIndex::build(&n, 1024.0, 1.0);
         assert!(idx.query_for_body(&n, [250.0, 600.0], 0.0).is_some(), "the sunk body climbs out");
         assert!(idx.query_for_body(&n, [250.0, 600.0], -4.0).is_none(), "a road seven metres up is not its street");
+    }
+
+    #[test]
+    fn where_ribbons_overlap_the_body_stands_on_the_top_one() {
+        // A side street joins a little proud of the main road. Its centreline
+        // is further away, but the ribbon drawn on top is the side street's:
+        // standing on the main road's height would bury the feet in it.
+        let n = net(vec![
+            road(&[[100.0, 500.0], [400.0, 500.0]], &[0.0, 0.0], 5.0, false, false, false),
+            road(&[[250.0, 503.0], [250.0, 700.0]], &[0.3, 0.3], 4.0, false, false, false),
+        ]);
+        let idx = RoadIndex::build(&n, 1024.0, 1.0);
+        let hit = idx.query_for_body(&n, [251.0, 501.0], 0.0).unwrap();
+        assert!((hit.h - 0.3).abs() < 1e-6, "on the top ribbon: {hit:?}");
+        // Off the side street the main road is the surface again.
+        let hit = idx.query_for_body(&n, [200.0, 501.0], 0.0).unwrap();
+        assert!(hit.h.abs() < 1e-6, "main road away from the join: {hit:?}");
+        // A deck over the street is a separate level, not an overlap.
+        let n = net(vec![
+            road(&[[100.0, 500.0], [400.0, 500.0]], &[0.0, 0.0], 5.0, false, false, false),
+            road(&[[100.0, 500.0], [400.0, 500.0]], &[2.0, 2.0], 5.0, false, true, false),
+        ]);
+        let idx = RoadIndex::build(&n, 1024.0, 1.0);
+        let hit = idx.query_for_body(&n, [250.0, 501.0], 0.0).unwrap();
+        assert!(hit.h.abs() < 1e-6 && !hit.bridge, "under a low deck: {hit:?}");
     }
 
     #[test]

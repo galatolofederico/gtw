@@ -10476,14 +10476,14 @@ fn car_instances(cam: DVec3, v: &vehicle::Vehicle, geom: &cars::CarGeom, out: &m
     let rot = basis * Mat3::from_rotation_x(v.pitch) * Mat3::from_rotation_z(v.roll);
     let o = (v.pos - cam).as_vec3();
     let body = Mat4::from_cols(rot.x_axis.extend(0.0), rot.y_axis.extend(0.0), rot.z_axis.extend(0.0), o.extend(1.0));
-    out.push((cars::player_body_mesh(v.model), Inst { m: inst_rows(body), tint: [v.colour[0], v.colour[1], v.colour[2], 0.0], ext: [0.0, 0.0, v.brake.clamp(0.0, 1.0), -v.damage.crumple] }));
+    out.push((cars::player_body_mesh(v.model), Inst { m: inst_rows(body), tint: [v.colour[0], v.colour[1], v.colour[2], 0.0], ext: [0.0, 1.0, v.brake.clamp(0.0, 1.0), -v.damage.crumple] }));
     for (i, w) in geom.wheels.iter().enumerate() {
         let local = Vec3::from_array(*w);
         let steer = if i < 2 { -v.steer as f32 * 0.42 } else { 0.0 };
         let wheel_rot = rot * Mat3::from_rotation_y(steer) * Mat3::from_rotation_x(-v.wheel_spin as f32);
         let wp = rot * local;
         let m = Mat4::from_cols(wheel_rot.x_axis.extend(0.0), wheel_rot.y_axis.extend(0.0), wheel_rot.z_axis.extend(0.0), (o + wp).extend(1.0));
-        out.push((cars::player_wheel_mesh(v.model), Inst { m: inst_rows(m), tint: [v.colour[0], v.colour[1], v.colour[2], 0.0], ext: [0.0, 0.0, 0.0, 0.0] }));
+        out.push((cars::player_wheel_mesh(v.model), Inst { m: inst_rows(m), tint: [v.colour[0], v.colour[1], v.colour[2], 0.0], ext: [0.0, 1.0, 0.0, 0.0] }));
     }
 }
 

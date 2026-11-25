@@ -42,7 +42,14 @@ fn crumple_body(p: vec3f, amt: f32) -> vec3f {
   let ln = select(nrm, normalize(nrm + vec3f(0.0, 0.35, 0.0) * (-ext.w) * sin(pos.z * 7.0 + pos.x * 3.0)), bent);
   let N = world(ln / max(sx * sx, vec3f(1e-6)), 0.0, m0, m1, m2);
   let T = normalize(vec3f(m0.x, m1.x, m2.x)) * sign(ext.z);
-  return VOut(G.view_proj * vec4f(P, 1.0), P, N, col, lp * sx, tint, ln, ext, T);
+  var clip = G.view_proj * vec4f(P, 1.0);
+  // Things that stand on the street (the player, cars: ext.y = 1 on a
+  // non-rubble instance) take the same pull toward the eye as the road
+  // ribbons (roads.wgsl), which win against the terrain that way. Without it
+  // the ribbon hides the bottom 10-30 cm of anything on it and feet and tyres
+  // look sunk into the asphalt.
+  if (tint.a < 0.5 && ext.y > 0.5) { clip.z *= 1.0 + 0.0018 + 0.35 / max(clip.w, 0.5); }
+  return VOut(clip, P, N, col, lp * sx, tint, ln, ext, T);
 }
 @vertex fn vs_shadow(@location(0) pos: vec3f, @location(3) m0: vec4f, @location(4) m1: vec4f, @location(5) m2: vec4f, @location(6) tint: vec4f, @location(7) ext: vec4f) -> @builtin(position) vec4f {
   // Street traffic hidden under the 3D tiles casts nothing (decided per car).

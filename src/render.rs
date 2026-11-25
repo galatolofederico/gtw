@@ -826,6 +826,12 @@ pub fn specialise(src: &str, kind: u32) -> String {
     src.replacen("const KIND: u32 = 99u;", &format!("const KIND: u32 = {kind}u;"), 1).replacen("const INSTR: u32 = 1u;", "const INSTR: u32 = 0u;", 1)
 }
 
+/// Instanced meshes that stand on the street (traffic, the player's cars and
+/// the avatar): drawn in view after the road ribbons, not before the terrain.
+fn on_street(mesh: u32) -> bool {
+    mesh < crate::cars::N_MODELS as u32 || (crate::avatar::BASE..crate::cars::PLAYER_BASE + 2 * crate::cars::N_MODELS as u32).contains(&mesh)
+}
+
 /// A geometry pipeline (see the modes in `Renderer::new`).
 #[allow(clippy::too_many_arguments)]
 fn geom_pipeline(d: &wgpu::Device, l0: &wgpu::BindGroupLayout, l_casc: &wgpu::BindGroupLayout, label: &str, l1: Option<&wgpu::BindGroupLayout>, m: &wgpu::ShaderModule, buffers: &[Option<wgpu::VertexBufferLayout>], mode: u8) -> wgpu::RenderPipeline {
@@ -4221,7 +4227,8 @@ impl Renderer {
                 for (k, r) in inst_ranges.iter().enumerate() {
                     // (rebar is too thin to cast a shadow worth its cost)
                     let thin = (crate::cars::M_REBAR..crate::cars::M_REBAR + crate::cars::N_REBAR).contains(&(k as u32));
-                    if r.1 > r.0 && !(shadow && thin) {
+                    // (what stands on the street is drawn in view after the roads)
+                    if r.1 > r.0 && !(shadow && thin) && (shadow || !on_street(k as u32)) {
                         let (first, count, base) = lib.ranges[k];
                         rp.draw_indexed(first..first + count, base, r.0..r.1);
                     }
@@ -4585,6 +4592,26 @@ impl Renderer {
                 }
             }
             rmark(&mut rp, "view.roads");
+            // Cars and the player stand on the road ribbons, which are decals
+            // pulled toward the eye and write no depth: drawn after them, a
+            // ribbon a few centimetres proud of the physics surface (a footway
+            // crossing, a junction's apron) cannot bury feet or tyres. They
+            // take the ribbons' own pull (inst.wgsl), so terrain bumps under
+            // the road still lose to them as they lose to the road.
+            if let Some(lib) = self.inst_lib.as_ref() {
+                rp.set_pipeline(&self.p_inst);
+                rp.set_bind_group(0, &self.bg0, &[]);
+                rp.set_vertex_buffer(0, lib.vbuf.slice(..));
+                rp.set_vertex_buffer(1, self.inst_buf.slice(..));
+                rp.set_index_buffer(lib.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                for (k, r) in inst_ranges.iter().enumerate() {
+                    if r.1 > r.0 && on_street(k as u32) {
+                        let (first, count, base) = lib.ranges[k];
+                        rp.draw_indexed(first..first + count, base, r.0..r.1);
+                    }
+                }
+                rmark(&mut rp, "view.street_objects");
+            }
         }
         mark(&mut enc, "view.pass_end(msaa_resolve)");
         {
