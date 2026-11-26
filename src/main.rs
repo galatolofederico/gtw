@@ -12,7 +12,10 @@ mod avatar;
 mod character;
 mod cockpit;
 mod copilot;
+mod carmesh;
 mod cars;
+#[cfg(test)]
+mod carshot;
 mod crash;
 mod damage;
 mod destruct;
@@ -1957,7 +1960,8 @@ impl Game {
             solids.push(m.body);
             solids.push(m.wheel);
         }
-        debug_assert_eq!(solids.len() as u32, cars::PLAYER_BASE + 2 * cars::N_MODELS as u32);
+        debug_assert_eq!(solids.len() as u32, cars::FAR_BASE);
+        solids.extend(cars::build_far_models());
         r.set_inst_meshes(&solids);
         r.set_scenery(scenery::packs());
         let mut menu = menu::Menu::new(lat, lon, args.hour);
