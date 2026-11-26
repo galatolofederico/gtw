@@ -2728,7 +2728,7 @@ impl Game {
             if let Some(a) = &self.audio {
                 a.event(audio::Event::Chute(1.0));
             }
-            self.status = if s.auto_chute { t!("ground.reserve_chute").into() } else { t!("ground.parachute_open").into() };
+            self.status = t!("ground.parachute_open").into();
             self.status_until = self.real + 3.0;
             if self.bailout_at.is_some() {
                 println!("bailout: parachute open at {agl:.0} m AGL");
@@ -6918,6 +6918,11 @@ impl Game {
             self.bailout_done = true;
             self.bail_out();
         }
+        // The scripted run has no hand on the keyboard: after a second of
+        // freefall it presses the parachute button, as the smoke run expects.
+        if self.bailout_at.is_some() && self.mode == Mode::Fall && !still_loading && self.character.fall.as_ref().is_some_and(|f| f.phase == bailout::Phase::Freefall && f.t >= 1.0) {
+            self.pad_jump = true;
+        }
         let mut glass_rain = 0.0f32;
         if !in_menu {
             // The clock runs at the panel's rate; past midnight the date turns over.
@@ -8773,7 +8778,7 @@ impl Game {
     /// The ground HUD: the player's health, and in a car its speed and gear,
     /// the camera, and what E would do. Flight instruments stay out of the way
     /// on the ground, and the minimap has the lower left.
-    fn ground_hud(&self, ctx: &egui::Context) {
+    fn ground_hud(&mut self, ctx: &egui::Context) {
         use egui::{Align2, Color32, RichText};
         let (fill, value) = health_bar(self.character.health);
         egui::Area::new(egui::Id::unique("ground hud")).anchor(Align2::RIGHT_BOTTOM, [-24.0, -40.0]).interactable(false).show(ctx, |ui| {
@@ -8812,11 +8817,12 @@ impl Game {
             let wind_dir = (c.wind.dot(east).atan2(c.wind.dot(north)).to_degrees() + 180.0).rem_euclid(360.0);
             let wind_speed = c.wind.length();
             let fall = c.fall.as_ref();
+            let freefall = fall.is_some_and(|f| f.phase == bailout::Phase::Freefall);
             let (title, hint, colour) = match fall {
                 Some(f) if f.phase == bailout::Phase::Freefall => {
                     let low = agl < 400.0;
                     let title = if f.exit == bailout::Exit::Eject { t!("fall.title_ejected") } else { t!("fall.title_freefall") };
-                    (title, t!("fall.open_hint"), if low { menu::BAD } else { Color32::WHITE })
+                    (title, t!("fall.track_hint"), if low { menu::BAD } else { Color32::WHITE })
                 }
                 Some(f) if f.open < 0.98 => (t!("fall.title_opening"), t!("fall.steer_hint"), menu::ACCENT),
                 _ => (t!("fall.title_canopy"), t!("fall.steer_hint"), menu::ACCENT),
@@ -8854,6 +8860,29 @@ impl Game {
                     }
                 });
             });
+            if freefall {
+                // The parachute button: a mouse click does what the jump key
+                // and the pad's A do. The area is interactive so the button is
+                // not just a label, and clicking it never starts a look drag.
+                let key_label = bind::action_in(bind::Context::Foot, "jump")
+                    .and_then(|a| self.binds.key_of(bind::Context::Foot, a))
+                    .map(bind::key_name)
+                    .unwrap_or_else(|| "Space".to_string());
+                let pad_label = padmap::FOOT_LAYOUT.iter().find(|(id, _)| *id == "jump").map(|(_, c)| c.spec()).unwrap_or_else(|| "A".to_string());
+                let label = format!("{}   {}", if padui::active() { pad_label } else { key_label }, t!("fall.open_button"));
+                let mut pull = false;
+                egui::Area::new(egui::Id::unique("fall pull")).anchor(Align2::CENTER_BOTTOM, [0.0, -110.0]).interactable(true).show(ctx, |ui| {
+                    egui::Frame::new().fill(Color32::from_black_alpha(140)).corner_radius(menu::R_WIDGET).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
+                        let b = ui.add(egui::Button::new(RichText::new(label).font(menu::bold(15.0)).color(menu::ON_ACCENT)).fill(menu::ACCENT).corner_radius(menu::R_WIDGET).min_size(egui::vec2(270.0, 40.0))).on_hover_cursor(egui::CursorIcon::PointingHand);
+                        pull = b.clicked();
+                    });
+                });
+                if pull {
+                    // The same input the key and the pad feed: the next fall
+                    // step pulls the ripcord and reports it.
+                    self.pad_jump = true;
+                }
+            }
         }
         if self.mode == Mode::Drive {
             let (speed, gear) = self.vehicle.as_ref().map_or((0.0, 1), |v| (v.speed(), v.gear));

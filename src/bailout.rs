@@ -15,8 +15,13 @@
 //! rather than instantaneous: a 55 m/s jump to a 5 m/s canopy would otherwise
 //! be a 50 g shock.
 //!
-//! Not simulated: the seat itself after ejection, canopy malfunctions and
-//! reserves, braked/toggle flight beyond the simple flare input, and swimming
+//! The parachute is always packed when the body leaves the aircraft: the
+//! freefall lasts until the player pulls the ripcord (the jump action, Space
+//! by default, or the button on the fall HUD). There is no automatic
+//! deployment.
+//!
+//! Not simulated: the seat itself after ejection, canopy malfunctions, reserve
+//! parachutes, braked/toggle flight beyond the simple flare input, and swimming
 //! (a water landing is defined in `Game::step_fall`: the player is washed
 //! ashore, or rescued to an airfield in open water).
 
@@ -40,8 +45,6 @@ pub const CANOPY_DESCENT: f64 = 5.2;
 pub const CANOPY_GLIDE: f64 = 9.5;
 /// Time for the canopy to inflate (s).
 pub const OPEN_TIME: f64 = 2.8;
-/// The reserve fires by itself below this height above ground (m).
-pub const AUTO_DEPLOY_AGL: f64 = 350.0;
 /// The body's capsule, as `character` uses it.
 const RADIUS: f64 = 0.30;
 const BODY_MID: f64 = 0.90;
@@ -108,8 +111,6 @@ pub struct Fall {
     /// The way the body or canopy is flying, as a bearing (radians from north,
     /// clockwise).
     pub heading: f64,
-    /// The reserve fired itself.
-    pub auto: bool,
     /// `jump` was down on the last step, so a held key opens once.
     jump_latch: bool,
     /// The g of the hardest deceleration in the last step, for the camera and
@@ -121,10 +122,10 @@ pub struct Fall {
 
 impl Fall {
     pub fn new(exit: Exit, heading: f64) -> Self {
-        Self { phase: Phase::Freefall, exit, open: 0.0, t: 0.0, heading: heading.rem_euclid(std::f64::consts::TAU), auto: false, jump_latch: false, shake: 0.0, steer: 0.0 }
+        Self { phase: Phase::Freefall, exit, open: 0.0, t: 0.0, heading: heading.rem_euclid(std::f64::consts::TAU), jump_latch: false, shake: 0.0, steer: 0.0 }
     }
 
-    /// Pull the ripcord (or let the reserve do it): no effect once it is out.
+    /// Pull the ripcord: no effect once the canopy is out.
     pub fn deploy(&mut self) -> bool {
         if self.phase != Phase::Freefall {
             return false;
@@ -178,20 +179,12 @@ impl Fall {
             return out;
         }
         let up = pos.normalize();
-        let hit = world.surface_at(*pos);
-        let ground_h = hit.map(|s| s.h).unwrap_or(0.0);
-        let agl = pos.length() - geo::R - ground_h;
-
-        // Pulling the ripcord is a press, not a hold. The reserve fires by
-        // itself, low and still fast.
+        // Pulling the ripcord is a press, not a hold: the player must open
+        // the parachute themselves after the freefall.
         let pull = c.jump && !self.jump_latch;
         self.jump_latch = c.jump;
         if pull && self.deploy() {
             out.deployed = true;
-        } else if self.phase == Phase::Freefall && agl < AUTO_DEPLOY_AGL && vel.dot(up) < -5.0 && self.deploy() {
-            self.auto = true;
-            out.deployed = true;
-            out.auto = true;
         }
 
         // Steering: A/D (or the pad's right stick) turns; W/S track in
@@ -301,7 +294,6 @@ impl Fall {
 #[derive(Clone, Debug, Default)]
 pub struct Event {
     pub deployed: bool,
-    pub auto: bool,
     /// Vertical speed at touchdown on land (m/s).
     pub landed: Option<f64>,
     /// Vertical speed at splashdown (m/s).
@@ -580,7 +572,7 @@ mod tests {
         let down = -vel.dot(up);
         let expect = (TERMINAL * (1.225 / air_density(pos.length() - geo::R)).sqrt()).clamp(35.0, TERMINAL_MAX);
         assert!((down - expect).abs() < 2.5, "freefall descent {down:.1} m/s, want about {expect:.1} at {:.0} m", pos.length() - geo::R);
-        assert!(fall.phase == Phase::Freefall, "the reserve is still 350 m up");
+        assert!(fall.phase == Phase::Freefall, "the parachute is still packed");
     }
 
     #[test]
@@ -596,26 +588,38 @@ mod tests {
     }
 
     #[test]
-    fn a_fall_from_airliner_altitude_reaches_the_reserve() {
+    fn a_fall_from_airliner_altitude_stays_freefall_until_pulled() {
         let w = Flat { water: false };
         let mut fall = Fall::new(Exit::Door, 0.0);
         let mut pos = above(10_000.0);
         let mut vel = DVec3::ZERO;
-        let mut auto = false;
-        let mut steps = 0;
-        for _ in 0..60 * 240 {
+        for _ in 0..60 * 12 {
             let ev = fall.step(1.0 / 60.0, &mut pos, &mut vel, &CharacterControls::default(), DVec3::ZERO, &w);
-            steps += 1;
-            if ev.deployed {
-                auto = ev.auto;
-                break;
-            }
+            assert!(!ev.deployed, "nothing opens the canopy by itself");
         }
-        let agl = pos.length() - geo::R;
-        assert!(auto, "the reserve fired");
-        assert!(agl < AUTO_DEPLOY_AGL + 5.0, "at {agl:.0} m, after {:.0} s", steps as f64 / 60.0);
+        assert_eq!(fall.phase, Phase::Freefall);
+        assert!(-vel.dot(pos.normalize()) > 45.0, "the thin air has been had");
+        assert!(-vel.dot(pos.normalize()) < TERMINAL_MAX + 5.0, "the fall is finite and below the cap");
+        assert!(fall.deploy());
         assert_eq!(fall.phase, Phase::Canopy);
-        assert!(-vel.dot(pos.normalize()) < 110.0, "the fall is finite and below the cap");
+    }
+
+    #[test]
+    fn a_low_jump_stays_in_freefall_until_the_button_is_pressed() {
+        // Leaving at 180 m used to fire the reserve at once. Now the body
+        // freefalls; the player has to pull the ripcord.
+        let w = Flat { water: false };
+        let mut fall = Fall::new(Exit::Jump, 0.0);
+        let mut pos = above(180.0);
+        let mut vel = DVec3::ZERO;
+        for _ in 0..60 {
+            let ev = fall.step(1.0 / 60.0, &mut pos, &mut vel, &CharacterControls::default(), DVec3::ZERO, &w);
+            assert!(!ev.deployed);
+        }
+        assert_eq!(fall.phase, Phase::Freefall);
+        assert!(fall.t > 0.9);
+        assert!(fall.deploy(), "the jump control opens the canopy");
+        assert_eq!(fall.phase, Phase::Canopy);
     }
 
     #[test]
@@ -645,25 +649,9 @@ mod tests {
     }
 
     #[test]
-    fn the_reserve_fires_below_the_auto_height_and_a_low_pull_is_hard() {
-        let w = Flat { water: false };
-        let mut fall = Fall::new(Exit::Jump, 0.0);
-        let mut pos = above(500.0);
-        let mut vel = DVec3::ZERO;
-        let mut opened = false;
-        for _ in 0..60 * 30 {
-            let ev = fall.step(1.0 / 60.0, &mut pos, &mut vel, &CharacterControls::default(), DVec3::ZERO, &w);
-            if ev.deployed {
-                opened = true;
-                assert!(ev.auto, "it was the reserve");
-                let agl = pos.length() - geo::R;
-                assert!(agl < AUTO_DEPLOY_AGL + 5.0, "fired at {agl:.0} m");
-                break;
-            }
-        }
-        assert!(opened && fall.phase == Phase::Canopy);
-
+    fn a_low_pull_is_hard() {
         // Pulled at the last moment: the canopy is still opening at touchdown.
+        let w = Flat { water: false };
         let mut fall = Fall::new(Exit::Jump, 0.0);
         let mut pos = above(45.0);
         let mut vel = -pos.normalize() * 55.0;
@@ -795,8 +783,10 @@ mod tests {
         }
         let w = City;
         let mut fall = Fall::new(Exit::Jump, 0.0);
+        fall.deploy();
+        fall.open = 1.0;
         let mut pos = above(30.0);
-        let mut vel = DVec3::ZERO;
+        let mut vel = -pos.normalize() * CANOPY_DESCENT;
         let ev = run(&mut fall, &mut pos, &mut vel, CharacterControls::default(), &w, 30.0);
         assert!(ev.landed.is_some(), "it comes down");
         let (east, _, _) = geo::enu(origin());

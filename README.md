@@ -132,7 +132,7 @@ All bindings can be customized in **Settings → Controls**, which has separate 
 
 ### Bailing out
 
-Press `F7` in flight (or let go of the gamepad's Y on its own) to leave the aircraft. In freefall, `W`/`S` track forward and back, `A`/`D` turn, and `Space` opens the parachute; the reserve fires by itself at 350 m above ground. Under canopy, `A`/`D` steer, `W` speeds up, and `S` flares for a softer touchdown. `C`/`V` switches between the shoulder and eye cameras, and `R` puts you on the last safe ground if you want out of the fall.
+Press `F7` in flight (or let go of the gamepad's Y on its own) to leave the aircraft. Every bailout begins in freefall: `W`/`S` track forward and back, `A`/`D` turn, and `Space`, the gamepad's A or the on-screen `OPEN PARACHUTE` button opens the canopy when you choose. Under canopy, `A`/`D` steer, `W` speeds up, and `S` flares for a softer touchdown. `C`/`V` switches between the shoulder and eye cameras, and `R` puts you on the last safe ground if you want out of the fall.
 
 ### Everywhere
 

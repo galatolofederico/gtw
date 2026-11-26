@@ -16,17 +16,18 @@ certified skydiving simulation.
 | In flight | `F7`, or the gamepad's Y alone | Bail out |
 | Freefall | `W` / `S` | Track forward / back |
 | Freefall | `A` / `D` | Turn |
-| Freefall | `Space` | Open the parachute |
+| Freefall | `Space`, the gamepad's A, or the `OPEN PARACHUTE` button | Open the parachute |
 | Under canopy | `A` / `D` | Steer |
 | Under canopy | `W` | Speed up (more glide, more descent) |
 | Under canopy | `S` | Flare (less glide, less descent) |
 | In a fall | `C` / `V` | Shoulder / eye camera |
 | In a fall | `R` | Put the body on the last safe ground |
 
-The reserve opens by itself at 350 m above ground if the player is still in
-freefall, or immediately on leaving below that height. A pull below about
-100 m may not have time to inflate: the canopy is only partly open at
-touchdown and the landing is hard.
+Every bailout starts in freefall with the parachute still packed. Nothing
+opens it automatically: press the jump control, or click the button on the
+fall HUD, when you want the canopy out. A pull below about 100 m may not have
+time to inflate: the canopy is only partly open at touchdown and the landing
+is hard.
 
 ## Exit
 
@@ -50,6 +51,8 @@ controller uses.
 - Tracking adds a small horizontal acceleration in the facing direction.
 - Wind is the planet-frame wind at the body, so freefall and canopy flight
   drift downwind. The HUD shows the wind at the ground below.
+- The freefall lasts until the player opens the parachute: there is no
+  automatic deployment.
 - The canopy inflates over 2.8 s. Its target descent is 5.2 m/s and its
   forward speed through the air is 9.5 m/s; the target is followed at a rate
   that produces a realistic opening shock instead of an instantaneous 50 g
@@ -100,17 +103,17 @@ measurements of a particular canopy:
   <https://www.faa.gov/documentLibrary/media/Advisory_Circular/AC_105-2E.pdf>
 
 Assumed for the game: 55 m/s belly-to-earth terminal at sea level (about
-120 mph), 5.2 m/s canopy descent and 9.5 m/s forward speed, a 2.8 s inflation,
-and a 350 m automatic reserve. The opening-shock cap, the 8 g freefall drag
-cap, the flare amounts and the "washed ashore" water outcome are game
+120 mph), 5.2 m/s canopy descent and 9.5 m/s forward speed, and a 2.8 s
+inflation. The opening-shock cap, the 8 g freefall drag cap, the fully manual
+deployment, the flare amounts and the "washed ashore" water outcome are game
 decisions, not reference figures.
 
 ## Limitations
 
 - Ejection seats are not modelled as a separate body, and the seat itself is
   not drawn.
-- Canopy malfunctions, reserves beyond the single automatic reserve, and
-  swooping/braked flight are not modelled.
+- Canopy malfunctions, reserve parachutes, and swooping/braked flight are not
+  modelled.
 - Swimming, drowning and rescue are not implemented; the water outcome is
   deliberately "washed ashore".
 - Buildings are solid capsules, not walkable roofs.
@@ -121,9 +124,10 @@ decisions, not reference figures.
 
 `cargo test --bin gtw bailout`, `cargo test --bin gtw character::tests` and
 `cargo test --test gtw_smoke` cover the freefall terminal speed, high-altitude
-thin air, canopy opening and steering, wind drift, land and water touchdown,
-hard-landing damage, the character's landing/respawn path, and a scripted
-headless bailout that lands on foot. The scripted run is:
+thin air, the canopy staying packed until it is pulled, manual opening and
+steering, wind drift, land and water touchdown, hard-landing damage, the
+character's landing/respawn path, and a scripted headless bailout that
+freefalls, pulls the ripcord and lands on foot. The scripted run is:
 
 ```sh
 cargo run --release -- --headless --flat --start plane --aircraft c172 \

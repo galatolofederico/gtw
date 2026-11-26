@@ -134,8 +134,8 @@ fn starts_a_plane_at_an_airport_headless() {
 fn bails_out_and_lands_headless() {
     let _gpu = gpu_lock();
     // Flat dry ground over Buenos Aires: the Cessna takes off, the script
-    // leaves it at 180 m above the sea, the reserve opens and the body lands
-    // on foot. The run quits itself once the fall is over.
+    // leaves it at 180 m above the sea, freefalls, pulls the ripcord and the
+    // body lands on foot. The run quits itself once the fall is over.
     let mut c = bin();
     c.args([
         "--headless",
@@ -167,7 +167,7 @@ fn bails_out_and_lands_headless() {
     let (ok, text) = run_with_limit(c, Duration::from_secs(120));
     assert!(ok, "headless bailout run failed: {text}");
     assert!(text.contains("bailout: jumped"), "it leaves the aircraft: {text}");
-    assert!(text.contains("bailout: parachute open"), "the reserve opens: {text}");
+    assert!(text.contains("bailout: parachute open"), "the scripted pull opens it: {text}");
     assert!(text.contains("bailout: landed"), "it comes down: {text}");
     assert!(text.contains("bailout: on foot"), "the landing returns to walk mode: {text}");
     assert!(!text.to_lowercase().contains("panicked"), "no panic: {text}");

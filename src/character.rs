@@ -171,9 +171,8 @@ pub struct CharacterStep {
     pub died: bool,
     /// One surface class per footstep this step.
     pub footsteps: Vec<Surface>,
-    /// The parachute opened on this step; the reserve did it by itself.
+    /// The player opened the parachute on this step.
     pub chute_opened: bool,
-    pub auto_chute: bool,
     /// Vertical speed at a splashdown (m/s). `Game` gets the body out of the
     /// water: swimming is a separate feature.
     pub water: Option<f64>,
@@ -489,7 +488,6 @@ impl Character {
         self.yaw = fall.heading;
         if event.deployed {
             out.chute_opened = true;
-            out.auto_chute = event.auto;
         }
 
         if let Some(impact) = event.water {
@@ -1010,9 +1008,14 @@ mod tests {
         c.spawn_grace = 0.0;
         c.last_safe = origin();
         c.fall = Some(crate::bailout::Fall::new(crate::bailout::Exit::Jump, 0.0));
+        // Freefall for a second, then pull the ripcord as the player would.
         let mut landed = None;
-        for _ in 0..60 * 150 {
-            let s = c.step(1.0 / 60.0, &CharacterControls::default(), &w, &SurfaceWeather::default());
+        for i in 0..60 * 150 {
+            let pull = i == 60;
+            let s = c.step(1.0 / 60.0, &CharacterControls { jump: pull, ..Default::default() }, &w, &SurfaceWeather::default());
+            if i == 60 {
+                assert!(s.chute_opened, "the ripcord was pulled");
+            }
             if s.landed.is_some() {
                 landed = s.landed;
                 break;
@@ -1036,7 +1039,7 @@ mod tests {
         c.fall = Some(crate::bailout::Fall::new(crate::bailout::Exit::Jump, 0.0));
         let jump = CharacterControls { jump: true, ..Default::default() };
         let s = c.step(1.0 / 60.0, &jump, &w, &SurfaceWeather::default());
-        assert!(s.chute_opened && !s.auto_chute, "Space pulled the ripcord");
+        assert!(s.chute_opened, "Space pulled the ripcord");
         assert_eq!(c.fall.as_ref().map(|f| f.phase), Some(crate::bailout::Phase::Canopy));
         // Holding it does not change anything again.
         let s = c.step(1.0 / 60.0, &jump, &w, &SurfaceWeather::default());
