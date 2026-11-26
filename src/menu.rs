@@ -530,7 +530,7 @@ pub fn toggle(ui: &mut egui::Ui, on: &mut bool, text: impl Into<egui::WidgetText
 }
 
 /// Pages of the in-flight panels: the flight panel (Tab) runs beside the
-/// game; the pause menu (Esc) stops it.
+/// game; the pause menu (the pad's Menu, or `--pause-menu`) stops it.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Page {
     Flight,
@@ -628,7 +628,7 @@ pub const CONTROLS: &[(&str, &[(&str, &str)])] = &[
         ("F3", "weather & time window"),
     ]),
     ("GAME", &[
-        ("Esc", "pause menu: settings, map, quit"),
+        ("Esc", "back to the main menu"),
         ("P", "pause without the menu"),
         ("G", "go to a place or address"),
         ("U", "sound on / off"),

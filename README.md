@@ -136,7 +136,7 @@ All bindings can be customized in **Settings → Controls**, which has separate 
 | HUD toggle (the minimap follows it on the ground) / Minimap in flight | `H` / `` ` `` |
 | Full map | `J` |
 | Go to place / Respawn / Pause | `G` / `R` / `P` |
-| Flight panel / Pause menu | `Tab` / `Esc` |
+| Flight panel / Back to the main menu | `Tab` / `Esc` |
 | Sound toggle / Screenshot | `U` / `F12` |
 
 ## Configuration & Data Paths

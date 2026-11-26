@@ -971,7 +971,7 @@ fn parse_args_from(v: &[String]) -> Result<Args, String> {
             "--damage" => a.damage = Some(req(flag, i)?.to_string()),
             "--flight-menu" => a.flight_menu = Some(req_num(flag, i)?),
             "--pause-menu" => {
-                // page[@seconds]: open the flight panel (Tab) or the pause menu (Esc) on that page, for scripted screenshots.
+                // page[@seconds]: open the flight panel (Tab) or the pause menu on that page, for scripted screenshots.
                 // `settings:SECTION` (or a section's name alone, e.g. `graphics`) opens the settings screen there.
                 let s = req(flag, i)?;
                 let (spec, t) = match s.split_once('@') {
@@ -1538,7 +1538,7 @@ struct Game {
     /// the flight menu, a ring of icons on tab.
     radial: flightui::Radial,
     info_page: menu::Page,
-    /// the pause menu (Esc): open, the page it shows, and a scripted opening
+    /// the pause menu: open, the page it shows, and a scripted opening
     pause_open: bool,
     pause_page: menu::Page,
     pause_at: Option<(menu::Page, Option<settings_ui::Section>, f64)>,
@@ -4604,10 +4604,7 @@ impl Game {
         for (id, down) in self.binds.take_edges() {
             let Some(a) = bind::ACTIONS.iter().find(|a| a.id == id) else { continue };
             if down {
-                // (Esc on the globe would quit the game.)
-                if !(a.key == KeyCode::Escape && self.mode != Mode::Fly) {
-                    self.key(a.key);
-                }
+                self.key(a.key);
                 self.keys.insert(a.key);
             } else {
                 self.keys.remove(&a.key);
@@ -5456,11 +5453,12 @@ impl Game {
         match code {
             KeyCode::Tab => self.flight_menu_key(),
             KeyCode::Escape if self.radial.open => self.radial.open = false,
-            // Esc closes a pop-up window first; otherwise it pauses.
+            // Esc closes a pop-up window first; otherwise it goes back to the start menu.
             KeyCode::Escape if self.show_help => self.show_help = false,
             KeyCode::Escape if self.minimap.full => self.minimap.full = false,
-            KeyCode::Escape if self.mode.ground() => self.to_main_menu(),
-            KeyCode::Escape => self.set_pause_menu(true),
+            // Esc leaves the run, on foot, in a car or flying, for the start
+            // menu; it is saved first, so Continue offers it back.
+            KeyCode::Escape => self.to_main_menu(),
             KeyCode::KeyR if self.mode.ground() => {
                 let at = self.character.last_safe;
                 match self.mode {
@@ -5668,15 +5666,20 @@ impl Game {
         });
     }
 
-    /// Esc or the pad's Menu on the ground: save the run and go back to the
-    /// start menu, which offers it again under Continue. (In flight the same
-    /// buttons pause, and the pause menu has the way back.)
+    /// Esc, or the pad's Menu on the ground: save the run and go back to the
+    /// start menu, which offers it again under Continue, on foot, in a car or
+    /// flying. (In flight the pad's Menu still pauses, with the settings,
+    /// failures and the way off the aircraft.)
     fn to_main_menu(&mut self) {
-        if !self.mode.ground() {
+        if self.mode == Mode::Menu {
             return;
         }
         self.save_now();
         self.save = Some(self.snapshot());
+        self.pause_open = false;
+        self.paused = false;
+        self.cancel_cockpit_input();
+        self.radial.open = false;
         self.info_open = false;
         self.goto_open = false;
         self.minimap.full = false;
@@ -8561,7 +8564,7 @@ impl Game {
         self.gfx_applied = Some(g);
     }
 
-    /// The pause menu (Esc): full screen over the dimmed, stopped game. A
+    /// The pause menu: full screen over the dimmed, stopped game. A
     /// column of big buttons on the left; the key list and the failures open
     /// in a panel beside it; Settings opens the settings screen (settings_ui.rs).
     fn pause_menu(&mut self, ctx: &egui::Context, act: &mut Option<PauseAct>, lat: f64, lon: f64, local: f64) {
