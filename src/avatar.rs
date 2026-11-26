@@ -13,9 +13,14 @@
 //!
 //! The pose is a distance-integrated gait cycle (`Character::gait_phase`),
 //! signed body-local velocity and explicit aircraft/car bailout states.
-//! Walking and running use two-bone leg IK with a planted stance path, heel
-//! roll, toe-off and knee-led swing; running has two real flight phases.
-//! Directional input gives backwards and sideways steps their own motion.
+//! Locomotion blends three gait shapes (walk, run, sprint) whose joint
+//! ranges, foot roll, pelvis motion and arm action follow adult gait
+//! analysis. Planted feet roll heel-to-toe about a contact point that stays
+//! fixed in the world; the swing follows reference hip and knee curves (a
+//! walking knee folds to about 60 degrees, a sprinting one to about 130)
+//! joined to each contact with matched position and velocity, and the
+//! pelvis rises over the support when walking and in flight when running.
+//! Backwards and sideways steps get their own centred, knee-lifted steps.
 //! Aircraft exits develop into a slightly buffeted stable arch, and a car
 //! exit moves through a braced hop, shoulder-led tucked roll and hand/foot-
 //! supported recovery. `RigPose` remains a plain array of
@@ -90,7 +95,7 @@ const FOREARM: f32 = 0.25;
 const THIGH: f32 = 0.46;
 const SHIN: f32 = 0.44;
 /// Keep a little knee flexion even at maximum leg extension.
-const LEG_REACH: f32 = (THIGH + SHIN) * 0.99;
+const LEG_REACH: f32 = (THIGH + SHIN) * 0.999;
 /// The sole's underside below the ankle, and its heel and toe (from the
 /// ankle, along +Z).
 const SOLE_DY: f32 = -0.08;
@@ -283,50 +288,289 @@ fn direct_leg(hip: f32, knee: f32, ankle: f32) -> Leg {
     Leg { hip, knee, ankle, yaw: 0.0, out: 0.0 }
 }
 
-/// An ankle trajectory in the stepping plane. `z` is positive towards the
-/// direction of travel, not necessarily towards the figure's facing.
-#[derive(Copy, Clone)]
-struct Step {
-    z: f32,
-    y: f32,
-    pitch: f32,
-    stance: bool,
-    progress: f32,
+/// The shape of one gait. Locomotion blends three of these by speed: a
+/// brisk walk, a steady run and a sprint. Values start from typical adult
+/// sagittal gait-analysis ranges (joint angles in radians, distances in
+/// metres) and were tuned by eye from side, front and three-quarter renders
+/// of this rig; they are approximations, not measurements of one subject:
+///
+/// * walking: heel strike with the toes up, flat foot by about 15% of
+///   stance, heel rise from mid stance and a long toe roll; in swing the
+///   knee folds to about 60 degrees just after toe-off (which is what
+///   lifts the heel and clears the toe), then extends to land nearly
+///   straight. The pelvis is highest over the supporting foot.
+/// * running: a softer, flatter landing just ahead of the hips, a flexed
+///   supporting knee, and a swing where the heel kicks up behind and the
+///   knee drives forward before the shank unfolds. The pelvis is lowest at
+///   mid stance and highest in flight.
+/// * sprinting: forefoot contact with the heel kept off the ground, short
+///   contacts, a tight heel recovery (knee about 130 degrees), high knee
+///   drive, a stronger whole-body lean and a big, compact arm action.
+#[derive(Copy, Clone, Debug)]
+struct Shape {
+    /// Foot pitch at touchdown, over the flat part of stance, and at toe-off
+    /// (positive puts the toe down).
+    strike: f32,
+    mid: f32,
+    off: f32,
+    /// Stance fraction where loading ends and where the heel starts rising.
+    flat: f32,
+    heel: f32,
+    /// Ankle ahead of the hip joint at touchdown, along the travel.
+    reach: f32,
+    /// Half the step width: each ankle's distance from the midline.
+    width: f32,
+    /// Swing reference: thigh angle from vertical (forward positive) at
+    /// toe-off, its forward peak and when that peak comes, and at touchdown
+    /// (the late "pawing" retraction).
+    thigh0: f32,
+    thigh_max: f32,
+    thigh_at: f32,
+    thigh_td: f32,
+    /// Swing reference knee flexion: at toe-off, peak, when, touchdown.
+    knee0: f32,
+    knee_max: f32,
+    knee_at: f32,
+    knee_td: f32,
+    /// Ankle relative to the shank in mid swing (negative is toes up).
+    ankle_mid: f32,
+    /// Minimum sole clearance in mid swing.
+    clear: f32,
+    /// The foot's downward speed as it lands (m/s): contact is an impact,
+    /// not a hover onto the ground.
+    land: f32,
+    /// Pelvis: vertical oscillation (positive peaks at mid stance, negative
+    /// bottoms out there), mean drop, lateral sway towards the support,
+    /// drop on the swing side and transverse rotation.
+    bob: f32,
+    sink: f32,
+    sway: f32,
+    drop: f32,
+    turn: f32,
+    /// Trunk lean, plus a little more at each mid stance.
+    lean: f32,
+    lean_beat: f32,
+    /// Arms: mean shoulder angle (positive back), swing amplitude, elbow
+    /// flexion with the hand behind and in front, abduction, and lag
+    /// behind the opposite leg (fraction of a cycle).
+    arm_mid: f32,
+    arm_amp: f32,
+    elbow_back: f32,
+    elbow_front: f32,
+    arm_out: f32,
+    arm_lag: f32,
 }
 
-/// Ankle height that puts the lower of the heel and toe exactly at y=0 for
-/// a requested foot pitch. This gives a real heel roll and toe push-off.
-fn contact_ankle_y(pitch: f32) -> f32 {
-    let point_y = |z: f32| SOLE_DY * pitch.cos() - z * pitch.sin();
-    -point_y(HEEL_Z).min(point_y(TOE_Z))
-}
+const WALK_SHAPE: Shape = Shape {
+    strike: -0.26,
+    mid: 0.0,
+    off: 1.12,
+    flat: 0.16,
+    heel: 0.48,
+    reach: 0.31,
+    width: 0.075,
+    thigh0: -0.22,
+    thigh_max: 0.40,
+    thigh_at: 0.82,
+    thigh_td: 0.37,
+    knee0: 0.62,
+    knee_max: 1.08,
+    knee_at: 0.30,
+    knee_td: 0.06,
+    ankle_mid: -0.06,
+    clear: 0.018,
+    land: 0.25,
+    bob: 0.017,
+    sink: 0.004,
+    sway: 0.024,
+    drop: 0.055,
+    turn: 0.075,
+    lean: 0.045,
+    lean_beat: 0.0,
+    arm_mid: 0.03,
+    arm_amp: 0.27,
+    elbow_back: 0.20,
+    elbow_front: 0.50,
+    arm_out: 0.10,
+    arm_lag: 0.04,
+};
 
-fn gait_step(q: f32, duty: f32, travel: f32, lift: f32, go: f32) -> Step {
-    if q < duty {
-        // A planted sole travels backwards relative to the body at a steady
-        // rate. Heel roll and toe push-off change its height without sliding
-        // the contact point through the floor.
-        let u = q / duty.max(0.01);
-        let pitch = (-0.13 * (1.0 - smooth(0.0, 0.18, u)) + 0.50 * smooth(0.66, 1.0, u)) * go;
-        Step { z: travel * (0.5 - u), y: contact_ankle_y(pitch), pitch, stance: true, progress: u }
-    } else {
-        let u = ((q - duty) / (1.0 - duty).max(0.01)).clamp(0.0, 1.0);
-        // A cubic recovery with the same endpoint velocity as the planted
-        // sweep. The foot continues briefly backwards after toe-off, reaches
-        // ahead of its landing point, then settles onto the next heel strike.
-        // A plain smoothstep stopped the foot dead at both contacts and made
-        // its velocity snap, which was a major source of the marionette look.
-        let swing = 1.0 - duty;
-        let endpoint = -swing / duty.max(0.01);
-        let u2 = u * u;
-        let u3 = u2 * u;
-        let ease = -2.0 * u3 + 3.0 * u2 + endpoint * u * (1.0 - u) * (1.0 - 2.0 * u);
-        let z = mix(-travel * 0.5, travel * 0.5, ease);
-        let pitch = mix(0.50, -0.13, smooth(0.04, 0.82, u)) * go;
-        // An exponent above one leaves zero vertical velocity at both ends.
-        let clearance = lift * (PI * u).sin().max(0.0).powf(1.35);
-        Step { z, y: contact_ankle_y(pitch) + clearance, pitch, stance: false, progress: u }
+const RUN_SHAPE: Shape = Shape {
+    strike: -0.10,
+    mid: 0.05,
+    off: 1.15,
+    flat: 0.22,
+    heel: 0.40,
+    reach: 0.24,
+    width: 0.045,
+    thigh0: -0.36,
+    thigh_max: 0.72,
+    thigh_at: 0.74,
+    thigh_td: 0.50,
+    knee0: 0.50,
+    knee_max: 1.90,
+    knee_at: 0.40,
+    knee_td: 0.26,
+    ankle_mid: -0.10,
+    clear: 0.03,
+    land: 0.65,
+    bob: -0.034,
+    sink: 0.050,
+    sway: 0.010,
+    drop: 0.070,
+    turn: 0.10,
+    lean: 0.12,
+    lean_beat: 0.02,
+    arm_mid: 0.14,
+    arm_amp: 0.55,
+    elbow_back: 1.15,
+    elbow_front: 1.65,
+    arm_out: 0.13,
+    arm_lag: 0.03,
+};
+
+const SPRINT_SHAPE: Shape = Shape {
+    strike: 0.32,
+    mid: 0.14,
+    off: 1.08,
+    flat: 0.30,
+    heel: 0.32,
+    reach: 0.21,
+    width: 0.035,
+    thigh0: -0.45,
+    thigh_max: 1.10,
+    thigh_at: 0.65,
+    thigh_td: 0.50,
+    knee0: 0.60,
+    knee_max: 2.28,
+    knee_at: 0.36,
+    knee_td: 0.38,
+    ankle_mid: -0.18,
+    clear: 0.05,
+    land: 0.80,
+    bob: -0.025,
+    sink: 0.040,
+    sway: 0.006,
+    drop: 0.060,
+    turn: 0.12,
+    lean: 0.22,
+    lean_beat: 0.025,
+    arm_mid: 0.12,
+    arm_amp: 0.92,
+    elbow_back: 0.95,
+    elbow_front: 1.80,
+    arm_out: 0.12,
+    arm_lag: 0.02,
+};
+
+impl Shape {
+    fn lerp(&self, o: &Shape, k: f32) -> Shape {
+        let l = |a: f32, b: f32| mix(a, b, k);
+        Shape {
+            strike: l(self.strike, o.strike),
+            mid: l(self.mid, o.mid),
+            off: l(self.off, o.off),
+            flat: l(self.flat, o.flat),
+            heel: l(self.heel, o.heel),
+            reach: l(self.reach, o.reach),
+            width: l(self.width, o.width),
+            thigh0: l(self.thigh0, o.thigh0),
+            thigh_max: l(self.thigh_max, o.thigh_max),
+            thigh_at: l(self.thigh_at, o.thigh_at),
+            thigh_td: l(self.thigh_td, o.thigh_td),
+            knee0: l(self.knee0, o.knee0),
+            knee_max: l(self.knee_max, o.knee_max),
+            knee_at: l(self.knee_at, o.knee_at),
+            knee_td: l(self.knee_td, o.knee_td),
+            ankle_mid: l(self.ankle_mid, o.ankle_mid),
+            clear: l(self.clear, o.clear),
+            land: l(self.land, o.land),
+            bob: l(self.bob, o.bob),
+            sink: l(self.sink, o.sink),
+            sway: l(self.sway, o.sway),
+            drop: l(self.drop, o.drop),
+            turn: l(self.turn, o.turn),
+            lean: l(self.lean, o.lean),
+            lean_beat: l(self.lean_beat, o.lean_beat),
+            arm_mid: l(self.arm_mid, o.arm_mid),
+            arm_amp: l(self.arm_amp, o.arm_amp),
+            elbow_back: l(self.elbow_back, o.elbow_back),
+            elbow_front: l(self.elbow_front, o.elbow_front),
+            arm_out: l(self.arm_out, o.arm_out),
+            arm_lag: l(self.arm_lag, o.arm_lag),
+        }
     }
+
+    /// Foot pitch through stance: heel-first loading that settles flat, then
+    /// a heel rise that accelerates into push-off (fastest at toe-off). Past
+    /// `u = 1` the push-off rotation simply continues, so contact paths can
+    /// be extrapolated smoothly across toe-off.
+    fn stance_pitch(&self, u: f32) -> f32 {
+        let rise = ((u - self.heel) / (1.0 - self.heel).max(0.01)).max(0.0);
+        mix(self.strike, self.mid, smooth(0.0, self.flat, u)) + (self.off - self.mid) * rise * rise
+    }
+
+    /// The swing's reference ankle path from typical hip and knee angles:
+    /// (along the travel, up), relative to the hip joint.
+    fn swing_reference(&self, u: f32) -> (f32, f32) {
+        let thigh = if u < self.thigh_at {
+            // The hip flexes fastest just after toe-off: half ease-out.
+            let x = (u / self.thigh_at).clamp(0.0, 1.0);
+            mix(self.thigh0, self.thigh_max, 0.5 * smooth(0.0, 1.0, x) + 0.5 * (1.0 - (1.0 - x) * (1.0 - x)))
+        } else {
+            mix(self.thigh_max, self.thigh_td, smooth(self.thigh_at, 1.0, u))
+        };
+        let knee = if u < self.knee_at {
+            mix(self.knee0, self.knee_max, smooth(0.0, self.knee_at, u))
+        } else {
+            mix(self.knee_max, self.knee_td, smooth(self.knee_at, 1.0, u))
+        };
+        let shank = thigh - knee;
+        (THIGH * thigh.sin() + SHIN * shank.sin(), -THIGH * thigh.cos() - SHIN * shank.cos())
+    }
+}
+
+/// The ankle (along the travel, up) for a foot whose heel point would rest
+/// at `g` when flat. A negative pitch rocks on the heel, a positive one on
+/// the toe, so whichever end touches the ground stays exactly where it is.
+fn rocker_ankle(g: f32, pitch: f32) -> (f32, f32) {
+    let (s, c) = pitch.sin_cos();
+    let pivot = if pitch < 0.0 { HEEL_Z } else { TOE_Z };
+    let contact = g + pivot - HEEL_Z;
+    (contact - (SOLE_DY * s + pivot * c), -(SOLE_DY * c - pivot * s))
+}
+
+/// Height of the lowest sole point relative to the ankle for a foot pitch
+/// (negative: below it).
+fn sole_below_ankle(pitch: f32) -> f32 {
+    let point_y = |z: f32| SOLE_DY * pitch.cos() - z * pitch.sin();
+    point_y(HEEL_Z).min(point_y(TOE_Z))
+}
+
+/// Ankle height that puts the lower of the heel and toe exactly on the
+/// ground for a foot pitch.
+fn contact_ankle_y(pitch: f32) -> f32 {
+    -sole_below_ankle(pitch)
+}
+
+/// A path from `p0` to `p1` that leaves with velocity `v0` and arrives with
+/// `v1`. Unlike a plain cubic Hermite, the velocity terms fade out within a
+/// short part of the interval: a sprint's swing lasts three times its
+/// contact, and spreading the planted foot's backwards speed over the whole
+/// swing would drag the leg out behind instead of letting it fold. The
+/// toe-off end fades fastest, as the knee takes over at once.
+fn blend_path(p0: Vec3, v0: Vec3, p1: Vec3, v1: Vec3, u: f32) -> Vec3 {
+    let tail = |w: f32, span: f32| if w < span { w * (1.0 - w / span).powi(2) } else { 0.0 };
+    let k = smooth(0.0, 1.0, u);
+    p0 * (1.0 - k) + p1 * k + v0 * tail(u, 0.12) - v1 * tail(1.0 - u, 0.2)
+}
+
+/// Where a hip joint is, given the pelvis placement. The pelvis' rotation
+/// carries the joint (forwards on the swing side, down on the dropped side)
+/// while the leg chain below it stays root-aligned, so the IK can plant a
+/// foot exactly however the pelvis turns.
+fn hip_joint(sway: f32, rise: f32, shift: f32, twist: f32, tilt: f32, side: f32) -> Vec3 {
+    (at(sway, HIP_Y + rise, shift) * ry(twist) * rz(tilt)).transform_point3(Vec3::new(side * HIP_X, HIP_DY, 0.0))
 }
 
 /// Analytic two-bone IK. Given an ankle relative to the hip and a desired
@@ -356,104 +600,273 @@ fn leg_to_offset(dx: f32, dy: f32, dz: f32, pitch: f32, yaw: f32, side: f32) -> 
     leg
 }
 
-fn locomotion(m: &Motion) -> Angles {
-    let v = if m.speed.is_finite() { m.speed.max(0.0) as f32 } else { 0.0 };
-    let q = (m.phase as f32).rem_euclid(TAU) / TAU;
-    let t = if m.time.is_finite() { m.time as f32 } else { 0.0 };
-    let go = smooth(0.05, 0.35, v);
-    let run = smooth(1.9, 4.5, v);
-    let sprint = smooth(4.8, 7.0, v);
+/// The pelvis at one moment of the cycle.
+#[derive(Copy, Clone)]
+struct Pelvis {
+    sway: f32,
+    rise: f32,
+    twist: f32,
+    tilt: f32,
+}
 
-    // Old callers that only supply scalar speed mean forwards. New callers
-    // pass signed local velocity, enabling backwards and sideways gaits.
-    let mut f = if m.forward.is_finite() { m.forward as f32 } else { 0.0 };
-    let x = if m.side.is_finite() { m.side as f32 } else { 0.0 };
-    if f == 0.0 && x == 0.0 {
-        f = v;
-    }
-    let move_len = f.hypot(x);
-    let (move_x, move_z, yaw) = if move_len > 0.001 && go > 0.001 {
-        (x / move_len, f / move_len, x.atan2(f))
-    } else {
-        (0.0, 1.0, 0.0)
-    };
+/// One foot target: the ankle relative to its hip joint (body frame) and the
+/// foot's world pitch.
+#[derive(Copy, Clone)]
+struct FootTarget {
+    rel: Vec3,
+    pitch: f32,
+}
 
-    let duty = crate::character::gait_duty(v as f64) as f32;
-    let stride = crate::character::stride_len(v as f64) as f32;
-    // One full cycle covers two strides, and this foot is planted for
-    // `duty` of it. Sweeping by exactly that distance cancels the body's
-    // world-space travel instead of merely looking plausible in isolation.
-    let travel = 2.0 * duty * stride * go;
-    let lift = (mix(0.075, 0.17, run) + 0.02 * sprint) * go;
-    let steps = [gait_step(q, duty, travel, lift, go), gait_step((q + 0.5).fract(), duty, travel, lift, go)];
+/// Everything locomotion needs for the current speed and direction. The
+/// cycle position `q` (0..1, left heel strike at 0) is an argument so the
+/// same gait can be sampled around a moment for velocities.
+struct Gait {
+    s: Shape,
+    duty: f32,
+    /// Ground covered while one foot is planted: the stance sweep.
+    travel: f32,
+    go: f32,
+    /// Share of the forward gait's foot roll and swing shape (0 backwards).
+    fwd: f32,
+    dir_x: f32,
+    dir_z: f32,
+    /// Seconds per cycle.
+    period: f32,
+    breathe: f32,
+    idle: f32,
+}
 
-    let cycle = TAU * q;
-    let breathe = (t * 1.7).sin() * (1.0 - go);
-    let idle_shift = (t * 0.45).sin() * (1.0 - go);
-    // The pelvis travels over the support area instead of staying midway
-    // between two unreachable heels. Its lateral shift peaks over the stance
-    // foot. Both shifts are subtracted from the hip-to-ankle IK vectors, so
-    // this moves the body over the feet rather than dragging the feet along.
-    let fore_aft = mix(0.08, 0.04, run) * (2.0 * cycle).cos() * go;
-    let lateral = 0.026 * cycle.sin() * go * (1.0 - 0.55 * run) + 0.012 * idle_shift;
-    let sway = fore_aft * move_x + lateral;
-    let shift = fore_aft * move_z;
-    let leg_plane = |s: Step| {
-        let dx = -lateral * yaw.cos();
-        let dz = s.z - fore_aft - lateral * yaw.sin();
-        (dx, dz)
-    };
+impl Gait {
+    fn new(m: &Motion) -> Gait {
+        let v = if m.speed.is_finite() { m.speed.max(0.0) as f32 } else { 0.0 };
+        let t = if m.time.is_finite() { m.time as f32 } else { 0.0 };
+        let go = smooth(0.05, 0.35, v);
+        let run = crate::character::run_share(v as f64) as f32;
+        let sprint = smooth(4.5, 7.0, v);
+        let s = WALK_SHAPE.lerp(&RUN_SHAPE, run).lerp(&SPRINT_SHAPE, sprint);
 
-    // Weight acceptance dips the pelvis gently; the run's two flight arcs
-    // rise above it. Crucially, include the approaching swing foot as well as
-    // the stance foot in the reach constraint. Considering a foot only after
-    // touchdown caused an instantaneous 10-30 cm drop at every contact.
-    let mut rise = -mix(0.006, 0.040, run) * go - 0.020 * sprint * go + 0.003 * breathe;
-    if run > 0.001 {
-        if let Some(s) = steps.iter().find(|s| s.stance) {
-            rise -= 0.025 * run * (PI * s.progress).sin() * go;
-        } else {
-            let start = if q < 0.5 { duty } else { duty + 0.5 };
-            let u = ((q - start) / (0.5 - duty).max(0.01)).clamp(0.0, 1.0);
-            rise += 0.065 * run * (PI * u).sin() * go;
+        // Old callers that only supply scalar speed mean forwards. New callers
+        // pass signed local velocity, enabling backwards and sideways gaits.
+        let mut f = if m.forward.is_finite() { m.forward as f32 } else { 0.0 };
+        let x = if m.side.is_finite() { m.side as f32 } else { 0.0 };
+        if f == 0.0 && x == 0.0 {
+            f = v;
+        }
+        let len = f.hypot(x);
+        let (dir_x, dir_z) = if len > 0.001 && go > 0.001 { (x / len, f / len) } else { (0.0, 1.0) };
+
+        let duty = crate::character::gait_duty(v as f64) as f32;
+        let stride = crate::character::stride_len_dir(v as f64, dir_z as f64) as f32;
+        // One full cycle covers two strides and this foot is planted for
+        // `duty` of it. Sweeping by exactly that distance cancels the body's
+        // world-space travel instead of merely looking plausible.
+        let travel = 2.0 * duty * stride * go;
+        Gait {
+            s,
+            duty,
+            travel,
+            go,
+            fwd: dir_z.max(0.0),
+            dir_x,
+            dir_z,
+            period: 2.0 * stride / v.max(0.05),
+            breathe: (t * 1.7).sin() * (1.0 - go),
+            idle: (t * 0.45).sin() * (1.0 - go),
         }
     }
-    rise -= 0.010 * (2.0 * cycle).cos() * (1.0 - run) * go;
-    for &s in &steps {
-        let (dx, dz) = leg_plane(s);
-        let horizontal = dx * dx + dz * dz;
-        let needed = s.y + (LEG_REACH * LEG_REACH - horizontal).max(0.01).sqrt() - (HIP_Y + HIP_DY);
-        rise = rise.min(needed);
-    }
-    rise = rise.max(-0.20);
-    let hip_y = HIP_Y + HIP_DY + rise;
-    let leg = |s: Step, side: f32| {
-        let (dx, dz) = leg_plane(s);
-        leg_to_offset(dx, s.y - hip_y, dz, s.pitch, yaw, side)
-    };
-    let legs = [leg(steps[0], 1.0), leg(steps[1], -1.0)];
 
-    // Arms counter-swing, with relaxed elbows for a walk and compact, powerful
-    // arm drive for a sprint. The elbow closes as the hand comes forwards
-    // instead of bending most while it is behind the hip.
-    let amp = (mix(0.30, 0.80, run) + 0.055 * sprint) * go;
+    /// Pelvis sway, rotation and unguarded height at `q`. The vertical beat
+    /// is twice per cycle, phased on mid stance (highest there when walking,
+    /// lowest when running); sway and drop follow the supporting leg.
+    fn pelvis_free(&self, q: f32) -> Pelvis {
+        let s = &self.s;
+        let support = (TAU * (q - 0.5 * self.duty)).cos();
+        let beat = (2.0 * TAU * (q - 0.5 * self.duty)).cos();
+        Pelvis {
+            sway: (s.sway * support + 0.012 * self.idle) * self.go + 0.012 * self.idle * (1.0 - self.go),
+            rise: mix(0.012, 0.008, self.go) + (-s.sink + s.bob * beat) * self.go + 0.003 * self.breathe,
+            twist: -s.turn * (TAU * q).cos() * self.go,
+            tilt: s.drop * support * self.go + 0.016 * self.idle,
+        }
+    }
+
+    /// A planted foot at stance fraction `u`: the ankle in the body frame and
+    /// the foot pitch. The heel (or toe) contact moves backwards at exactly
+    /// the body's speed.
+    fn stance(&self, u: f32, side: f32) -> (Vec3, f32) {
+        let s = &self.s;
+        let roll = self.go * self.fwd;
+        let strike = s.stance_pitch(0.0) * roll;
+        let pitch = s.stance_pitch(u) * roll;
+        // Forwards, the foot lands a little ahead and pushes off well behind
+        // (the toe lever); backwards and sideways steps are centred.
+        let reach = mix(0.5 * self.travel + 0.03 * self.go, s.reach * self.go, self.fwd);
+        // The contact point moves along the travel; the heel/toe rocker
+        // offset is along the shoe, which always faces the body's forward.
+        let (rock0, _) = rocker_ankle(0.0, strike);
+        let (rock, y) = rocker_ankle(0.0, pitch);
+        let contact = reach - rock0 * self.dir_z - self.travel * u;
+        // Feet land closer to the midline as the pace rises.
+        let width = mix(0.11, mix(s.width, 0.12, self.dir_x.abs()), self.go);
+        (Vec3::new(side * width + contact * self.dir_x, y, contact * self.dir_z + rock), pitch)
+    }
+
+    /// Pelvis at `q`, lowered just enough that every planted foot is in
+    /// reach. The landing foot's touchdown point is fed in gradually through
+    /// the second half of its swing, so the body settles into the contact
+    /// instead of dropping when it lands, and a soft minimum keeps the guard
+    /// from putting a kink into the pelvis path when it starts to bind.
+    fn pelvis(&self, q: f32) -> Pelvis {
+        let mut p = self.pelvis_free(q);
+        for k in 0..2 {
+            let side = if k == 0 { 1.0 } else { -1.0 };
+            let qk = (q + 0.5 * k as f32).rem_euclid(1.0);
+            // Around each contact a swinging leg's foot is extrapolated along
+            // its planted path (sweeping back at the body's speed), with a
+            // slack that grows with the square of that extrapolation. It is
+            // zero with zero slope at toe-off and touchdown, so the pelvis has
+            // no velocity kink there, and soon large enough that it cannot
+            // hold the body down in flight.
+            let (u, slack) = if qk < self.duty {
+                (qk / self.duty, 0.0)
+            } else {
+                let late = qk / self.duty - 1.0;
+                let early = (qk - 1.0) / self.duty;
+                if late < 0.4 {
+                    (1.0 + late, 12.0 * late * late)
+                } else if early > -0.4 {
+                    (early, 3.0 * early * early)
+                } else {
+                    continue;
+                }
+            };
+            let (ankle, _) = self.stance(u, side);
+            let hip = hip_joint(p.sway, 0.0, 0.0, p.twist, p.tilt, side);
+            let horizontal = (ankle.x - hip.x).powi(2) + (ankle.z - hip.z).powi(2);
+            let reach = LEG_REACH * 0.997;
+            let highest = ankle.y + (reach * reach - horizontal).max(0.01).sqrt() - hip.y + slack;
+            let k = 0.006;
+            p.rise = 0.5 * (p.rise + highest - ((p.rise - highest).powi(2) + k * k).sqrt());
+        }
+        p.rise = p.rise.max(-0.25);
+        p
+    }
+
+    /// A planted ankle at stance fraction `u` relative to its hip joint, with
+    /// the pelvis as it is at global cycle position `q`.
+    fn stance_rel(&self, u: f32, q: f32, side: f32) -> Vec3 {
+        let p = self.pelvis(q.rem_euclid(1.0));
+        let (ankle, _) = self.stance(u, side);
+        ankle - hip_joint(p.sway, p.rise, 0.0, p.twist, p.tilt, side)
+    }
+
+    fn swing_body(&self, u: f32) -> Vec3 {
+        let (along, y) = self.s.swing_reference(u);
+        Vec3::new(along * self.dir_x, y, along * self.dir_z)
+    }
+
+    /// Leg `k`'s target at cycle position `q`.
+    fn foot(&self, q: f32, k: usize) -> FootTarget {
+        let side = if k == 0 { 1.0 } else { -1.0 };
+        let qk = (q + 0.5 * k as f32).rem_euclid(1.0);
+        let duty = self.duty;
+        if qk < duty {
+            let p = self.pelvis(q);
+            let (ankle, pitch) = self.stance(qk / duty, side);
+            return FootTarget { rel: ankle - hip_joint(p.sway, p.rise, 0.0, p.twist, p.tilt, side), pitch };
+        }
+
+        // Swing. The base is a curve that leaves toe-off and meets
+        // the next touchdown with the planted foot's exact position and
+        // velocity, so there is no pop at either contact. On top of it rides
+        // the part of the reference hip/knee path that its own endpoints do
+        // not explain: the heel kick, the knee drive and the late pull-back.
+        let u = (qk - duty) / (1.0 - duty);
+        let e = 1e-3;
+        let span = (1.0 - duty) / duty;
+        // Toe-off of this leg is at global q = duty - k/2, the next
+        // touchdown at 1 - k/2. Velocities are one-sided, inside the stance.
+        let lag = 0.5 * k as f32;
+        let p0 = self.stance_rel(1.0, duty - lag, side);
+        let v0 = (p0 - self.stance_rel(1.0 - e, duty * (1.0 - e) - lag, side)) / e * span;
+        let p1 = self.stance_rel(0.0, 1.0 - lag, side);
+        let mut v1 = (self.stance_rel(e, 1.0 + duty * e - lag, side) - p1) / e * span;
+        v1.y -= self.s.land * self.go * (1.0 - duty) * self.period;
+        let r0 = self.swing_body(0.0);
+        let r1 = self.swing_body(1.0);
+        let rv0 = (self.swing_body(e) - r0) / e;
+        let rv1 = (r1 - self.swing_body(1.0 - e)) / e;
+        let shape = self.swing_body(u) - blend_path(r0, rv0, r1, rv1, u);
+        // Backwards and sideways there is no heel kick to mirror: the knee
+        // simply lifts the foot over the ground and sets it down.
+        let lift = Vec3::Y * (3.5 * self.s.clear * (PI * u).sin().max(0.0).powf(1.5));
+        let mut rel = blend_path(p0, v0, p1, v1, u) + (shape * self.fwd + lift * (1.0 - self.fwd)) * self.go;
+
+        // The ankle relative to the shank eases from its push-off angle to a
+        // slightly toes-up carriage, then to the landing angle.
+        let p = self.pelvis(q);
+        let hip = hip_joint(p.sway, p.rise, 0.0, p.twist, p.tilt, side);
+        let shank = |r: Vec3, pitch: f32| {
+            let l = leg_to_offset(r.x, r.y, r.z, pitch, 0.0, side);
+            l.hip + l.knee
+        };
+        let (_, off_pitch) = self.stance(1.0, side);
+        let (_, td_pitch) = self.stance(0.0, side);
+        let a0 = off_pitch - shank(p0, off_pitch);
+        let a1 = td_pitch - shank(p1, td_pitch);
+        // The ankle dorsiflexes briskly once the toe is off, which keeps the toe
+        // from dipping back into the ground while the knee folds.
+        let off = (u / 0.4).min(1.0);
+        let mid = mix(0.5 * (a0 + a1), self.s.ankle_mid, self.go);
+        let carriage = mix(mix(a0, mid, 1.0 - (1.0 - off) * (1.0 - off)), a1, smooth(0.55, 1.0, u));
+
+        // Keep the sole clear of the ground through mid swing.
+        let clear = self.s.clear * self.go * (PI * u).sin().max(0.0).powf(1.5);
+        let mut pitch = shank(rel, 0.0) + carriage;
+        for _ in 0..2 {
+            pitch = shank(rel, pitch) + carriage;
+            let sole = hip.y + rel.y + sole_below_ankle(pitch);
+            if sole < clear {
+                rel.y += clear - sole;
+            }
+        }
+        FootTarget { rel, pitch }
+    }
+}
+
+fn locomotion(m: &Motion) -> Angles {
+    let g = Gait::new(m);
+    let s = &g.s;
+    let q = (m.phase as f32).rem_euclid(TAU) / TAU;
+    let p = g.pelvis(q);
+    let legs = [0usize, 1].map(|k| {
+        let side = if k == 0 { 1.0 } else { -1.0 };
+        let f = g.foot(q, k);
+        leg_to_offset(f.rel.x, f.rel.y, f.rel.z, f.pitch, 0.0, side)
+    });
+
+    // Arms counter-swing the legs, a touch late. They swing further back than
+    // forwards; the elbow closes as the hand comes through and opens behind.
+    let amp = s.arm_amp * g.go;
     let arm = |opposite: f32| {
-        let swing = amp * cycle.cos() * opposite * move_z;
-        let forward = if amp > 0.001 { (-swing).max(0.0) / amp } else { 0.0 };
-        let elbow = -(0.14 + (mix(0.20, 1.25, run) + 0.10 * sprint + mix(0.06, 0.20, run) * forward) * go);
-        Arm { swing, out: 0.11 + 0.015 * run * go + 0.15 * move_x.abs() * go, elbow }
+        let c = (TAU * (q - s.arm_lag)).cos() * opposite;
+        let swing = s.arm_mid * g.go + amp * c * g.dir_z;
+        let forward = smooth(0.0, 1.0, 0.5 - 0.5 * c * g.dir_z);
+        let elbow = -(0.14 + mix(s.elbow_back, s.elbow_front, forward) * g.go);
+        Arm { swing, out: 0.11 + (s.arm_out - 0.11) * g.go + 0.15 * g.dir_x.abs() * g.go, elbow }
     };
     let arms = [arm(1.0), arm(-1.0)];
+    let beat = (2.0 * TAU * (q - 0.5 * g.duty)).cos();
     Angles {
         legs,
         arms,
-        lean: (mix(0.035, 0.14, run) + 0.075 * sprint) * go * move_z + 0.012 * breathe,
-        twist: -(0.11 + 0.03 * sprint) * cycle.cos() * go * move_z,
-        tilt: 0.030 * cycle.sin() * go * (1.0 - 0.65 * run) + 0.016 * idle_shift,
-        sway,
-        head: -0.018 * (t * 0.8).sin() * (1.0 - go),
-        rise,
-        shift,
+        lean: ((s.lean + s.lean_beat * beat) * g.fwd - 0.03 * (-g.dir_z).max(0.0)) * g.go + 0.012 * g.breathe,
+        twist: p.twist,
+        tilt: p.tilt,
+        sway: p.sway,
+        head: -0.018 * (if m.time.is_finite() { m.time as f32 } else { 0.0 } * 0.8).sin() * (1.0 - g.go),
+        rise: p.rise,
+        shift: 0.0,
     }
 }
 
@@ -779,12 +1192,12 @@ fn build(a: &Angles) -> RigPose {
     }
     for (k, side, (th, sh, ft)) in [(0usize, 1.0f32, (THIGH_L, SHIN_L, FOOT_L)), (1, -1.0, (THIGH_R, SHIN_R, FOOT_R))] {
         let leg = &a.legs[k];
-        // The pelvis rolls and twists over this root-aligned lower-body mount.
-        // Starting the IK chain from the already rotated pelvis made a stance
-        // foot orbit with it. The overlapping hip meshes still deform visually
-        // with the pelvis, while the joint itself can counter-rotate exactly.
-        let hips = at(a.sway, HIP_Y + a.rise, a.shift);
-        parts[th] = hips * at(side * HIP_X, HIP_DY, 0.0) * ry(leg.yaw) * rz(side * leg.out) * rx(leg.hip);
+        // The pelvis rotation carries the hip joint, but the leg chain below
+        // it is root-aligned. Starting the IK chain from the rotated pelvis
+        // made a stance foot orbit with it; this way the joint moves with the
+        // pelvis while the leg can counter-rotate exactly.
+        let hip = hip_joint(a.sway, a.rise, a.shift, a.twist, a.tilt, side);
+        parts[th] = Mat4::from_translation(hip) * ry(leg.yaw) * rz(side * leg.out) * rx(leg.hip);
         parts[sh] = parts[th] * at(0.0, -THIGH, 0.0) * rx(leg.knee);
         // Cancel the complete leg orientation before applying the desired
         // body-facing foot pitch. This includes both out-spread and stepping
@@ -1329,65 +1742,93 @@ mod tests {
         assert!(point(&rig, HAND_L, Vec3::ZERO).z < point(&rig, HAND_R, Vec3::ZERO).z, "left hand behind the right");
     }
 
+    /// The body-frame position of a cycle sample moved into a world frame
+    /// that travels with the ground: one cycle covers two strides.
+    fn world_of(speed: f64, forward: f64, side: f64, q: f64, p: Vec3) -> Vec3 {
+        let stride = crate::character::stride_len_dir(speed, forward / speed) as f32;
+        let dir = Vec3::new(side as f32, 0.0, forward as f32) / speed as f32;
+        p + dir * (2.0 * stride * q as f32)
+    }
+
     #[test]
-    fn stance_sweep_cancels_exact_world_travel() {
-        for speed in [1.6, 4.5, 7.0] {
-            let duty = crate::character::gait_duty(speed) as f32;
-            let stride = crate::character::stride_len(speed) as f32;
-            let travel = 2.0 * duty * stride;
-            let q0 = 0.08;
-            let q1 = 0.12;
-            let seconds = (q1 - q0) * 2.0 * stride / speed as f32;
-            let a = gait_step(q0, duty, travel, 0.2, 1.0);
-            let b = gait_step(q1, duty, travel, 0.2, 1.0);
-            let swept_in_body_frame = a.z - b.z;
-            let moved_over_ground = speed as f32 * seconds;
-            assert!((swept_in_body_frame - moved_over_ground).abs() < 1e-5, "{speed} m/s: stance sweep {swept_in_body_frame} vs body travel {moved_over_ground}");
+    fn planted_contacts_stay_put_in_the_world() {
+        // Whatever touches the ground (the heel at strike, the whole sole,
+        // then the toe through push-off) must not slide or drag sideways
+        // while the pelvis shifts, drops and turns over it.
+        for speed in [1.6, 2.45, 4.5, 7.0] {
+            let duty = crate::character::gait_duty(speed);
+            for (forward, side) in [(speed, 0.0), (-speed, 0.0), (0.0, speed), (0.0, -speed), (speed * 0.7, speed * 0.7)] {
+                let samples = 48;
+                let mut last: Option<[Vec3; 2]> = None;
+                for i in 0..=samples {
+                    let q = duty * i as f64 / samples as f64;
+                    let m = Motion { phase: q * std::f64::consts::TAU, speed, forward, side, ..standing() };
+                    let rig = build(&locomotion(&m));
+                    let ends = [HEEL_Z, TOE_Z].map(|z| world_of(speed, forward, side, q, point(&rig, FOOT_L, Vec3::new(0.0, SOLE_DY, z))));
+                    assert!(ends[0].y.min(ends[1].y).abs() < 1e-3, "{forward}/{side} m/s at {q:.3}: stance sole at {:.4}", ends[0].y.min(ends[1].y));
+                    if let Some(before) = last {
+                        for e in 0..2 {
+                            if before[e].y < 1e-4 && ends[e].y < 1e-4 {
+                                let slip = (ends[e] - before[e]).with_y(0.0).length();
+                                assert!(slip < 1e-3, "{forward}/{side} m/s at {q:.3}: contact slid {slip:.4} m");
+                            }
+                        }
+                    }
+                    last = Some(ends);
+                }
+            }
         }
     }
 
     #[test]
     fn swing_joins_stance_without_a_velocity_snap() {
-        for duty in [0.62, 0.34, 0.24] {
-            let travel = 2.0 * duty * 1.2;
-            let e = 0.0001;
-            // Both ends of the swing have the planted foot's backwards
-            // velocity, rather than stopping dead and starting again.
-            for touchdown in [false, true] {
-                let (a, b, c) = if touchdown {
-                    (gait_step(1.0 - e, duty, travel, 0.16, 1.0), gait_step(1.0, duty, travel, 0.16, 1.0), gait_step(e, duty, travel, 0.16, 1.0))
-                } else {
-                    (gait_step(duty - e, duty, travel, 0.16, 1.0), gait_step(duty, duty, travel, 0.16, 1.0), gait_step(duty + e, duty, travel, 0.16, 1.0))
-                };
-                let before = (b.z - a.z) / e;
-                let after = (c.z - b.z) / e;
-                let planted = -travel / duty;
-                assert!((before - planted).abs() < 0.03 && (after - planted).abs() < 0.03, "duty {duty}, touchdown {touchdown}: {before} / {after}, expected {planted}");
-            }
+        // The ankle's ground-relative velocity is continuous through toe-off
+        // and touchdown, so the foot neither stops dead nor pops.
+        for speed in [1.6, 4.5, 7.0] {
+            let duty = crate::character::gait_duty(speed);
+            let stride = crate::character::stride_len(speed);
+            let seconds_per_cycle = 2.0 * stride / speed;
+            let ankle = |q: f64| {
+                let m = Motion { phase: q * std::f64::consts::TAU, speed, ..standing() };
+                world_of(speed, speed, 0.0, q, point(&build(&locomotion(&m)), FOOT_L, Vec3::ZERO))
+            };
+            let e = 2e-4;
+            let velocity = |q0: f64, q1: f64| (ankle(q1) - ankle(q0)) / ((q1 - q0) * seconds_per_cycle) as f32;
+            // Toe-off is smooth in every direction.
+            let (before, after) = (velocity(duty - 2.0 * e, duty - e), velocity(duty + e, duty + 2.0 * e));
+            assert!((before - after).length() < 0.25, "{speed} m/s at toe-off: ankle velocity {before:?} then {after:?}");
+            // Touchdown keeps the horizontal velocity (no pull or shove) and
+            // arrives moving gently downwards, which the contact then stops.
+            let (before, after) = (velocity(1.0 - 2.0 * e, 1.0 - e), velocity(1.0 + e, 1.0 + 2.0 * e));
+            assert!((before - after).with_y(0.0).length() < 0.25, "{speed} m/s at touchdown: ankle velocity {before:?} then {after:?}");
+            assert!((-1.2..-0.1).contains(&before.y), "{speed} m/s: lands at {:.2} m/s vertically", before.y);
         }
     }
 
     #[test]
-    fn weight_transfer_does_not_drag_planted_feet() {
-        for speed in [1.6, 4.5, 7.0] {
-            let duty = crate::character::gait_duty(speed) as f32;
-            let stride = crate::character::stride_len(speed) as f32;
-            let travel = 2.0 * duty * stride;
-            let (q0, q1) = (duty * 0.35, duty * 0.65);
-            for (forward, side) in [(speed, 0.0), (-speed, 0.0), (0.0, speed), (0.0, -speed)] {
-                let direction = Vec3::new(side as f32 / speed as f32, 0.0, forward as f32 / speed as f32);
-                let across = Vec3::new(direction.z, 0.0, -direction.x);
-                let frame = |q| {
-                    pose(&Motion { phase: q as f64 * std::f64::consts::TAU, speed, forward, side, ..standing() })
-                };
-                let (a, b) = (frame(q0), frame(q1));
-                let a0 = point(&a, FOOT_L, Vec3::ZERO);
-                let a1 = point(&b, FOOT_L, Vec3::ZERO);
-                let swept = (a0 - a1).dot(direction);
-                let wanted = travel * (q1 - q0) / duty;
-                assert!((swept - wanted).abs() < 2e-4, "{forward}/{side} m/s: planted sweep {swept}, wanted {wanted}");
-                assert!(((a0 - a1).dot(across)).abs() < 2e-4, "{forward}/{side} m/s: the stance foot was dragged sideways");
+    fn swing_folds_the_knee_like_a_person_and_clears_the_ground() {
+        // Peak swing knee flexion: about 60 degrees walking, well past 90
+        // running and near 130 sprinting. The supporting knee stays nearly
+        // straight at a walk's mid stance and clearly flexed when running.
+        for (speed, fold, stance_max, stance_min) in [(1.6, 0.95, 0.40, 0.0), (4.5, 1.6, 1.0, 0.45), (7.0, 1.95, 1.1, 0.45)] {
+            let duty = crate::character::gait_duty(speed);
+            let mut peak: f32 = 0.0;
+            for k in 0..128 {
+                let q = k as f64 / 128.0;
+                let m = Motion { phase: q * std::f64::consts::TAU, speed, ..standing() };
+                let a = locomotion(&m);
+                let raw = build(&a);
+                if q >= duty {
+                    peak = peak.max(a.legs[0].knee);
+                    // The swing sole is above the ground without any help
+                    // from the whole-body contact correction.
+                    let sole = [HEEL_Z, TOE_Z].map(|z| point(&raw, FOOT_L, Vec3::new(0.0, SOLE_DY, z)).y).into_iter().fold(f32::MAX, f32::min);
+                    assert!(sole > -1e-3, "{speed} m/s at {q:.3}: swing sole at {sole:.4}");
+                }
             }
+            assert!(peak > fold, "{speed} m/s: swing knee only reaches {peak:.2} rad");
+            let mid = locomotion(&Motion { phase: 0.5 * duty * std::f64::consts::TAU, speed, ..standing() });
+            assert!((stance_min..stance_max).contains(&mid.legs[0].knee), "{speed} m/s: mid-stance knee {:.2} rad", mid.legs[0].knee);
         }
     }
 

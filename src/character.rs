@@ -44,23 +44,49 @@ pub const MAX_HEALTH: f32 = 100.0;
 pub const REGEN_DELAY: f64 = 5.0;
 /// Health regained per second once it does.
 pub const REGEN_RATE: f32 = 2.0;
-/// Distance between footsteps (m) at `speed` (m/s): short steps at a stroll,
-/// long ones at a sprint, so the cadence stays human (about two steps a
-/// second walking, four sprinting).
+/// How far the gait has turned from a walk into a run, 0..1. People switch
+/// fairly abruptly at about 2-2.5 m/s, so the blend is short.
+pub(crate) fn run_share(speed: f64) -> f64 {
+    let k = ((speed.max(0.0) - 2.0) / 0.9).clamp(0.0, 1.0);
+    k * k * (3.0 - 2.0 * k)
+}
+
+/// Steps per second at `speed` (m/s). Walking cadence rises from about 1.6
+/// to 2 Hz (115-120 steps a minute at a brisk 1.6 m/s); running starts near
+/// 2.75 Hz, is about 2.95 Hz (177 a minute) at 4.5 m/s and climbs to
+/// about 3.9 Hz at a 7 m/s sprint, where stride length stops growing.
+pub fn cadence(speed: f64) -> f64 {
+    let v = speed.max(0.0);
+    let walk = (1.45 + 0.30 * v).min(2.2);
+    let r = (v - 3.0).max(-1.0);
+    let run = 2.75 + 0.0408 * r + 0.0617 * r * r;
+    walk + (run - walk) * run_share(v)
+}
+
+/// Distance between footsteps (m) at `speed` (m/s): about 0.83 m at a brisk
+/// walk, 1.5 m at a run and 1.8 m at a sprint.
 pub fn stride_len(speed: f64) -> f64 {
-    (0.55 + 0.16 * speed.max(0.0)).clamp(0.7, 1.7)
+    (speed.max(0.0) / cadence(speed)).clamp(0.35, 2.2)
+}
+
+/// Stride for a body whose velocity is `along` (-1..1: the cosine between
+/// its velocity and its facing) off its facing. Sideways movement is a
+/// quicker shuffle of shorter steps, so the legs do not scissor across each
+/// other, and people back up with short, quick steps too.
+pub fn stride_len_dir(speed: f64, along: f64) -> f64 {
+    let f = if along.is_finite() { along.clamp(-1.0, 1.0) } else { 1.0 };
+    stride_len(speed) * (1.0 - 0.5 * (1.0 - f * f) - 0.3 * (-f).max(0.0))
 }
 
 /// Fraction of a gait cycle spent on one foot (or both during walking's
 /// double support). Running's duty factor below 0.5 creates two flight arcs.
-/// A sprint has shorter, quicker contacts rather than simply stretching a
-/// jog's strides until the legs cannot reach the ground.
+/// A sprint has shorter, quicker contacts (about 0.13 s) rather than simply
+/// stretching a jog's strides until the legs cannot reach the ground.
 pub(crate) fn gait_duty(speed: f64) -> f64 {
-    let k = ((speed.max(0.0) - 1.9) / (4.5 - 1.9)).clamp(0.0, 1.0);
-    let run = k * k * (3.0 - 2.0 * k);
-    let sprint = ((speed.max(0.0) - 4.8) / (7.0 - 4.8)).clamp(0.0, 1.0);
-    let sprint = sprint * sprint * (3.0 - 2.0 * sprint);
-    (0.62 + (0.34 - 0.62) * run) * (1.0 - sprint) + 0.24 * sprint
+    let v = speed.max(0.0);
+    let walk = (0.64 - 0.025 * v).clamp(0.58, 0.66);
+    let run = (0.37 - 0.03 * (v - 3.0)).clamp(0.22, 0.40);
+    walk + (run - walk) * run_share(v)
 }
 
 /// Is a foot down at this point in the cycle? The left foot lands at zero
@@ -550,7 +576,8 @@ impl Character {
         if self.grounded && self.car_bailout.is_none() {
             if speed > 0.01 {
                 let before = (self.gait / std::f64::consts::PI).floor() as i64;
-                self.gait += std::f64::consts::PI * travelled / stride_len(speed);
+                let along = self.vel.dot(self.forward()) / speed;
+                self.gait += std::f64::consts::PI * travelled / stride_len_dir(speed, along);
                 let after = (self.gait / std::f64::consts::PI).floor() as i64;
                 for _ in before..after {
                     out.footsteps.push(surface);
@@ -1099,6 +1126,30 @@ mod tests {
         let want = (travelled / stride_len(RUN)).floor() as usize;
         assert!((steps.len() as i64 - want as i64).abs() <= 1, "{} steps in {travelled:.1} m, want about {want}", steps.len());
         assert!(steps.len() >= 8, "three seconds of jogging: {} steps", steps.len());
+    }
+
+    #[test]
+    fn cadence_and_stride_are_human() {
+        // Steps per second and step length at the three paces.
+        for (speed, hz, step) in [(WALK, 1.8..2.1, 0.75..0.9), (RUN, 2.8..3.1, 1.4..1.65), (SPRINT, 3.7..4.1, 1.7..1.95)] {
+            assert!(hz.contains(&cadence(speed)), "{speed} m/s: {:.2} steps/s", cadence(speed));
+            assert!(step.contains(&stride_len(speed)), "{speed} m/s: {:.2} m steps", stride_len(speed));
+        }
+        // Walking has double support and running flight; sprint contacts are short.
+        assert!(gait_duty(WALK) > 0.5 && gait_duty(RUN) < 0.4 && gait_duty(SPRINT) < 0.3);
+        let contact = gait_duty(SPRINT) * 2.0 * stride_len(SPRINT) / SPRINT;
+        assert!((0.10..0.16).contains(&contact), "sprint contact {contact:.3} s");
+        // Stride and cadence change smoothly through the walk-run switch.
+        let mut last = stride_len(1.0);
+        for k in 1..=60 {
+            let s = stride_len(1.0 + k as f64 * 0.05);
+            assert!((s - last).abs() < 0.05, "stride jumps to {s:.3} at {:.2} m/s", 1.0 + k as f64 * 0.05);
+            last = s;
+        }
+        // Sideways shuffles take shorter steps.
+        assert!(stride_len_dir(WALK, 0.0) < 0.6 * stride_len(WALK));
+        assert!(stride_len_dir(WALK, -1.0) < 0.75 * stride_len(WALK));
+        assert_eq!(stride_len_dir(WALK, 1.0), stride_len(WALK));
     }
 
     #[test]
