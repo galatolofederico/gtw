@@ -61,6 +61,7 @@ fn help_lists_the_ground_flags() {
     assert!(ok, "--help failed: {text}");
     assert!(text.contains("--start foot|car|plane"), "usage names --start: {text}");
     assert!(text.contains("--bailout SECONDS"), "usage names --bailout: {text}");
+    assert!(text.contains("--car-bailout SECONDS"), "usage names --car-bailout: {text}");
     assert!(text.contains("--flat"), "usage names --flat: {text}");
     assert!(text.contains("--no-save"), "usage names --no-save: {text}");
     assert!(text.contains("gtw [--version]"), "usage names the GTW binary: {text}");
@@ -170,6 +171,41 @@ fn bails_out_and_lands_headless() {
     assert!(text.contains("bailout: parachute open"), "the scripted pull opens it: {text}");
     assert!(text.contains("bailout: landed"), "it comes down: {text}");
     assert!(text.contains("bailout: on foot"), "the landing returns to walk mode: {text}");
+    assert!(!text.to_lowercase().contains("panicked"), "no panic: {text}");
+}
+
+#[test]
+fn bails_out_of_a_moving_car_headless() {
+    let _gpu = gpu_lock();
+    // A car start on flat dry ground: the script puts the car up to speed,
+    // leaves it driverless and rolls the body out onto its feet. The run
+    // quits itself once the fall is over.
+    let mut c = bin();
+    c.args([
+        "--headless",
+        "--flat",
+        "--start",
+        "car",
+        "--car-bailout",
+        "1",
+        "--lat",
+        "-34.60",
+        "--lon",
+        "-58.45",
+        "--no-save",
+        "--mute",
+        "--offline",
+        "--weather",
+        "clear",
+        "--graphics",
+        "very-low",
+        "--render-scale",
+        "0.35",
+    ]);
+    let (ok, text) = run_with_limit(c, Duration::from_secs(120));
+    assert!(ok, "headless car bailout run failed: {text}");
+    assert!(text.contains("car bailout: left the car"), "it leaves the moving car: {text}");
+    assert!(text.contains("car bailout: on foot, empty car still rolling"), "the roll puts it back on foot and the car carries on: {text}");
     assert!(!text.to_lowercase().contains("panicked"), "no panic: {text}");
 }
 

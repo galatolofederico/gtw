@@ -6,6 +6,9 @@ player and its engine goes to idle, and it is stepped by the normal flight
 model (and can crash, burn and leave a wreck) while the player is under
 canopy.
 
+A moving car can be left the same way: the car carries on driverless while
+the body keeps its momentum, rolls along the ground and gets back up.
+
 This is a game model. It is shaped by sport-parachuting figures, not a
 certified skydiving simulation.
 
@@ -14,6 +17,7 @@ certified skydiving simulation.
 | Where | Input | Does |
 | --- | --- | --- |
 | In flight | `F7`, or the gamepad's Y alone | Bail out |
+| In a moving car | `F7`, `E`, or the gamepad's Y | Bail out; the car carries on driverless |
 | Freefall | `W` / `S` | Track forward / back |
 | Freefall | `A` / `D` | Turn |
 | Freefall | `Space`, the gamepad's A, or the `OPEN PARACHUTE` button | Open the parachute |
@@ -40,6 +44,20 @@ The seat, door animation and canopy jettison are simplified: the canopy is
 opened where the type has one, and the body starts a little above and to the
 side of the cockpit. The pilot's body is the same 1.80 m capsule the on-foot
 controller uses.
+
+## Leaving a moving car
+
+Above about 4 m/s (14 km/h), `E`, `F7` or the gamepad's Y is a bailout rather
+than an ordinary stop-and-get-out. The body leaves on the clear side with the
+car's velocity, plus a sideways push and a small upward hop. It then lands,
+somersaults forward along the ground for about 1.15 s and takes 0.45 s to
+stand up; the controls are ignored until it is on its feet.
+
+The car is not braked or stopped: it keeps its momentum, coasts under the
+normal car physics and is drawn in the world until rolling resistance, drag
+or an obstacle stops it. The player can walk back and re-enter it if it is
+still within reach. Below the bailout speed the same key stops the car and
+puts the player down beside it as before.
 
 ## The fall model
 
@@ -87,10 +105,10 @@ the usual crash scene, fire, debris, splash and audio run, but the player is
 not moved into the crash camera and is not marked crashed. The destroyed
 aircraft stops being drawn or stepped; the wreck remains.
 
-Saving is paused during the fall: autosave, the menu's save and the window's
-close all keep the previous resume snapshot rather than writing a body in
-mid-air or in open water. The resume is written again as soon as the player
-is back on foot.
+Saving is paused during the fall or a car bailout: autosave, the menu's save
+and the window's close all keep the previous resume snapshot rather than
+writing a body in mid-air, in open water or mid-roll. The resume is written
+again as soon as the player is back on foot.
 
 ## Sources and assumptions
 
@@ -122,19 +140,29 @@ decisions, not reference figures.
 
 ## Verification
 
-`cargo test --bin gtw bailout`, `cargo test --bin gtw character::tests` and
-`cargo test --test gtw_smoke` cover the freefall terminal speed, high-altitude
-thin air, the canopy staying packed until it is pulled, manual opening and
-steering, wind drift, land and water touchdown, hard-landing damage, the
-character's landing/respawn path, and a scripted headless bailout that
-freefalls, pulls the ripcord and lands on foot. The scripted run is:
+`cargo test --bin gtw bailout`, `cargo test --bin gtw character::tests`,
+`cargo test --bin gtw avatar::tests` and `cargo test --test gtw_smoke` cover
+the freefall terminal speed, high-altitude thin air, the canopy staying packed
+until it is pulled, manual opening and steering, wind drift, land and water
+touchdown, hard-landing damage, the character's landing/respawn path, the car
+bailout roll and stand-up, and scripted headless bailouts for both the
+aircraft and a moving car. The aircraft scripted run is:
 
 ```sh
 cargo run --release -- --headless --flat --start plane --aircraft c172 \
   --lat -34.60 --lon -58.45 --alt 180 --wind 0,0 --bailout 1 --no-save
 ```
 
+The moving-car run is:
+
+```sh
+cargo run --release -- --headless --flat --start car --car-bailout 1 \
+  --lat -34.60 --lon -58.45 --no-save
+```
+
 For a manual check, fly at 500, 3,000 and 10,000 m, press `F7`, pull at
 different heights, steer downwind and upwind, and land on a runway, a field,
 a city street and water. Watch the empty aircraft in the chase view while
-under canopy.
+under canopy. In a car, drive to walking pace, then to speed, and press `E`
+or `F7` both times: the slow one is a step out, the fast one leaves the car
+rolling and the body tumbling.

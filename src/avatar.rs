@@ -13,7 +13,8 @@
 //!
 //! The pose is a gait cycle driven by distance (`Character::gait_phase`) and
 //! speed, blending smoothly from standing to walking to running, and into a
-//! tuck in the air. The legs are posed first and the figure is then lowered
+//! tuck in the air or a whole-body somersault when bailing out of a moving
+//! car. The legs are posed first and the figure is then lowered
 //! or raised until the lower sole rests on the ground, so the feet neither
 //! float nor sink as the stride changes. The `RigPose` is a plain array of
 //! part transforms, so a skinned model can replace this later without
@@ -141,6 +142,9 @@ pub struct Motion {
     pub fall: f64,
     /// 0 no canopy .. 1 hanging under a fully open one.
     pub chute: f64,
+    /// Whole-body somersault after bailing from a moving car (radians about
+    /// the hips; 0 upright, one turn over the roll).
+    pub roll: f64,
     /// Seconds, for breathing and idle sway.
     pub time: f64,
 }
@@ -361,6 +365,14 @@ pub fn pose(m: &Motion) -> RigPose {
     let tilt = (crate::bailout::FREEFALL_TILT as f32 * fall + crate::bailout::CANOPY_TILT as f32 * chute).clamp(0.0, 1.45);
     if tilt != 0.0 {
         let turn = at(0.0, HIP_Y, 0.0) * rx(tilt) * at(0.0, -HIP_Y, 0.0);
+        for p in rig.parts.iter_mut() {
+            *p = turn * *p;
+        }
+    }
+    // A car bailout somersaults forward about the hips, in a tight tuck.
+    let roll = m.roll as f32;
+    if roll != 0.0 && roll.is_finite() {
+        let turn = at(0.0, HIP_Y, 0.0) * rx(roll) * at(0.0, -HIP_Y, 0.0);
         for p in rig.parts.iter_mut() {
             *p = turn * *p;
         }
@@ -843,7 +855,7 @@ mod tests {
     use super::*;
 
     fn standing() -> Motion {
-        Motion { phase: 0.0, speed: 0.0, air: 0.0, fall: 0.0, chute: 0.0, time: 0.0 }
+        Motion { phase: 0.0, speed: 0.0, air: 0.0, fall: 0.0, chute: 0.0, roll: 0.0, time: 0.0 }
     }
 
     /// Where a point of a part is, in the body frame.
@@ -901,7 +913,7 @@ mod tests {
             let mut highest = f32::MIN;
             let mut ahead = (f32::MAX, f32::MIN);
             for k in 0..64 {
-                let m = Motion { phase: k as f64 * std::f64::consts::TAU / 64.0, speed, air: 0.0, fall: 0.0, chute: 0.0, time: 0.0 };
+                let m = Motion { phase: k as f64 * std::f64::consts::TAU / 64.0, speed, air: 0.0, fall: 0.0, chute: 0.0, roll: 0.0, time: 0.0 };
                 let rig = pose(&m);
                 assert!(rig.is_finite());
                 // Grounded, the figure always rests on its lower sole.
@@ -916,7 +928,7 @@ mod tests {
             assert!(ahead.1 - ahead.0 > 0.4, "{speed} m/s: foot travel {:.3}", ahead.1 - ahead.0);
         }
         // The arm swings against the leg: left foot forward, left hand back.
-        let rig = pose(&Motion { phase: 0.0, speed: 1.6, air: 0.0, fall: 0.0, chute: 0.0, time: 0.0 });
+        let rig = pose(&Motion { phase: 0.0, speed: 1.6, air: 0.0, fall: 0.0, chute: 0.0, roll: 0.0, time: 0.0 });
         assert!(point(&rig, FOOT_L, Vec3::ZERO).z > 0.1, "left foot ahead at its strike");
         assert!(point(&rig, HAND_L, Vec3::ZERO).z < point(&rig, HAND_R, Vec3::ZERO).z, "left hand behind the right");
     }
@@ -926,6 +938,22 @@ mod tests {
         let rig = pose(&Motion { air: 1.0, ..standing() });
         assert!(rig.sole_low() > 0.05, "feet lifted: {}", rig.sole_low());
         assert!(pose(&Motion { air: 0.5, ..standing() }).is_finite());
+    }
+
+    #[test]
+    fn the_car_bailout_somersaults_the_tucked_body() {
+        let crown = |roll: f64| point(&pose(&Motion { air: 1.0, roll, ..standing() }), HAIR, Vec3::new(0.0, 0.301, -0.01));
+        let upright = crown(0.0);
+        let quarter = crown(std::f64::consts::FRAC_PI_2);
+        let upside_down = crown(std::f64::consts::PI);
+        assert!(upside_down.y < upright.y - 1.0, "head goes over: {upright:?} -> {upside_down:?}");
+        assert!(quarter.z > upright.z + 0.5, "and forward with the roll: {quarter:?}");
+        for k in 0..48 {
+            let rig = pose(&Motion { air: 1.0, roll: k as f64 * std::f64::consts::TAU / 48.0, ..standing() });
+            assert!(rig.is_finite(), "roll frame {k}");
+            let lowest = rig.parts.iter().map(|m| m.w_axis.y).fold(f32::MAX, f32::min);
+            assert!(lowest > 0.1, "roll frame {k}: a joint dips to {lowest:.2} m");
+        }
     }
 
     #[test]
@@ -947,7 +975,7 @@ mod tests {
         let root = geo::lla_to_pos(0.5, 0.1, 0.0);
         let cam = root + DVec3::new(0.0, 0.0, 8.0);
         for k in 0..24 {
-            let m = Motion { phase: k as f64 * 0.31, speed: k as f64 * 0.35, air: (k % 5) as f64 * 0.25, fall: 0.0, chute: 0.0, time: k as f64 };
+            let m = Motion { phase: k as f64 * 0.31, speed: k as f64 * 0.35, air: (k % 5) as f64 * 0.25, fall: 0.0, chute: 0.0, roll: 0.0, time: k as f64 };
             let rig = pose(&m);
             assert!(rig.is_finite(), "{m:?}");
             let mut out = Vec::new();

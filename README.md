@@ -60,7 +60,7 @@ cargo build --release --locked
 ## Features
 
 - **Ground play:** start on foot anywhere; walk, run, sprint, jump, step up kerbs, and climb or slide on slopes. Six surface classes (asphalt, concrete, gravel, grass, sand, snow/ice) change grip, speed, and footstep audio, and weather modifies them.
-- **Cars:** take any of the eight existing road vehicles while parked or moving, drive them with single-body arcade physics, drift with the handbrake, shove other cars aside in solid two-way collisions, and get out again.
+- **Cars:** take any of the eight existing road vehicles while parked or moving, drive them with single-body arcade physics, drift with the handbrake, shove other cars aside in solid two-way collisions, and get out again. Leave a moving car at speed and the car carries on alone while the body lands, rolls and gets back up.
 - **Bailout:** leave any flyable aircraft in flight (jump, door, or ejection seat), freefall with tracking, open and steer a ram-air canopy, and land on foot while the empty aircraft flies on and comes down clear of you. Water landings are defined without swimming yet; see [docs/bailout.md](docs/bailout.md).
 - **Flight:** the upstream aircraft, cockpits, systems, and flight model: Cessna 172RG, Robin DR400, Beechcraft A36 Bonanza, Boeing 747, Gulfstream G650, F/A-18, F-4, F-22, Concorde, SR-71, Starship, and downloadable [FlightGear aircraft](https://wiki.flightgear.org/FGAddon).
 - **World:** real elevation, OpenStreetMap roads and buildings, ESA WorldCover land cover, satellite imagery, real METAR weather, seasonal and live snow, and a satellite/road minimap.
@@ -104,7 +104,7 @@ All bindings can be customized in **Settings → Controls**, which has separate 
 | Throttle / brake and reverse | `W` / `S` |
 | Steer left / right | `A` / `D` |
 | Handbrake | `Left Shift` |
-| Get out | `E` |
+| Get out / bail out when moving | `E` or `F7` |
 | Horn | `B` |
 
 ### In flight
@@ -122,7 +122,7 @@ All bindings can be customized in **Settings → Controls**, which has separate 
 | Speedbrake / Braking chute | `/` |
 | Thrust reversers (hold) | `Z` |
 | Canopy open / close | `6` |
-| Bail out (in flight; gamepad Y alone) | `F7` |
+| Bail out in flight (also from a moving car) | `F7` |
 | Boost / Afterburner | `Space` |
 | Auto-start / stop engine | `F4` |
 | Battery master / Magnetos / Starter | `Insert` / `I` / `O` |
@@ -133,6 +133,8 @@ All bindings can be customized in **Settings → Controls**, which has separate 
 ### Bailing out
 
 Press `F7` in flight (or let go of the gamepad's Y on its own) to leave the aircraft. Every bailout begins in freefall: `W`/`S` track forward and back, `A`/`D` turn, and `Space`, the gamepad's A or the on-screen `OPEN PARACHUTE` button opens the canopy when you choose. Under canopy, `A`/`D` steer, `W` speeds up, and `S` flares for a softer touchdown. `C`/`V` switches between the shoulder and eye cameras, and `R` puts you on the last safe ground if you want out of the fall.
+
+In a car, `F7` (or `E` / the gamepad's Y while it is moving) bails out: the car keeps rolling driverless, while the body leaves with its speed, lands, somersaults and stands up. Below walking-to-jogging pace the same key is an ordinary stop-and-get-out.
 
 ### Everywhere
 

@@ -1,6 +1,7 @@
 //! The player on foot: a capsule body that walks, runs, sprints, jumps, steps
 //! up kerbs, keeps to slopes it can climb, takes fall damage, regenerates and
-//! respawns nearby after dying.
+//! respawns nearby after dying. It also carries the body out of a moving car:
+//! the hop, the ground roll and getting back on the feet.
 //!
 //! The body is a single capsule (radius 0.30 m, height 1.80 m, eye 1.65 m) in
 //! the planet frame. All ground information comes from [`WorldQuery`], so the
@@ -78,6 +79,21 @@ pub fn footstep_timbre(surface: Surface) -> FootstepTimbre {
 const GROUND_ACCEL: f64 = 22.0;
 /// …and in the air.
 const AIR_ACCEL: f64 = 3.5;
+/// Ground drag while rolling out of a moving car (m/s²): enough to slow the
+/// body over a few metres without stopping it dead.
+const ROLL_DRAG: f64 = 4.2;
+
+/// Below this speed the driver simply gets out; above it the door is a bailout
+/// and the car carries on without them (m/s).
+pub const CAR_BAILOUT_SPEED: f64 = 4.0;
+/// The sideways speed the driver pushes off with when bailing out (m/s).
+pub const CAR_EXIT_SIDE: f64 = 2.8;
+/// The upward speed of that step out (m/s): enough air to land and roll.
+pub const CAR_EXIT_UP: f64 = 2.6;
+/// How long the body somersaults along the ground (s).
+pub const CAR_ROLL_TIME: f64 = 1.15;
+/// How long it takes to stand up again after the roll (s).
+pub const CAR_STAND_TIME: f64 = 0.45;
 
 /// How hard a car knocks the body back (m/s per m/s of closing speed).
 pub const TRAFFIC_KNOCKBACK: f64 = 1.4;
@@ -120,6 +136,37 @@ impl CharacterControls {
     }
 }
 
+/// The stages of leaving a moving car: the hop out, the roll along the
+/// ground, and getting back on the feet.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CarBailoutPhase {
+    Air,
+    Roll,
+    Stand,
+}
+
+/// A bailout from a moving car.
+#[derive(Copy, Clone, Debug)]
+pub struct CarBailout {
+    pub phase: CarBailoutPhase,
+    /// Seconds spent in this phase.
+    pub t: f64,
+    /// Whole-body somersault angle (radians): one turn over the roll.
+    pub roll: f64,
+}
+
+impl CarBailout {
+    pub fn new() -> Self {
+        Self { phase: CarBailoutPhase::Air, t: 0.0, roll: 0.0 }
+    }
+}
+
+impl Default for CarBailout {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The body's state.
 #[derive(Clone, Debug)]
 pub struct Character {
@@ -142,6 +189,8 @@ pub struct Character {
     pub wind: DVec3,
     /// A bailout in progress: freefall or a canopy, until touchdown.
     pub fall: Option<bailout::Fall>,
+    /// A bailout from a moving car: the hop, the ground roll and standing up.
+    pub car_bailout: Option<CarBailout>,
     /// Seconds since the last damage.
     pub since_hurt: f64,
     /// Gait phase (radians), advanced a half turn per footstep.
@@ -173,6 +222,8 @@ pub struct CharacterStep {
     pub footsteps: Vec<Surface>,
     /// The player opened the parachute on this step.
     pub chute_opened: bool,
+    /// A car bailout touched down and began its roll.
+    pub car_roll_started: bool,
     /// Vertical speed at a splashdown (m/s). `Game` gets the body out of the
     /// water: swimming is a separate feature.
     pub water: Option<f64>,
@@ -201,6 +252,7 @@ impl Character {
             home: pos,
             wind: DVec3::ZERO,
             fall: None,
+            car_bailout: None,
             since_hurt: REGEN_DELAY,
             stride_phase: 0.0,
             stride: 0.0,
@@ -253,6 +305,7 @@ impl Character {
         self.vel = DVec3::ZERO;
         self.wind = DVec3::ZERO;
         self.fall = None;
+        self.car_bailout = None;
         self.last_safe = p;
         self.grounded = false;
         self.health = MAX_HEALTH;
@@ -327,6 +380,8 @@ impl Character {
         }
         self.since_hurt += h;
         self.spawn_grace = (self.spawn_grace - h).max(0.0);
+        let car_bail = self.car_bailout;
+        let car_rolling = car_bail.is_some_and(|b| b.phase == CarBailoutPhase::Roll);
         let up = self.pos.normalize();
         let (east, north, _) = geo::enu(self.pos);
         let hit = world.surface_at(self.pos);
@@ -337,9 +392,10 @@ impl Character {
         let blocked = hit.is_none_or(|h| h.blocked());
 
         // The intended horizontal velocity: the facing is the camera's, so
-        // forward means "away from the camera".
-        let wish_len = c.forward.hypot(c.right).clamp(0.0, 1.0);
-        if c.turn.is_finite() && c.turn != 0.0 {
+        // forward means "away from the camera". A bailout out of a moving car
+        // has the body out of control until it has rolled and stood up.
+        let wish_len = if car_bail.is_some() { 0.0 } else { c.forward.hypot(c.right).clamp(0.0, 1.0) };
+        if car_bail.is_none() && c.turn.is_finite() && c.turn != 0.0 {
             self.yaw = (self.yaw + c.turn.clamp(-1.0, 1.0) * TURN_RATE * h).rem_euclid(std::f64::consts::TAU);
         }
         let heading = c.heading.unwrap_or(self.yaw);
@@ -350,7 +406,7 @@ impl Character {
         let wish = if steep { DVec3::ZERO } else { wish_dir * pace };
 
         let vh = self.vel - up * self.vel.dot(up);
-        let accel = if self.grounded { GROUND_ACCEL } else { AIR_ACCEL };
+        let accel = if car_rolling { ROLL_DRAG } else if self.grounded { GROUND_ACCEL } else { AIR_ACCEL };
         let mut new_vh = vh + (wish - vh).clamp_length_max(accel * h);
         if steep {
             // Gravity takes the body down the slope.
@@ -365,7 +421,7 @@ impl Character {
         self.vel = new_vh + up * self.vel.dot(up);
 
         // Jump from the ground.
-        if self.grounded && c.jump && !blocked && !steep {
+        if self.grounded && c.jump && !blocked && !steep && car_bail.is_none() {
             self.vel += up * (2.0 * GRAVITY * JUMP_HEIGHT).sqrt();
             self.grounded = false;
         }
@@ -440,7 +496,7 @@ impl Character {
         }
 
         // Facing follows the way the body is going, turning smoothly.
-        if new_vh.length() > 0.25 && !c.hold_facing {
+        if new_vh.length() > 0.25 && !c.hold_facing && car_bail.is_none() {
             let target = new_vh.dot(east).atan2(new_vh.dot(north));
             let diff = (target - self.yaw + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI;
             self.yaw = (self.yaw + diff * (12.0 * h).min(1.0)).rem_euclid(std::f64::consts::TAU);
@@ -448,7 +504,7 @@ impl Character {
 
         // Footsteps, and the last safe place.
         let travelled = self.speed() * h;
-        if self.grounded {
+        if self.grounded && self.car_bailout.is_none() {
             self.stride += travelled;
             let len = stride_len(self.speed());
             while self.stride >= len {
@@ -461,8 +517,19 @@ impl Character {
             }
         }
 
-        let air = if self.grounded { 0.0 } else { 1.0 };
+        // The car bailout keeps the body tucked in the air and through the
+        // roll; once it is standing, `air` eases back to a normal stance.
+        let air = if self.car_bailout.is_some_and(|b| b.phase != CarBailoutPhase::Stand) {
+            1.0
+        } else if self.grounded {
+            0.0
+        } else {
+            1.0
+        };
         self.air += (air - self.air) * (h * 9.0).min(1.0);
+        if self.step_car_bailout(h) {
+            out.car_roll_started = true;
+        }
 
         // Health: a slow mend after a quiet spell.
         if self.health > 0.0 && self.health < MAX_HEALTH && self.since_hurt > REGEN_DELAY {
@@ -474,6 +541,52 @@ impl Character {
             out.died = true;
             out.damage = 0.0;
         }
+    }
+
+    /// The whole-body roll angle of a car bailout, for the avatar (radians).
+    pub fn car_roll(&self) -> f64 {
+        self.car_bailout.map_or(0.0, |b| b.roll)
+    }
+
+    /// Advance the car bailout: the hop, the ground roll and standing up.
+    /// Returns true on the step the body first touches down and rolls.
+    fn step_car_bailout(&mut self, h: f64) -> bool {
+        let Some(mut b) = self.car_bailout else { return false };
+        b.t += h;
+        let mut landed = false;
+        match b.phase {
+            CarBailoutPhase::Air => {
+                if self.grounded {
+                    b.phase = CarBailoutPhase::Roll;
+                    b.t = 0.0;
+                    b.roll = 0.0;
+                    landed = true;
+                } else if b.t > 4.0 {
+                    // A hole or water: the normal controller takes over rather
+                    // than leaving the body frozen in a bailout state.
+                    self.car_bailout = None;
+                    return false;
+                }
+            }
+            CarBailoutPhase::Roll => {
+                let p = (b.t / CAR_ROLL_TIME).clamp(0.0, 1.0);
+                let ease = p * p * (3.0 - 2.0 * p);
+                b.roll = ease * std::f64::consts::TAU;
+                if p >= 1.0 {
+                    b.phase = CarBailoutPhase::Stand;
+                    b.t = 0.0;
+                    b.roll = 0.0;
+                }
+            }
+            CarBailoutPhase::Stand => {
+                if b.t >= CAR_STAND_TIME {
+                    self.car_bailout = None;
+                    return false;
+                }
+            }
+        }
+        self.car_bailout = Some(b);
+        landed
     }
 
     /// A step while out of an aircraft: freefall, canopy, or the last few
@@ -1028,6 +1141,39 @@ mod tests {
         // Walking works straight away.
         run(&mut c, &w, CharacterControls { forward: 1.0, ..Default::default() }, 1.0);
         assert!(c.speed() > 3.0 && c.grounded, "walking again at {:.1} m/s", c.speed());
+    }
+
+    #[test]
+    fn a_car_bailout_rolls_along_the_ground_and_stands_up() {
+        let w = FlatWorld;
+        let mut c = at_origin();
+        let (east, _, up) = geo::enu(origin());
+        c.pos = c.pos.normalize() * (geo::R + 0.3);
+        c.vel = east * 12.0 + up * CAR_EXIT_UP;
+        c.grounded = false;
+        c.spawn_grace = 0.0;
+        c.air = 1.0;
+        c.car_bailout = Some(CarBailout::new());
+        let start = c.pos;
+        let mut rolled = false;
+        let mut max_roll = 0.0f64;
+        let mut phases = Vec::new();
+        for _ in 0..240 {
+            let s = c.step(1.0 / 60.0, &CharacterControls::default(), &w, &SurfaceWeather::default());
+            rolled |= s.car_roll_started;
+            if let Some(b) = c.car_bailout {
+                max_roll = max_roll.max(b.roll);
+                phases.push(b.phase);
+            }
+        }
+        assert!(rolled, "the car bailout touched down and rolled");
+        assert!(max_roll > 5.0, "one somersault: {max_roll:.2} rad");
+        assert!(phases.contains(&CarBailoutPhase::Roll) && phases.contains(&CarBailoutPhase::Stand));
+        assert!(c.car_bailout.is_none(), "back on the feet");
+        assert!(c.grounded);
+        assert_eq!(c.health, MAX_HEALTH, "the hop is survivable");
+        let travelled = (c.pos - start).dot(east);
+        assert!(travelled > 4.0, "momentum carries the body: {travelled:.1} m");
     }
 
     #[test]

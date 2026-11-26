@@ -608,11 +608,14 @@ struct Args {
     /// --bailout SECONDS: leave the aircraft in flight after this long, for
     /// the smoke run and scripted checks
     bailout: Option<f64>,
+    /// --car-bailout SECONDS: drive a car at speed and bail out after this
+    /// long, for the smoke run and scripted checks
+    car_bailout: Option<f64>,
     /// --no-save: neither load a resume snapshot nor write one (automated runs)
     no_save: bool,
 }
 
-const CLI_USAGE: &str = "gtw [--version] [--menu | --no-menu] [--start foot|car|plane] [--flat] [--carjack] [--bailout SECONDS] [--no-save] [--menu-screen main|fly|aircraft|settings] [--menu-view LAT,LON,ALT_M] [--hangar mine|download[:FOLDER]] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--speed KT] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--rain 0..1] [--rain-at KM,BEARING] [--wet 0..1] [--birds off|low|medium|high] [--flock gull|crow|starling|buzzard|goose,KM[,BEARING[,AGL_M]]] [--snow auto|off|always] [--weather [clear|fair|hazy|overcast|windy|storm]] [--storm-at KM,BEARING[,RADIUS_KM][,shower|thunder|severe|supercell]] [--squall-at KM,BEARING[,LENGTH_KM]] [--strike cg|ic,KM,BEARING@SECONDS] [--flight-menu SECONDS] [--pause-menu flight|places|radio|weather|game|settings[:SECTION]|controls|failures[@SECONDS]] [--settings general|graphics|sound|camera|controls|map] [--airport CODE [--runway 28L] [--approach]] [--aircraft KEY] [--max-zoom 8..19] [--cockpit | --tail-view] [--fov DEG] [--no-vsync] [--no-taa] [--graphics very-low|low|medium|high|ultra] [--storm-quality low|medium|high|ultra] [--contrails | --no-contrails] [--dynamic FPS] [--render-scale 0.35..2] [--upscaler bilinear|fsr1|fsr3|fsr4] [--fsr4-install] [--headless] [--minimap plan|satellite] [--minimap-up north|heading] [--full-map] [--fps-log] [--bench SECONDS] [--mute] [--lang CODE] [--fuel 0..1] [--cold] [--arcade] [--mcp | --no-mcp] [--mcp-port PORT] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--no-scenery] [--surface-probe LAT,LON] [--livery N] [--still] [--boost-at SECONDS] [--stage-at SECONDS] [--engines GROUP] [--ship] [--damage ...]";
+const CLI_USAGE: &str = "gtw [--version] [--menu | --no-menu] [--start foot|car|plane] [--flat] [--carjack] [--bailout SECONDS] [--car-bailout SECONDS] [--no-save] [--menu-screen main|fly|aircraft|settings] [--menu-view LAT,LON,ALT_M] [--hangar mine|download[:FOLDER]] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--speed KT] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--rain 0..1] [--rain-at KM,BEARING] [--wet 0..1] [--birds off|low|medium|high] [--flock gull|crow|starling|buzzard|goose,KM[,BEARING[,AGL_M]]] [--snow auto|off|always] [--weather [clear|fair|hazy|overcast|windy|storm]] [--storm-at KM,BEARING[,RADIUS_KM][,shower|thunder|severe|supercell]] [--squall-at KM,BEARING[,LENGTH_KM]] [--strike cg|ic,KM,BEARING@SECONDS] [--flight-menu SECONDS] [--pause-menu flight|places|radio|weather|game|settings[:SECTION]|controls|failures[@SECONDS]] [--settings general|graphics|sound|camera|controls|map] [--airport CODE [--runway 28L] [--approach]] [--aircraft KEY] [--max-zoom 8..19] [--cockpit | --tail-view] [--fov DEG] [--no-vsync] [--no-taa] [--graphics very-low|low|medium|high|ultra] [--storm-quality low|medium|high|ultra] [--contrails | --no-contrails] [--dynamic FPS] [--render-scale 0.35..2] [--upscaler bilinear|fsr1|fsr3|fsr4] [--fsr4-install] [--headless] [--minimap plan|satellite] [--minimap-up north|heading] [--full-map] [--fps-log] [--bench SECONDS] [--mute] [--lang CODE] [--fuel 0..1] [--cold] [--arcade] [--mcp | --no-mcp] [--mcp-port PORT] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--no-scenery] [--surface-probe LAT,LON] [--livery N] [--still] [--boost-at SECONDS] [--stage-at SECONDS] [--engines GROUP] [--ship] [--damage ...]";
 
 fn parse_args() -> Args {
     let v: Vec<String> = std::env::args().skip(1).collect();
@@ -726,6 +729,7 @@ fn parse_args_from(v: &[String]) -> Result<Args, String> {
         flat: false,
         carjack: false,
         bailout: None,
+        car_bailout: None,
         no_save: false,
     };
     let mut i = 0;
@@ -833,6 +837,13 @@ fn parse_args_from(v: &[String]) -> Result<Args, String> {
                     return Err(format!("{flag}: seconds must be zero or more"));
                 }
                 a.bailout = Some(t);
+            }
+            "--car-bailout" => {
+                let t = req_num(flag, i)?;
+                if t < 0.0 {
+                    return Err(format!("{flag}: seconds must be zero or more"));
+                }
+                a.car_bailout = Some(t);
             }
             "--no-save" => {
                 a.no_save = true;
@@ -1633,6 +1644,14 @@ struct Game {
     bailout_at: Option<f64>,
     bailout_done: bool,
     bailout_finished: bool,
+    /// --car-bailout: when to leave the moving car, and whether the scripted
+    /// run has left it and come back to the ground.
+    car_bailout_at: Option<f64>,
+    car_bailout_done: bool,
+    car_bailout_finished: bool,
+    /// The player was in the hood view; the roll forces the third-person
+    /// camera and this puts the view back once the body is up.
+    car_bailout_restore_view: bool,
     /// the car being driven, and the last one left behind (re-enterable)
     vehicle: Option<vehicle::Vehicle>,
     last_car: Option<vehicle::Vehicle>,
@@ -2180,6 +2199,10 @@ impl Game {
             bailout_at: args.bailout,
             bailout_done: false,
             bailout_finished: false,
+            car_bailout_at: args.car_bailout,
+            car_bailout_done: false,
+            car_bailout_finished: false,
+            car_bailout_restore_view: false,
             vehicle: start_vehicle,
             last_car: None,
             carjack: args.carjack,
@@ -2409,11 +2432,16 @@ impl Game {
     /// at an airport.
     fn interact(&mut self) {
         match self.mode {
-            Mode::Drive => self.exit_car(),
+            Mode::Drive => self.leave_car(),
             Mode::Fly if self.plane.on_ground => self.exit_aircraft(),
             Mode::Fly => self.bail_out(),
             Mode::Fall => {}
             Mode::Walk => {
+                // Rolling out of a moving car is not the moment to grab a
+                // door handle.
+                if self.character.car_bailout.is_some() {
+                    return;
+                }
                 // The car left behind first, then a moving car being flagged
                 // down, then a parked one at the kerb, then an aircraft.
                 if let Some(v) = self.last_car.as_ref().filter(|v| (v.pos - self.character.pos).length() < 4.0) {
@@ -2519,11 +2547,93 @@ impl Game {
         self.character.yaw = v.yaw;
         self.character.vel = DVec3::ZERO;
         self.character.grounded = true;
+        self.character.air = 0.0;
+        self.character.fall = None;
+        self.character.car_bailout = None;
         self.mode = Mode::Drive;
         self.vehicle = Some(v);
         self.last_car = None;
         self.status = t!("ground.in_the_car").into();
         self.status_until = self.real + 2.0;
+    }
+
+    /// Get out of the car: a step out when it is stopped or crawling, a
+    /// bailout with a roll when it is moving, so it carries on driverless.
+    fn leave_car(&mut self) {
+        let moving = self.vehicle.as_ref().is_some_and(|v| v.vel.length() >= character::CAR_BAILOUT_SPEED);
+        if moving {
+            self.car_bailout();
+        } else {
+            self.exit_car();
+        }
+    }
+
+    /// Leave a moving car: the body keeps the car's momentum, pushes off to
+    /// the clear side and lands into the car-bailout roll; the car keeps
+    /// rolling with nobody aboard.
+    fn car_bailout(&mut self) {
+        if self.mode != Mode::Drive {
+            return;
+        }
+        let Some(mut v) = self.vehicle.take() else {
+            self.mode = Mode::Walk;
+            return;
+        };
+        if v.vel.length() < character::CAR_BAILOUT_SPEED {
+            // A crawling stop: use the normal step out.
+            self.vehicle = Some(v);
+            self.exit_car();
+            return;
+        }
+        let spot = vehicle::exit_spot(&v, &self.world);
+        let up = v.up();
+        let right = v.right();
+        let side = if (spot - v.pos).dot(right) < 0.0 { -1.0 } else { 1.0 };
+        let (east, north, _) = geo::enu(v.pos);
+        // Face the way the body is carried, which is the car's travel (it may
+        // be reversing); the roll somersaults forward from there.
+        let horizontal = v.vel - up * v.vel.dot(up);
+        let heading = if horizontal.length() > 0.1 { horizontal.dot(east).atan2(horizontal.dot(north)) } else { v.yaw };
+        let vel = v.vel + right * (side * character::CAR_EXIT_SIDE) + up * character::CAR_EXIT_UP;
+        let safe = character::safe_point(&self.world, spot).unwrap_or(spot);
+        let car_speed = v.vel.length();
+        // The car is nobody's now: it coasts, the steering returns to centre
+        // and there is no brake or throttle.
+        v.steer = 0.0;
+        v.brake = 0.0;
+        v.handbrake = false;
+        v.load = 0.0;
+        self.last_car = Some(v);
+        self.character.pos = spot + up * 0.12;
+        self.character.vel = vel;
+        self.character.yaw = heading.rem_euclid(std::f64::consts::TAU);
+        self.character.grounded = false;
+        self.character.air = 1.0;
+        self.character.last_safe = safe;
+        self.character.fall = None;
+        self.character.car_bailout = Some(character::CarBailout::new());
+        self.character.spawn_grace = 0.0;
+        self.mode = Mode::Walk;
+        // The roll is the point: show it rather than the inside of a hood.
+        self.car_bailout_restore_view = self.ground_first_person;
+        self.ground_first_person = false;
+        self.cam_yaw = self.character.yaw;
+        self.cam_pitch = 0.0;
+        self.cam_pos = self.character.eye();
+        {
+            let (e, n, _) = geo::enu(self.character.pos);
+            self.cam_dir = e * self.cam_yaw.sin() + n * self.cam_yaw.cos();
+        }
+        self.status = t!("ground.car_bailout").into();
+        self.status_until = self.real + 3.0;
+        if let Some(a) = &self.audio {
+            a.event(audio::Event::Scrape(0.7));
+        }
+        if self.car_bailout_at.is_some() {
+            println!("car bailout: left the car at {:.0} km/h", car_speed * 3.6);
+        } else if self.bailout_at.is_some() {
+            println!("bailout: left the moving car at {:.0} km/h", car_speed * 3.6);
+        }
     }
 
     /// Get out of the car, on the clear side of it, and leave it behind.
@@ -2836,10 +2946,11 @@ impl Game {
     /// The snapshot of the player's current state for the resume save.
     fn snapshot(&self) -> save::SaveState {
         let clock = save::SavedClock { utc: self.utc, doy: self.doy, snow: self.snow.code().into() };
-        // A fall is transient: a snapshot taken in the air puts the body back
-        // on the ground it would have landed on, not at altitude with no
-        // parachute. The empty aircraft is not part of the resume either.
-        let falling = self.mode == Mode::Fall;
+        // A fall or a car bailout is transient: a snapshot taken in the air or
+        // mid-roll puts the body back on the ground it would have landed on,
+        // not at altitude with no parachute. The empty aircraft is not part of
+        // the resume either.
+        let falling = self.mode == Mode::Fall || self.character.car_bailout.is_some();
         let foot = matches!(self.mode, Mode::Walk | Mode::Fall).then(|| save::SavedFoot {
             pos: if falling { self.character.last_safe } else { self.character.pos }.to_array(),
             yaw: self.character.yaw,
@@ -2875,7 +2986,7 @@ impl Game {
 
     /// Write the resume snapshot now, unless this run must not save.
     pub(crate) fn save_now(&self) {
-        if !self.save_enabled || !self.autosave || self.mode == Mode::Menu || self.mode == Mode::Fall {
+        if !self.save_enabled || !self.autosave || self.mode == Mode::Menu || self.mode == Mode::Fall || self.character.car_bailout.is_some() {
             return;
         }
         if let Err(e) = self.snapshot().save() {
@@ -2885,7 +2996,7 @@ impl Game {
 
     /// Autosave every five seconds while playing.
     fn update_autosave(&mut self, dt: f64) {
-        if !self.save_enabled || !self.autosave || self.mode == Mode::Menu || self.mode == Mode::Fall {
+        if !self.save_enabled || !self.autosave || self.mode == Mode::Menu || self.mode == Mode::Fall || self.character.car_bailout.is_some() {
             return;
         }
         self.save_t += dt;
@@ -2900,6 +3011,9 @@ impl Game {
         let p = DVec3::from_array(c.pos);
         let p = save::safe_position(&self.world, p).unwrap_or(p);
         let mut v = vehicle::Vehicle::spawn(c.model.min(cars::N_MODELS as u8 - 1), c.colour, p, c.yaw);
+        if c.speed.is_finite() {
+            v.vel = v.forward() * c.speed;
+        }
         if !vehicle::CAR_HEALTH_ENABLED {
             return v;
         }
@@ -4265,6 +4379,16 @@ impl Game {
                 a.event(audio::Event::Crash((hit.speed / 12.0).clamp(0.3, 1.2) as f32));
             }
         }
+        if s.car_roll_started {
+            if let Some(a) = &self.audio {
+                a.event(audio::Event::Bump(0.8));
+                a.event(audio::Event::Scrape(0.9));
+            }
+        }
+        if self.car_bailout_restore_view && self.character.car_bailout.is_none() {
+            self.ground_first_person = true;
+            self.car_bailout_restore_view = false;
+        }
         if s.died {
             self.status = t!("ground.you_died_respawning").into();
             self.status_until = self.real + 5.0;
@@ -4341,13 +4465,33 @@ impl Game {
     }
 
     /// Advance whatever the player is in on the ground: the car or the feet.
+    /// A car left at speed carries on on its own while the player is on foot.
     fn step_ground(&mut self, dt: f64) {
         self.step_carjack_script();
         if self.mode == Mode::Drive {
             self.step_drive(dt);
         } else {
+            self.step_unmanned_car(dt);
             self.step_walk(dt);
         }
+    }
+
+    /// A car the player left while moving keeps its momentum: no driver, no
+    /// throttle or brake, the normal car physics and traffic collisions, until
+    /// friction or a wall stops it.
+    fn step_unmanned_car(&mut self, dt: f64) {
+        let Some(mut v) = self.last_car.take() else { return };
+        if v.speed().abs() < 0.05 && v.grounded {
+            self.last_car = Some(v);
+            return;
+        }
+        let mut traffic = Vec::new();
+        self.world.traffic_bodies_near(v.pos, 24.0, &mut traffic);
+        let s = v.step(dt, &vehicle::VehicleControls::default(), &self.world, &self.ground_weather(), &traffic);
+        for hit in &s.traffic_hits {
+            self.world.hit_traffic(&hit.body, hit.speed, hit.shove, hit.velocity);
+        }
+        self.last_car = Some(v);
     }
 
     /// An Xbox-style gamepad. Its flying layout can be moved about in
@@ -5796,6 +5940,7 @@ impl Game {
             KeyCode::KeyR if self.arcade || self.crashed => self.respawn_here(),
             KeyCode::KeyR => self.arcade_only(t!("game.respawning_in_flight")),
             KeyCode::F7 if self.mode == Mode::Fly && !self.crashed => self.bail_out(),
+            KeyCode::F7 if self.mode == Mode::Drive => self.leave_car(),
             KeyCode::KeyB if self.mode == Mode::Drive => self.honk(),
             KeyCode::KeyL if self.mode == Mode::Drive => self.toggle_car_lights(),
             KeyCode::KeyC if self.mode.ground() || self.mode == Mode::Fall => self.toggle_ground_view(),
@@ -5993,9 +6138,10 @@ impl Game {
         if self.mode == Mode::Menu {
             return;
         }
-        // A fall is transient and has no resume state: keep the previous save
-        // rather than writing the body down in mid-air or in open water.
-        if self.mode != Mode::Fall {
+        // A fall or a car bailout is transient and has no resume state: keep
+        // the previous save rather than writing the body down in mid-air, in
+        // open water or mid-roll.
+        if self.mode != Mode::Fall && self.character.car_bailout.is_none() {
             self.save_now();
             self.save = Some(self.snapshot());
         }
@@ -6650,7 +6796,7 @@ impl Game {
             // around the camera. Silent in flight and in the menus.
             let ground_live = !self.crashed && !in_menu && dt > 0.0 && (self.mode.ground() || self.mode == Mode::Fall);
             let car = if ground_live {
-                self.vehicle.as_ref().map(|v| audio::CarAudio {
+                self.vehicle.as_ref().or_else(|| self.last_car.as_ref().filter(|v| v.speed().abs() > 0.3)).map(|v| audio::CarAudio {
                     pos: v.pos,
                     speed: v.speed() as f32,
                     rpm: v.rpm as f32,
@@ -6777,6 +6923,10 @@ impl Game {
         if self.r.headless && self.shots.is_empty() && self.record.is_none() && self.bench.is_none() {
             if self.bailout_at.is_some() {
                 if self.bailout_finished || self.real > 240.0 {
+                    self.quit = true;
+                }
+            } else if self.car_bailout_at.is_some() {
+                if self.car_bailout_finished || self.real > 60.0 {
                     self.quit = true;
                 }
             } else if self.hold > 0.0 && self.real > self.hold {
@@ -6922,6 +7072,20 @@ impl Game {
         // freefall it presses the parachute button, as the smoke run expects.
         if self.bailout_at.is_some() && self.mode == Mode::Fall && !still_loading && self.character.fall.as_ref().is_some_and(|f| f.phase == bailout::Phase::Freefall && f.t >= 1.0) {
             self.pad_jump = true;
+        }
+        // --car-bailout: put the car up to speed and leave it driverless once
+        // the run is in and its clock has reached the requested second.
+        if !self.car_bailout_done && !still_loading && self.mode == Mode::Drive && self.car_bailout_at.is_some_and(|t| self.real >= t) {
+            self.car_bailout_done = true;
+            if let Some(v) = self.vehicle.as_mut() {
+                v.vel = v.forward() * 12.0;
+            }
+            self.leave_car();
+        }
+        if self.car_bailout_done && !self.car_bailout_finished && self.mode == Mode::Walk && self.character.car_bailout.is_none() {
+            self.car_bailout_finished = true;
+            let rolling = self.last_car.as_ref().is_some_and(|v| v.vel.length() > 1.0);
+            println!("car bailout: on foot, empty car {}", if rolling { "still rolling" } else { "stopped" });
         }
         let mut glass_rain = 0.0f32;
         if !in_menu {
@@ -8236,7 +8400,7 @@ impl Game {
             if avatar_drawn(self.mode, self.ground_first_person) {
                 let c = &self.character;
                 let (fall, chute) = c.fall.as_ref().map_or((0.0, 0.0), |f| f.pose());
-                let motion = avatar::Motion { phase: c.gait_phase(), speed: c.speed(), air: c.air, fall, chute, time: self.real };
+                let motion = avatar::Motion { phase: c.gait_phase(), speed: c.speed(), air: c.air, fall, chute, roll: c.car_roll(), time: self.real };
                 let rig = avatar::pose(&motion);
                 avatar::instances(cam, c.pos, c.yaw, &rig, self.avatar_style, &mut insts);
             }
@@ -8911,6 +9075,8 @@ impl Game {
             };
             let pair = |a: &str, b: &str| format!("{} / {}", key_of(a), key_of(b));
             let spec = |id: &str| padmap::CAR_LAYOUT.iter().find(|(i, _)| *i == id).map(|(_, c)| c.spec()).unwrap_or_default();
+            let moving = self.vehicle.as_ref().is_some_and(|v| v.vel.length() >= character::CAR_BAILOUT_SPEED);
+            let leave = if moving { t!("ground.bail_out_car") } else { t!("ground.leave_car") };
             let rows: [Vec<(String, &'static str)>; 2] = if pad {
                 [
                     vec![
@@ -8919,7 +9085,7 @@ impl Game {
                         ("LS".into(), t!("gamepad.steer")),
                         (spec("car_handbrake"), t!("action.car_handbrake")),
                     ],
-                    vec![(spec("car_enter_exit"), t!("ground.leave_car")), (spec("car_horn"), t!("action.car_horn")), (spec("car_lights"), t!("action.car_lights")), (spec("camera"), t!("ground.camera"))],
+                    vec![(spec("car_enter_exit"), leave), (spec("car_horn"), t!("action.car_horn")), (spec("car_lights"), t!("action.car_lights")), (spec("camera"), t!("ground.camera"))],
                 ]
             } else {
                 [
@@ -8930,7 +9096,7 @@ impl Game {
                     ],
                     vec![
                         (key_of("car_handbrake"), t!("action.car_handbrake")),
-                        (key_of("car_enter_exit"), t!("ground.leave_car")),
+                        (key_of("car_enter_exit"), leave),
                         (key_of("car_horn"), t!("action.car_horn")),
                         (key_of("car_lights"), t!("action.car_lights")),
                         (key_of("camera"), t!("ground.camera")),
@@ -8962,7 +9128,7 @@ impl Game {
         }
         // What the interact action does from here (controller button or bound key).
         let prompt: Option<String> = match self.mode {
-            Mode::Walk => {
+            Mode::Walk if self.character.car_bailout.is_none() => {
                 let in_reach = self.last_car.as_ref().is_some_and(|v| (v.pos - self.character.pos).length() < 4.0);
                 let own_aircraft = self.plane_visible && self.plane.on_ground && (self.plane.pos - self.character.pos).length() < AIRCRAFT_REACH;
                 if in_reach {
@@ -10827,6 +10993,10 @@ mod cli_tests {
         assert_eq!(a.bailout, Some(2.5));
         assert!(parse_args_from(&s(&["--bailout", "-1"])).is_err());
         assert!(parse_args_from(&s(&["--bailout"])).is_err());
+        let a = parse_args_from(&s(&["--car-bailout", "1.5"])).unwrap();
+        assert_eq!(a.car_bailout, Some(1.5));
+        assert!(parse_args_from(&s(&["--car-bailout", "-1"])).is_err());
+        assert!(parse_args_from(&s(&["--car-bailout"])).is_err());
         assert!(parse_args_from(&s(&["--start", "swim"])).is_err());
         assert!(parse_args_from(&s(&["--start"])).is_err());
         // An explicit --start implies leaving the menu unless --menu says otherwise.

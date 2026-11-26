@@ -217,8 +217,9 @@ pub const FOOT_ACTIONS: &[Action] = &[
     act("first_person", KeyCode::KeyV),
 ];
 
-/// In a car: throttle, brake, steering, the handbrake and getting out. Camera,
-/// HUD, minimap, pause and the rest are global and work here too.
+/// In a car: throttle, brake, steering, the handbrake, getting out and bailing
+/// out of a moving one. Camera, HUD, minimap, pause and the rest are global and
+/// work here too.
 pub const CAR_ACTIONS: &[Action] = &[
     act("car_throttle", KeyCode::KeyW),
     act("car_brake", KeyCode::KeyS),
@@ -226,6 +227,7 @@ pub const CAR_ACTIONS: &[Action] = &[
     act("car_steer_right", KeyCode::KeyD),
     act("car_handbrake", KeyCode::ShiftLeft),
     act("car_enter_exit", KeyCode::KeyE),
+    act("bailout", KeyCode::F7),
     act("car_horn", KeyCode::KeyB),
     act("car_lights", KeyCode::KeyL),
 ];
