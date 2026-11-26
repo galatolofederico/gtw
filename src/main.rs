@@ -8397,16 +8397,39 @@ impl Game {
                 }
             }
             // The player on foot: the rigid avatar, unless the eyes are in it.
-            if avatar_drawn(self.mode, self.ground_first_person) {
+            // A first-person fall still builds that rig for the canopy's live
+            // shoulder attachments, even though the avatar itself is hidden.
+            let mut body_rig = None;
+            if avatar_drawn(self.mode, self.ground_first_person) || self.character.fall.is_some() {
                 let c = &self.character;
                 let (fall, chute) = c.fall.as_ref().map_or((0.0, 0.0), |f| f.pose());
-                let motion = avatar::Motion { phase: c.gait_phase(), speed: c.speed(), air: c.air, fall, chute, roll: c.car_roll(), time: self.real };
+                let up = c.pos.normalize();
+                let forward = c.forward();
+                let left = up.cross(forward).normalize_or_zero();
+                let motion = avatar::Motion {
+                    phase: c.gait_phase(),
+                    speed: c.speed(),
+                    forward: c.vel.dot(forward),
+                    side: c.vel.dot(left),
+                    vertical: c.vel.dot(up),
+                    air: c.air,
+                    fall,
+                    chute,
+                    plane_exit: c.fall.as_ref().map(|f| f.exit),
+                    fall_age: c.fall.as_ref().map_or(0.0, |f| f.t),
+                    steer: c.fall.as_ref().map_or(0.0, |f| f.steer),
+                    car: c.car_bailout,
+                    time: self.real,
+                };
                 let rig = avatar::pose(&motion);
-                avatar::instances(cam, c.pos, c.yaw, &rig, self.avatar_style, &mut insts);
+                if avatar_drawn(self.mode, self.ground_first_person) {
+                    avatar::instances(cam, c.pos, c.yaw, &rig, self.avatar_style, &mut insts);
+                }
+                body_rig = Some(rig);
             }
             // The canopy is overhead, so it stays in view in first person too.
-            if let Some(f) = self.character.fall.as_ref() {
-                bailout::instances(cam, self.character.pos, self.character.yaw, f.open, f.steer, &mut insts);
+            if let (Some(f), Some(rig)) = (self.character.fall.as_ref(), body_rig.as_ref()) {
+                bailout::instances(cam, self.character.pos, self.character.yaw, f.open, f.steer, rig, &mut insts);
             }
             self.destr.instances(cam, &mut insts, &mut fall);
             self.destr.skin_frame(cam);

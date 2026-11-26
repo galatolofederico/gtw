@@ -50,6 +50,28 @@ pub const REGEN_RATE: f32 = 2.0;
 pub fn stride_len(speed: f64) -> f64 {
     (0.55 + 0.16 * speed.max(0.0)).clamp(0.7, 1.7)
 }
+
+/// Fraction of a gait cycle spent on one foot (or both during walking's
+/// double support). Running's duty factor below 0.5 creates two flight arcs.
+pub(crate) fn gait_duty(speed: f64) -> f64 {
+    let k = ((speed.max(0.0) - 1.9) / (4.5 - 1.9)).clamp(0.0, 1.0);
+    let run = k * k * (3.0 - 2.0 * k);
+    0.62 + (0.38 - 0.62) * run
+}
+
+/// Is a foot down at this point in the cycle? The left foot lands at zero
+/// and the right half a cycle later.
+pub(crate) fn gait_has_stance(phase: f64, speed: f64) -> bool {
+    if speed < 0.05 {
+        return true;
+    }
+    let duty = gait_duty(speed);
+    let q = phase.rem_euclid(std::f64::consts::TAU) / std::f64::consts::TAU;
+    let a = q < duty;
+    let b = (q + 0.5).fract() < duty;
+    a || b
+}
+
 /// How fast keyboard steering turns the body (rad/s).
 pub const TURN_RATE: f64 = 2.9;
 
@@ -92,8 +114,8 @@ pub const CAR_EXIT_SIDE: f64 = 2.8;
 pub const CAR_EXIT_UP: f64 = 2.6;
 /// How long the body somersaults along the ground (s).
 pub const CAR_ROLL_TIME: f64 = 1.15;
-/// How long it takes to stand up again after the roll (s).
-pub const CAR_STAND_TIME: f64 = 0.45;
+/// How long it takes to plant a hand, get the feet underneath and stand (s).
+pub const CAR_STAND_TIME: f64 = 0.85;
 
 /// How hard a car knocks the body back (m/s per m/s of closing speed).
 pub const TRAFFIC_KNOCKBACK: f64 = 1.4;
@@ -146,7 +168,7 @@ pub enum CarBailoutPhase {
 }
 
 /// A bailout from a moving car.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct CarBailout {
     pub phase: CarBailoutPhase,
     /// Seconds spent in this phase.
@@ -193,10 +215,11 @@ pub struct Character {
     pub car_bailout: Option<CarBailout>,
     /// Seconds since the last damage.
     pub since_hurt: f64,
-    /// Gait phase (radians), advanced a half turn per footstep.
+    /// Phase at the most recent completed footstep (radians), for audio tests.
     pub stride_phase: f64,
-    /// Distance walked since the last footstep (m).
-    stride: f64,
+    /// Continuous visual gait phase. Unlike distance divided by the *current*
+    /// stride length, this cannot jump when walking speeds change.
+    gait: f64,
     /// 0 on the ground, easing to 1 in the air: the jump pose's share.
     pub air: f64,
     /// Landing damage is forgiven while the body has just appeared (streaming
@@ -255,7 +278,7 @@ impl Character {
             car_bailout: None,
             since_hurt: REGEN_DELAY,
             stride_phase: 0.0,
-            stride: 0.0,
+            gait: 0.0,
             air: 0.0,
             spawn_grace: 2.0,
             respawns: 0,
@@ -269,10 +292,11 @@ impl Character {
         self.pos + self.pos.normalize() * up + self.forward() * forward
     }
 
-    /// The gait cycle as a continuous angle: a half turn per footstep, and
-    /// the way through the current step in between (for the pose).
+    /// The gait cycle as a continuous angle: a half turn per footstep. The
+    /// phase is integrated at the speed of each substep, so accelerating from
+    /// a walk to a sprint never scrubs the feet forwards or backwards.
     pub fn gait_phase(&self) -> f64 {
-        self.stride_phase + std::f64::consts::PI * (self.stride / stride_len(self.speed())).clamp(0.0, 1.0)
+        self.gait
     }
 
     /// Horizontal speed (m/s).
@@ -382,6 +406,7 @@ impl Character {
         self.spawn_grace = (self.spawn_grace - h).max(0.0);
         let car_bail = self.car_bailout;
         let car_rolling = car_bail.is_some_and(|b| b.phase == CarBailoutPhase::Roll);
+        let car_airborne = car_bail.is_some_and(|b| b.phase == CarBailoutPhase::Air) && !self.grounded;
         let up = self.pos.normalize();
         let (east, north, _) = geo::enu(self.pos);
         let hit = world.surface_at(self.pos);
@@ -406,7 +431,18 @@ impl Character {
         let wish = if steep { DVec3::ZERO } else { wish_dir * pace };
 
         let vh = self.vel - up * self.vel.dot(up);
-        let accel = if car_rolling { ROLL_DRAG } else if self.grounded { GROUND_ACCEL } else { AIR_ACCEL };
+        let accel = if car_rolling {
+            ROLL_DRAG
+        } else if car_airborne {
+            // The push-off is a ballistic hop, not a giant invisible air
+            // brake. Keeping its momentum also makes the landing and roll
+            // read as one continuous action.
+            0.15
+        } else if self.grounded {
+            GROUND_ACCEL
+        } else {
+            AIR_ACCEL
+        };
         let mut new_vh = vh + (wish - vh).clamp_length_max(accel * h);
         if steep {
             // Gravity takes the body down the slope.
@@ -502,15 +538,22 @@ impl Character {
             self.yaw = (self.yaw + diff * (12.0 * h).min(1.0)).rem_euclid(std::f64::consts::TAU);
         }
 
-        // Footsteps, and the last safe place.
-        let travelled = self.speed() * h;
+        // Footsteps, and the last safe place. Advance the visual phase by
+        // the actual substep distance at the *current* stride length rather
+        // than recomputing an accumulated fraction with a new denominator.
+        let speed = self.speed();
+        let travelled = speed * h;
         if self.grounded && self.car_bailout.is_none() {
-            self.stride += travelled;
-            let len = stride_len(self.speed());
-            while self.stride >= len {
-                self.stride -= len;
-                self.stride_phase += std::f64::consts::PI;
-                out.footsteps.push(surface);
+            if speed > 0.01 {
+                let before = (self.gait / std::f64::consts::PI).floor() as i64;
+                self.gait += std::f64::consts::PI * travelled / stride_len(speed);
+                let after = (self.gait / std::f64::consts::PI).floor() as i64;
+                for _ in before..after {
+                    out.footsteps.push(surface);
+                }
+                if after > before {
+                    self.stride_phase = after as f64 * std::f64::consts::PI;
+                }
             }
             if !steep && hit.is_some_and(|s| !s.blocked()) {
                 self.last_safe = self.pos;
@@ -541,11 +584,6 @@ impl Character {
             out.died = true;
             out.damage = 0.0;
         }
-    }
-
-    /// The whole-body roll angle of a car bailout, for the avatar (radians).
-    pub fn car_roll(&self) -> f64 {
-        self.car_bailout.map_or(0.0, |b| b.roll)
     }
 
     /// Advance the car bailout: the hop, the ground roll and standing up.
@@ -1057,6 +1095,26 @@ mod tests {
         let want = (travelled / stride_len(RUN)).floor() as usize;
         assert!((steps.len() as i64 - want as i64).abs() <= 1, "{} steps in {travelled:.1} m, want about {want}", steps.len());
         assert!(steps.len() >= 8, "three seconds of jogging: {} steps", steps.len());
+    }
+
+    #[test]
+    fn gait_phase_does_not_scrub_when_the_speed_changes() {
+        let w = FlatWorld;
+        let mut c = at_origin();
+        c.step(1.0 / 60.0, &CharacterControls::default(), &w, &SurfaceWeather::default());
+        let mut previous = c.gait_phase();
+        for i in 0..180 {
+            let controls = match (i / 30) % 3 {
+                0 => CharacterControls { forward: 0.3, ..Default::default() },
+                1 => CharacterControls { forward: 1.0, ..Default::default() },
+                _ => CharacterControls { forward: 1.0, sprint: true, ..Default::default() },
+            };
+            c.step(1.0 / 60.0, &controls, &w, &SurfaceWeather::default());
+            let phase = c.gait_phase();
+            let advance = phase - previous;
+            assert!(advance >= 0.0 && advance < 0.25, "phase jumped by {advance} at frame {i}");
+            previous = phase;
+        }
     }
 
     #[test]

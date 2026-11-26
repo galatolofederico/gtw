@@ -50,8 +50,9 @@ controller uses.
 Above about 4 m/s (14 km/h), `E`, `F7` or the gamepad's Y is a bailout rather
 than an ordinary stop-and-get-out. The body leaves on the clear side with the
 car's velocity, plus a sideways push and a small upward hop. It then lands,
-somersaults forward along the ground for about 1.15 s and takes 0.45 s to
-stand up; the controls are ignored until it is on its feet.
+somersaults forward along the ground for about 1.15 s, then plants a hand and
+foot and takes 0.85 s to stand up; the controls are ignored until it is on its
+feet.
 
 The car is not braked or stopped: it keeps its momentum, coasts under the
 normal car physics and is drawn in the world until rolling resistance, drag
@@ -146,7 +147,10 @@ the freefall terminal speed, high-altitude thin air, the canopy staying packed
 until it is pulled, manual opening and steering, wind drift, land and water
 touchdown, hard-landing damage, the character's landing/respawn path, the car
 bailout roll and stand-up, and scripted headless bailouts for both the
-aircraft and a moving car. The aircraft scripted run is:
+aircraft and a moving car. Pose tests also cover planted walking feet and the
+running flight windows, signed backwards/sideways steps, the developing
+freefall arch, full-mesh car-roll/recovery contact, and suspension-line
+endpoints from early inflation to full canopy. The aircraft scripted run is:
 
 ```sh
 cargo run --release -- --headless --flat --start plane --aircraft c172 \

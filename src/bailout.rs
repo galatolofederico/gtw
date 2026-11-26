@@ -340,8 +340,11 @@ fn smooth(x: f64) -> f64 {
 // instanced-solid library, after the traffic's far models, so the existing
 // mesh ids are untouched.
 
-/// Meshes: the canopy, then its lines.
-pub const MESHES: usize = 2;
+/// Meshes: the canopy, six independently posed suspension lines and two
+/// risers. Independent line instances let both ends stay attached while the
+/// canopy inflates and the pilot comes upright.
+pub const MESHES: usize = 9;
+const SUSPENSION_LINES: usize = 8;
 /// The first mesh id of the parachute.
 pub const MESH_BASE: u32 = crate::cars::FAR_BASE + crate::cars::N_MODELS as u32;
 /// Where the canopy sits above the feet (m), and the harness point the lines
@@ -459,31 +462,67 @@ fn canopy_mesh() -> (Vec<MeshVertex>, Vec<u32>) {
     m.done()
 }
 
-/// Six suspension lines and the risers at the harness.
-fn line_mesh() -> (Vec<MeshVertex>, Vec<u32>) {
+/// One unit segment from the origin to +Y. `suspension_transforms` places a
+/// copy between each pair of live canopy/harness anchors.
+fn segment_mesh() -> (Vec<MeshVertex>, Vec<u32>) {
     let dark = [0.10, 0.10, 0.11, crate::avatar::MAT_FIXED];
     let mut m = MB::default();
-    for (x, z) in [(-2.6, 0.55), (-2.2, -0.55), (2.6, 0.55), (2.2, -0.55), (-0.9, 0.95), (0.9, 0.95)] {
-        let top = Vec3::new(x, CANOPY_Y - 0.08, z);
-        let low = Vec3::new(x.signum() * 0.20, HARNESS_Y, 0.0);
-        m.line(top, low, 0.018, dark);
-    }
-    // A short riser on each shoulder.
-    for s in [-1.0f32, 1.0] {
-        m.line(Vec3::new(s * 0.20, HARNESS_Y, 0.0), Vec3::new(s * 0.16, HARNESS_Y - 0.55, 0.02), 0.025, dark);
-    }
+    m.line(Vec3::ZERO, Vec3::Y, 0.018, dark);
     m.done()
 }
 
-/// The parachute's meshes, built once.
+/// The parachute's meshes, built once. The lines are identical geometry but
+/// deliberately separate instances; one static fan of lines cannot follow
+/// endpoints that move at different rates during deployment.
 pub fn meshes() -> &'static [(Vec<MeshVertex>, Vec<u32>)] {
     static M: OnceLock<Vec<(Vec<MeshVertex>, Vec<u32>)>> = OnceLock::new();
-    M.get_or_init(|| vec![canopy_mesh(), line_mesh()])
+    M.get_or_init(|| std::iter::once(canopy_mesh()).chain((0..SUSPENSION_LINES).map(|_| segment_mesh())).collect())
+}
+
+fn canopy_transform(open: f64, steer: f64) -> Mat4 {
+    let lean = (steer.clamp(-1.0, 1.0) as f32) * 0.22;
+    let sway = at(0.0, HARNESS_Y, 0.0) * Mat4::from_rotation_z(lean) * Mat4::from_rotation_x(-0.05) * at(0.0, -HARNESS_Y, 0.0);
+    let s = (0.18 + 0.82 * open.clamp(0.0, 1.0)) as f32;
+    let grow = at(0.0, CANOPY_Y, 0.0) * Mat4::from_scale(Vec3::splat(s)) * at(0.0, -CANOPY_Y, 0.0);
+    sway * grow
+}
+
+const LINE_ANCHORS: [(f32, f32); 6] = [(-2.6, 0.55), (-2.2, -0.55), (2.6, 0.55), (2.2, -0.55), (-0.9, 0.95), (0.9, 0.95)];
+
+fn suspension_segments(open: f64, steer: f64, rig: &crate::avatar::RigPose) -> [(Vec3, Vec3); SUSPENSION_LINES] {
+    let canopy = canopy_transform(open, steer);
+    let mut segments = [(Vec3::ZERO, Vec3::ZERO); SUSPENSION_LINES];
+    for (i, (x, z)) in LINE_ANCHORS.into_iter().enumerate() {
+        let top = canopy.transform_point3(Vec3::new(x, CANOPY_Y - 0.08, z));
+        // +X is the figure's own left in the avatar rig. Both attachments
+        // come from this exact frame's matrices, including an early exit.
+        let (low, _) = crate::avatar::parachute_harness(rig, x > 0.0);
+        segments[i] = (top, low);
+    }
+    for (i, left) in [false, true].into_iter().enumerate() {
+        let (high, low) = crate::avatar::parachute_harness(rig, left);
+        segments[6 + i] = (high, low);
+    }
+    segments
+}
+
+fn segment_transform(a: Vec3, b: Vec3) -> Mat4 {
+    let long = b - a;
+    let dir = long.normalize_or(Vec3::Y);
+    let x = dir.cross(Vec3::Z).normalize_or(Vec3::X);
+    let z = x.cross(dir).normalize_or(Vec3::Z);
+    Mat4::from_cols(x.extend(0.0), long.extend(0.0), z.extend(0.0), a.extend(1.0))
+}
+
+fn suspension_transforms(open: f64, steer: f64, rig: &crate::avatar::RigPose) -> [Mat4; SUSPENSION_LINES] {
+    suspension_segments(open, steer, rig).map(|(a, b)| segment_transform(a, b))
 }
 
 /// Append the canopy and its lines for a body at `root` (feet), facing `yaw`.
 /// `open` is 0 packed .. 1 fully open; `steer` leans the canopy into a turn.
-pub fn instances(cam: DVec3, root: DVec3, yaw: f64, open: f64, steer: f64, out: &mut Vec<(u32, Inst)>) {
+/// Every line is placed between its own transformed attachment points, so it
+/// cannot detach from a partially inflated canopy or a pitching harness.
+pub fn instances(cam: DVec3, root: DVec3, yaw: f64, open: f64, steer: f64, rig: &crate::avatar::RigPose, out: &mut Vec<(u32, Inst)>) {
     if !root.is_finite() || !cam.is_finite() || !open.is_finite() || open <= 0.01 {
         return;
     }
@@ -496,13 +535,7 @@ pub fn instances(cam: DVec3, root: DVec3, yaw: f64, open: f64, steer: f64, out: 
     }
     let forward = right.cross(up);
     let basis = Mat4::from_cols(right.as_vec3().extend(0.0), up.as_vec3().extend(0.0), forward.as_vec3().extend(0.0), (root - cam).as_vec3().extend(1.0));
-    // The canopy hangs above the pilot and leans into a turn; it grows out
-    // of the pack over the first seconds.
-    let lean = (steer.clamp(-1.0, 1.0) as f32) * 0.22;
-    let sway = at(0.0, HARNESS_Y, 0.0) * Mat4::from_rotation_z(lean) * Mat4::from_rotation_x(-0.05) * at(0.0, -HARNESS_Y, 0.0);
-    let s = (0.18 + 0.82 * open.clamp(0.0, 1.0)) as f32;
-    let grow = at(0.0, CANOPY_Y, 0.0) * Mat4::from_scale(Vec3::splat(s)) * at(0.0, -CANOPY_Y, 0.0);
-    for (k, local) in [sway * grow, sway].into_iter().enumerate() {
+    for (k, local) in std::iter::once(canopy_transform(open, steer)).chain(suspension_transforms(open, steer, rig)).enumerate() {
         let m = basis * local;
         let c = m.to_cols_array_2d();
         let rows = [[c[0][0], c[1][0], c[2][0], c[3][0]], [c[0][1], c[1][1], c[2][1], c[3][1]], [c[0][2], c[1][2], c[2][2], c[3][2]]];
@@ -804,14 +837,50 @@ mod tests {
         }
         let root = geo::lla_to_pos(0.5, 0.1, 500.0);
         let cam = root + DVec3::new(0.0, 0.0, 20.0);
+        let rig = crate::avatar::pose(&crate::avatar::Motion { air: 1.0, chute: 1.0, ..Default::default() });
         let mut out = Vec::new();
-        instances(cam, root, 0.7, 1.0, 0.5, &mut out);
+        instances(cam, root, 0.7, 1.0, 0.5, &rig, &mut out);
         assert_eq!(out.len(), MESHES);
         assert!(out.iter().all(|(id, inst)| (MESH_BASE..MESH_BASE + MESHES as u32).contains(id) && inst.m.iter().flatten().all(|v| v.is_finite()) && inst.ext[3] == 2.0));
         // A packed canopy draws nothing.
         out.clear();
-        instances(cam, root, 0.7, 0.0, 0.0, &mut out);
+        instances(cam, root, 0.7, 0.0, 0.0, &rig, &mut out);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn opening_lines_stay_on_the_canopy_and_harness() {
+        // Include an immediate deployment: the pilot is still in the jump
+        // posture, not at the previously assumed full freefall tilt.
+        for (open, age) in [(0.02, 0.0), (0.13, 0.0), (0.5, 1.0), (0.85, 2.0), (1.0, 3.0)] {
+            let canopy = canopy_transform(open, 0.4);
+            let share = smooth(open);
+            let rig = crate::avatar::pose(&crate::avatar::Motion {
+                air: 1.0,
+                fall: 1.0 - share,
+                chute: share,
+                plane_exit: Some(Exit::Jump),
+                fall_age: age,
+                ..Default::default()
+            });
+            let segments = suspension_segments(open, 0.4, &rig);
+            for (i, (x, z)) in LINE_ANCHORS.into_iter().enumerate() {
+                let expected_top = canopy.transform_point3(Vec3::new(x, CANOPY_Y - 0.08, z));
+                let (expected_low, _) = crate::avatar::parachute_harness(&rig, x > 0.0);
+                assert!(segments[i].0.distance(expected_top) < 1e-5, "line {i} canopy attachment at {open}");
+                assert!(segments[i].1.distance(expected_low) < 1e-5, "line {i} posed-rig shoulder attachment at {open}, age {age}");
+            }
+            for (i, left) in [false, true].into_iter().enumerate() {
+                let (high, low) = crate::avatar::parachute_harness(&rig, left);
+                assert!(segments[6 + i].0.distance(high) < 1e-5);
+                assert!(segments[6 + i].1.distance(low) < 1e-5);
+            }
+            for (a, b) in segments {
+                let transform = segment_transform(a, b);
+                assert!(transform.transform_point3(Vec3::ZERO).distance(a) < 1e-5);
+                assert!(transform.transform_point3(Vec3::Y).distance(b) < 1e-5, "unit segment reaches its live endpoint at {open}");
+            }
+        }
     }
 
     #[test]

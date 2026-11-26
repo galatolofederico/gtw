@@ -11,12 +11,14 @@
 //! at 0.48 m, shoulders at 1.45 m. It wears a hoodie over a tee, jeans with
 //! a belt, and sneakers.
 //!
-//! The pose is a gait cycle driven by distance (`Character::gait_phase`) and
-//! speed, blending smoothly from standing to walking to running, and into a
-//! tuck in the air or a whole-body somersault when bailing out of a moving
-//! car. The legs are posed first and the figure is then lowered
-//! or raised until the lower sole rests on the ground, so the feet neither
-//! float nor sink as the stride changes. The `RigPose` is a plain array of
+//! The pose is a distance-integrated gait cycle (`Character::gait_phase`),
+//! signed body-local velocity and explicit aircraft/car bailout states.
+//! Walking and running use two-bone leg IK with a planted stance path, heel
+//! roll, toe-off and knee-led swing; running has two real flight phases.
+//! Directional input gives backwards and sideways steps their own motion.
+//! Aircraft exits develop into a slightly buffeted stable arch, and a car
+//! exit moves through a braced hop, shoulder-led tucked roll and hand/foot-
+//! supported recovery. `RigPose` remains a plain array of
 //! part transforms, so a skinned model can replace this later without
 //! changing the character controller or the camera.
 
@@ -128,7 +130,9 @@ fn tint(p: &Palette, part: usize) -> [f32; 3] {
     }
 }
 
-/// What the body is doing, for the pose.
+/// What the body is doing, for the pose. Distances and speeds are in metres
+/// and seconds; `forward`/`side` are velocity in the figure's own frame, so a
+/// backwards step does not accidentally play the forward gait.
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct Motion {
     /// Gait cycle (radians): a half turn per footstep, continuous between
@@ -136,16 +140,28 @@ pub struct Motion {
     pub phase: f64,
     /// Horizontal speed (m/s).
     pub speed: f64,
+    /// Signed velocity along the body's forward axis (m/s).
+    pub forward: f64,
+    /// Signed velocity along the body's +X (left) axis (m/s).
+    pub side: f64,
+    /// Vertical velocity (m/s), used to distinguish take-off from descent.
+    pub vertical: f64,
     /// 0 on the ground .. 1 in the air (`Character::air`).
     pub air: f64,
     /// 0 not falling .. 1 belly to earth in freefall (`bailout::Fall::pose`).
     pub fall: f64,
     /// 0 no canopy .. 1 hanging under a fully open one.
     pub chute: f64,
-    /// Whole-body somersault after bailing from a moving car (radians about
-    /// the hips; 0 upright, one turn over the roll).
-    pub roll: f64,
-    /// Seconds, for breathing and idle sway.
+    /// How the pilot left, for the first moment of the jump/ejection. `None`
+    /// denotes an already established fall (also convenient in pose tests).
+    pub plane_exit: Option<crate::bailout::Exit>,
+    /// Seconds since leaving the aircraft.
+    pub fall_age: f64,
+    /// Canopy steering input, -1 left .. 1 right.
+    pub steer: f64,
+    /// The complete moving-car exit: push-off, ground roll, or recovery.
+    pub car: Option<crate::character::CarBailout>,
+    /// Seconds, for breathing, wind buffeting and idle sway.
     pub time: f64,
 }
 
@@ -168,6 +184,34 @@ impl RigPose {
             .flat_map(|&f| [HEEL_Z, TOE_Z].map(|z| self.parts[f].transform_point3(Vec3::new(0.0, SOLE_DY, z)).y))
             .fold(f32::MAX, f32::min)
     }
+
+    /// The actual lowest mesh vertex, not merely a joint origin. During a
+    /// roll this may be a shoulder, a knee or a hand, so contact needs the
+    /// complete figure rather than the old feet-only correction.
+    pub fn mesh_low(&self) -> f32 {
+        meshes()
+            .iter()
+            .zip(self.parts.iter())
+            .flat_map(|((vertices, _), matrix)| vertices.iter().map(move |v| matrix.transform_point3(Vec3::from(v.pos)).y))
+            .fold(f32::MAX, f32::min)
+    }
+
+    fn translated(&mut self, x: f32, y: f32, z: f32) {
+        let shift = at(x, y, z);
+        for part in self.parts.iter_mut() {
+            *part = shift * *part;
+        }
+    }
+}
+
+/// Shoulder and lower chest attachments for the parachute, taken from the
+/// actual posed rig rather than an independently estimated body tilt. This
+/// includes the aircraft-exit transition as well as full canopy flight.
+pub fn parachute_harness(rig: &RigPose, left: bool) -> (Vec3, Vec3) {
+    let (shoulder, side) = if left { (UARM_L, 1.0f32) } else { (UARM_R, -1.0f32) };
+    let high = rig.parts[shoulder].transform_point3(Vec3::ZERO);
+    let low = rig.parts[TORSO].transform_point3(Vec3::new(side * 0.16, -0.10, 0.02));
+    (high, low)
 }
 
 fn at(x: f32, y: f32, z: f32) -> Mat4 {
@@ -195,20 +239,17 @@ fn mix(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
-/// A bump of width `w` (radians) centred on `c` in the cycle.
-fn bump(phase: f32, c: f32, w: f32) -> f32 {
-    let d = (phase - c + PI).rem_euclid(TAU) - PI;
-    (-(d / w) * (d / w)).exp()
-}
-
 /// Joint angles for one leg. Rotations are about +X: positive swings a
 /// hanging limb back, so a thigh forward is negative and a bent knee
-/// positive.
+/// positive. `yaw` points the stepping plane into the actual movement
+/// direction, while `out` spreads the leg sideways for balance and freefall.
 #[derive(Copy, Clone)]
 struct Leg {
     hip: f32,
     knee: f32,
     ankle: f32,
+    yaw: f32,
+    out: f32,
 }
 
 /// Joint angles for one arm.
@@ -219,7 +260,10 @@ struct Arm {
     elbow: f32,
 }
 
-/// Every angle of a pose, so a locomotion and a jump pose can be blended.
+/// Every angle of a pose, including the pelvis translation. Keeping root
+/// motion in the pose is important: a run's bounce must not be cancelled by
+/// indiscriminately moving the lowest foot back to the ground.
+#[derive(Copy, Clone)]
 struct Angles {
     legs: [Leg; 2],
     arms: [Arm; 2],
@@ -228,111 +272,358 @@ struct Angles {
     tilt: f32,
     sway: f32,
     head: f32,
+    rise: f32,
+    shift: f32,
 }
 
-/// One leg at its own phase (0 = its heel strike).
-fn leg(phase: f32, amp: f32, swing_knee: f32, stance_knee: f32, roll: f32, run: f32) -> Leg {
-    let (s, c) = phase.sin_cos();
-    // Thigh: forward at the heel strike, back at the toe-off. Running
-    // throws the thigh further forward than back.
-    let fwd = amp * c + run * amp * 0.25 * (1.0 + c) * 0.5;
-    // Knee: a big bend through the swing (sharper running), a small give
-    // as the stance leg takes the weight.
-    let swing = (-s).max(0.0).powf(mix(1.4, 0.8, run));
-    let knee = swing_knee * swing + stance_knee * bump(phase, 0.55, 0.5);
-    // The foot: toe up at the strike, level through the stance, a push off
-    // the toe at its end, and lifted to clear the ground in the swing.
-    let toe_up = roll * (0.30 * bump(phase, 0.0, 0.45) - 0.55 * bump(phase, 2.75, 0.4) + 0.25 * bump(phase, 4.5, 0.6));
-    let hip = -fwd;
-    // The ankle angle that gives the foot that pitch, whatever the shin does.
-    let ankle = -toe_up - hip - knee;
-    Leg { hip, knee, ankle }
+fn direct_leg(hip: f32, knee: f32, ankle: f32) -> Leg {
+    Leg { hip, knee, ankle, yaw: 0.0, out: 0.0 }
+}
+
+/// An ankle trajectory in the stepping plane. `z` is positive towards the
+/// direction of travel, not necessarily towards the figure's facing.
+#[derive(Copy, Clone)]
+struct Step {
+    z: f32,
+    y: f32,
+    pitch: f32,
+    stance: bool,
+    progress: f32,
+}
+
+/// Ankle height that puts the lower of the heel and toe exactly at y=0 for
+/// a requested foot pitch. This gives a real heel roll and toe push-off.
+fn contact_ankle_y(pitch: f32) -> f32 {
+    let point_y = |z: f32| SOLE_DY * pitch.cos() - z * pitch.sin();
+    -point_y(HEEL_Z).min(point_y(TOE_Z))
+}
+
+fn gait_step(q: f32, duty: f32, travel: f32, lift: f32, go: f32) -> Step {
+    if q < duty {
+        // A planted sole travels backwards relative to the body at a steady
+        // rate. The old sine-wave thighs made this section skate both ways.
+        let u = q / duty.max(0.01);
+        let pitch = (-0.13 * (1.0 - smooth(0.0, 0.18, u)) + 0.50 * smooth(0.66, 1.0, u)) * go;
+        Step { z: travel * (0.5 - u), y: contact_ankle_y(pitch), pitch, stance: true, progress: u }
+    } else {
+        // Toe-off, a quick knee-led clearance, then reach for the next heel
+        // strike. Smooth travel and a non-zero arc avoid a shuffling swing.
+        let u = ((q - duty) / (1.0 - duty).max(0.01)).clamp(0.0, 1.0);
+        let z = mix(-travel * 0.5, travel * 0.5, smooth(0.0, 1.0, u));
+        let pitch = mix(0.48, -0.13, smooth(0.04, 0.82, u)) * go;
+        let clearance = lift * (PI * u).sin().max(0.0).powf(0.85);
+        Step { z, y: contact_ankle_y(pitch) + clearance, pitch, stance: false, progress: u }
+    }
+}
+
+/// Analytic two-bone IK. Given an ankle relative to the hip and a desired
+/// world-space foot pitch, return joint rotations without hyperextending the
+/// knee. The knee bends forwards, as a human knee does.
+fn leg_to(dy: f32, dz: f32, pitch: f32, yaw: f32) -> Leg {
+    let max_reach = THIGH + SHIN;
+    let raw = dy.hypot(dz).max(0.001);
+    let d = raw.clamp(0.16, max_reach);
+    let dy = dy * d / raw;
+    let dz = dz * d / raw;
+    let knee = ((d * d - THIGH * THIGH - SHIN * SHIN) / (2.0 * THIGH * SHIN)).clamp(-1.0, 1.0).acos();
+    let target = -dz.atan2(-dy);
+    let knee_offset = (SHIN * knee.sin()).atan2(THIGH + SHIN * knee.cos());
+    let hip = target - knee_offset;
+    Leg { hip, knee, ankle: pitch - hip - knee, yaw, out: 0.0 }
 }
 
 fn locomotion(m: &Motion) -> Angles {
-    let v = m.speed.max(0.0) as f32;
-    let phase = m.phase.rem_euclid(std::f64::consts::TAU) as f32;
-    let t = m.time as f32;
-    // How much it is moving at all, and how much of that is a run.
-    let go = smooth(0.05, 1.1, v);
-    let run = smooth(2.4, 4.4, v);
-    let stride = crate::character::stride_len(v as f64) as f32;
-    // Through the stance the foot sweeps back by about a stride walking,
-    // and less running (it is in the air for part of each step).
-    let leg_len = THIGH + SHIN;
-    let reach = stride * mix(0.5, 0.36, run) / leg_len;
-    let amp = reach.clamp(0.0, 0.85).asin() * go;
-    let swing_knee = mix(1.0, 1.85, run) * go;
-    let stance_knee = mix(0.14, 0.42, run) * go;
-    let roll = mix(1.0, 0.8, run) * go;
-    let legs = [leg(phase, amp, swing_knee, stance_knee, roll, run), leg(phase + PI, amp, swing_knee, stance_knee, roll, run)];
-    // Arms swing against the leg on their side, bent more for a run.
-    let arm_amp = mix(0.32, 0.62, run) * go;
-    let arm = |p: f32| {
-        let fwd = -arm_amp * p.cos();
-        let elbow = -mix(0.22 + 0.25 * fwd.max(0.0), 1.45 + 0.25 * fwd.max(0.0), run) * go - 0.14 * (1.0 - go);
-        Arm { swing: -fwd, out: mix(0.12, 0.16, run) * go + 0.12 * (1.0 - go), elbow }
+    let v = if m.speed.is_finite() { m.speed.max(0.0) as f32 } else { 0.0 };
+    let q = (m.phase as f32).rem_euclid(TAU) / TAU;
+    let t = if m.time.is_finite() { m.time as f32 } else { 0.0 };
+    let go = smooth(0.05, 0.35, v);
+    let run = smooth(1.9, 4.5, v);
+    let sprint = smooth(4.8, 7.0, v);
+
+    // Old callers that only supply scalar speed mean forwards. New callers
+    // pass signed local velocity, enabling backwards and sideways gaits.
+    let mut f = if m.forward.is_finite() { m.forward as f32 } else { 0.0 };
+    let x = if m.side.is_finite() { m.side as f32 } else { 0.0 };
+    if f == 0.0 && x == 0.0 {
+        f = v;
+    }
+    let move_len = f.hypot(x);
+    let (move_x, move_z, yaw) = if move_len > 0.001 && go > 0.001 {
+        (x / move_len, f / move_len, x.atan2(f))
+    } else {
+        (0.0, 1.0, 0.0)
     };
-    let arms = [arm(phase), arm(phase + PI)];
-    // Breathing and a slow weight shift while standing.
+
+    let duty = crate::character::gait_duty(v as f64) as f32;
+    let stride = crate::character::stride_len(v as f64) as f32;
+    // One full cycle covers two strides, and this foot is planted for
+    // `duty` of it. Sweeping by exactly that distance cancels the body's
+    // world-space travel instead of merely looking plausible in isolation.
+    let travel = 2.0 * duty * stride * go;
+    let lift = mix(0.11, 0.25, run) * go;
+    let steps = [gait_step(q, duty, travel, lift, go), gait_step((q + 0.5).fract(), duty, travel, lift, go)];
+
+    // Root movement comes from weight transfer, not arbitrary whole-body
+    // bobbing: low during double support/compression, high over a stance foot
+    // and through each running flight arc.
     let breathe = (t * 1.7).sin() * (1.0 - go);
     let shift = (t * 0.45).sin() * (1.0 - go);
-    let (s, c) = phase.sin_cos();
+    let mut rise = -mix(0.005, 0.055, run) * go - 0.025 * sprint * go + 0.003 * breathe;
+    if run > 0.001 {
+        if let Some(s) = steps.iter().find(|s| s.stance) {
+            rise -= 0.038 * run * (PI * s.progress).sin() * go;
+        } else {
+            let start = if q < 0.5 { duty } else { duty + 0.5 };
+            let u = ((q - start) / (0.5 - duty).max(0.01)).clamp(0.0, 1.0);
+            rise += 0.105 * run * (PI * u).sin() * go;
+        }
+    }
+    rise -= 0.014 * (2.0 * TAU * q).cos() * (1.0 - run) * go;
+
+    // Lower the pelvis only as much as the most extended supporting leg
+    // requires. IK can then follow the planted target without straightening
+    // into a stiff, full-reach stick at each heel strike.
+    for s in steps.iter().filter(|s| s.stance) {
+        let needed = s.y + (0.839f32.powi(2) - s.z * s.z).max(0.02).sqrt() - (HIP_Y + HIP_DY);
+        rise = rise.min(needed);
+    }
+    rise = rise.max(-0.34);
+    let hip_y = HIP_Y + HIP_DY + rise;
+    let leg = |s: Step| leg_to(s.y - hip_y, s.z, s.pitch, yaw);
+    let legs = [leg(steps[0]), leg(steps[1])];
+
+    // Arms counter-swing in the body's sagittal plane. They spread instead
+    // of swinging like a forward walk during a pure sidestep.
+    let cycle = TAU * q;
+    let amp = mix(0.34, 0.72, run) * go;
+    let arm = |opposite: f32| {
+        let swing = amp * cycle.cos() * opposite * move_z;
+        let elbow = -(0.14 + mix(0.16, 1.12, run) * go + 0.18 * swing.max(0.0));
+        Arm { swing, out: 0.12 + 0.04 * run * go + 0.15 * move_x.abs() * go, elbow }
+    };
+    let arms = [arm(1.0), arm(-1.0)];
     Angles {
         legs,
         arms,
-        lean: mix(0.035, 0.16, run) * go + 0.012 * breathe,
-        twist: -0.09 * c * go,
-        tilt: 0.045 * s * go * (1.0 - run) + 0.02 * shift,
-        sway: 0.022 * s * go * (1.0 - run) + 0.012 * shift,
-        head: 0.0,
+        lean: mix(0.03, 0.17, run) * go + 0.02 * sprint * go + 0.012 * breathe,
+        twist: -0.115 * cycle.cos() * go * move_z,
+        tilt: 0.034 * cycle.sin() * go * (1.0 - run) + 0.018 * shift,
+        sway: 0.018 * cycle.sin() * go + 0.012 * shift,
+        head: -0.018 * (t * 0.8).sin() * (1.0 - go),
+        rise,
+        shift: 0.0,
     }
 }
 
-fn jump() -> Angles {
-    // Knees up, feet nearly level (toes a little down).
-    let tuck = |hip: f32, knee: f32| Leg { hip, knee, ankle: 0.3 - hip - knee };
+fn jump(m: &Motion) -> Angles {
+    let vertical = if m.vertical.is_finite() { m.vertical as f32 } else { 0.0 };
+    let falling = 1.0 - smooth(-5.0, -0.5, vertical);
+    let tuck = |hip: f32, knee: f32, out: f32| Leg { hip: mix(hip, -0.28, falling), knee: mix(knee, 0.72, falling), ankle: 0.18 - hip - knee, yaw: 0.0, out };
     Angles {
-        legs: [tuck(-0.85, 1.45), tuck(-0.5, 1.1)],
-        arms: [Arm { swing: -0.9, out: 0.35, elbow: -0.9 }, Arm { swing: -0.6, out: 0.35, elbow: -0.9 }],
-        lean: 0.12,
+        legs: [tuck(-0.85, 1.45, 0.10), tuck(-0.50, 1.10, 0.10)],
+        arms: [
+            Arm { swing: mix(-0.95, -0.25, falling), out: mix(0.35, 0.82, falling), elbow: mix(-0.90, -0.35, falling) },
+            Arm { swing: mix(-0.65, -0.38, falling), out: mix(0.35, 0.76, falling), elbow: mix(-0.78, -0.42, falling) },
+        ],
+        lean: mix(0.12, 0.025, falling),
         twist: 0.0,
         tilt: 0.0,
         sway: 0.0,
-        head: -0.1,
+        head: mix(-0.10, 0.08, falling),
+        rise: 0.0,
+        shift: 0.0,
     }
 }
 
-/// Belly to earth: arms out wide, knees bent and feet trailing.
-fn freefall() -> Angles {
-    let leg = Leg { hip: -0.18, knee: 0.62, ankle: -0.22 };
-    Angles {
-        legs: [leg, leg],
-        arms: [Arm { swing: -0.12, out: 1.32, elbow: -0.32 }, Arm { swing: -0.12, out: 1.32, elbow: -0.32 }],
-        lean: 0.0,
-        twist: 0.0,
-        tilt: 0.0,
+fn freefall_settle(m: &Motion) -> f32 {
+    if m.plane_exit.is_none() { 1.0 } else { smooth(0.10, 1.25, m.fall_age.max(0.0) as f32) }
+}
+
+/// The aircraft exit and the stable arch are deliberately separate. A pilot
+/// first steps clear / takes the ejection posture, then spreads into a
+/// belly-to-earth box with small asynchronous wind corrections.
+fn freefall(m: &Motion) -> Angles {
+    let settle = freefall_settle(m);
+    let t = if m.time.is_finite() { m.time as f32 } else { 0.0 };
+    let gust = 0.025 + 0.035 * settle;
+    let left_leg = Leg {
+        hip: -0.24 + gust * (t * 5.1).sin(),
+        knee: 0.86 + 0.06 * (t * 3.7).sin(),
+        ankle: -0.20,
+        yaw: 0.08,
+        out: 0.27 + 0.025 * (t * 4.3).cos(),
+    };
+    let right_leg = Leg {
+        hip: -0.18 + gust * (t * 4.6 + 1.2).sin(),
+        knee: 0.78 + 0.055 * (t * 4.1 + 0.8).sin(),
+        ankle: -0.18,
+        yaw: -0.08,
+        out: 0.25 + 0.025 * (t * 3.9 + 0.5).cos(),
+    };
+    let stable = Angles {
+        legs: [left_leg, right_leg],
+        arms: [
+            Arm { swing: -0.25 + gust * (t * 5.7).sin(), out: 1.16 + 0.035 * (t * 4.8).sin(), elbow: -1.20 },
+            Arm { swing: -0.20 + gust * (t * 5.3 + 0.9).sin(), out: 1.20 + 0.035 * (t * 4.5 + 0.7).sin(), elbow: -1.16 },
+        ],
+        lean: -0.12,
+        twist: 0.025 * (t * 2.2).sin(),
+        tilt: 0.022 * (t * 2.8 + 0.4).sin(),
         sway: 0.0,
-        head: -0.18,
+        head: -0.24,
+        rise: 0.0,
+        shift: 0.0,
+    };
+    let exit = match m.plane_exit.unwrap_or(crate::bailout::Exit::Jump) {
+        crate::bailout::Exit::Jump => Angles {
+            legs: [direct_leg(-0.72, 0.72, 0.10), direct_leg(0.18, 0.82, -0.05)],
+            arms: [Arm { swing: -1.30, out: 0.65, elbow: -0.48 }, Arm { swing: 0.38, out: 0.92, elbow: -0.40 }],
+            lean: 0.20,
+            twist: -0.16,
+            tilt: 0.10,
+            sway: 0.06,
+            head: -0.12,
+            rise: -0.02,
+            shift: 0.08,
+        },
+        crate::bailout::Exit::Door => Angles {
+            legs: [direct_leg(-0.48, 1.14, 0.08), direct_leg(-0.20, 0.92, 0.02)],
+            arms: [Arm { swing: -0.95, out: 0.52, elbow: -1.42 }, Arm { swing: -0.68, out: 0.60, elbow: -1.35 }],
+            lean: 0.28,
+            twist: 0.12,
+            tilt: -0.08,
+            sway: -0.04,
+            head: -0.18,
+            rise: -0.06,
+            shift: 0.03,
+        },
+        crate::bailout::Exit::Eject => Angles {
+            legs: [direct_leg(-1.18, 1.92, 0.08), direct_leg(-1.10, 1.86, 0.06)],
+            arms: [Arm { swing: -0.86, out: 0.25, elbow: -1.24 }, Arm { swing: -0.82, out: 0.25, elbow: -1.20 }],
+            lean: 0.24,
+            twist: 0.0,
+            tilt: 0.0,
+            sway: 0.0,
+            head: 0.12,
+            rise: -0.05,
+            shift: -0.04,
+        },
+    };
+    blend(exit, stable, settle)
+}
+
+fn freefall_tilt(m: &Motion) -> f32 {
+    let initial = match m.plane_exit {
+        Some(crate::bailout::Exit::Jump) => 0.45,
+        Some(crate::bailout::Exit::Door) => 0.15,
+        Some(crate::bailout::Exit::Eject) => -0.35,
+        None => crate::bailout::FREEFALL_TILT as f32,
+    };
+    mix(initial, crate::bailout::FREEFALL_TILT as f32, freefall_settle(m))
+}
+
+/// Hanging under a canopy, hands on the risers. The knees and torso react
+/// gently to steering instead of becoming a frozen T-shaped parachute icon.
+fn under_canopy(m: &Motion) -> Angles {
+    let t = if m.time.is_finite() { m.time as f32 } else { 0.0 };
+    let steer = (m.steer as f32).clamp(-1.0, 1.0);
+    Angles {
+        legs: [
+            Leg { hip: -0.10 + 0.05 * steer, knee: 0.30, ankle: -0.12, yaw: 0.0, out: 0.08 },
+            Leg { hip: 0.02 + 0.05 * steer, knee: 0.23, ankle: -0.10, yaw: 0.0, out: 0.08 },
+        ],
+        arms: [
+            Arm { swing: -2.42, out: 0.22, elbow: -0.24 + 0.12 * steer },
+            Arm { swing: -2.42, out: 0.22, elbow: -0.24 - 0.12 * steer },
+        ],
+        lean: 0.025 + 0.018 * (t * 1.5).sin(),
+        twist: 0.08 * steer,
+        tilt: 0.06 * steer + 0.015 * (t * 1.2).sin(),
+        sway: 0.0,
+        head: 0.04,
+        rise: 0.0,
+        shift: 0.0,
     }
 }
 
-/// Hanging under a canopy, hands up on the risers, knees a little bent.
-fn under_canopy() -> Angles {
-    let leg = Leg { hip: -0.04, knee: 0.28, ankle: -0.12 };
+fn car_exit() -> Angles {
     Angles {
-        legs: [leg, leg],
-        arms: [Arm { swing: -2.45, out: 0.24, elbow: -0.16 }, Arm { swing: -2.45, out: 0.24, elbow: -0.16 }],
-        lean: 0.02,
-        twist: 0.0,
-        tilt: 0.0,
-        sway: 0.0,
-        head: 0.0,
+        legs: [direct_leg(-0.50, 0.82, 0.05), direct_leg(0.12, 1.02, -0.02)],
+        arms: [Arm { swing: -1.12, out: 0.70, elbow: -0.76 }, Arm { swing: -0.42, out: 0.95, elbow: -0.92 }],
+        lean: 0.36,
+        twist: -0.18,
+        tilt: 0.12,
+        sway: 0.04,
+        head: -0.24,
+        rise: -0.04,
+        shift: 0.06,
     }
+}
+
+/// Protect the head, pull the knees in, then let the tuck open slightly as
+/// the body comes back to its feet. Asymmetry makes this a shoulder roll,
+/// rather than a rigid mannequin rotating around one perfect axis.
+fn car_roll_angles(progress: f32) -> Angles {
+    let p = progress.clamp(0.0, 1.0);
+    let open = smooth(0.68, 1.0, p);
+    let tuck = 1.0 - 0.30 * open;
+    Angles {
+        legs: [
+            Leg { hip: mix(-1.18, -0.76, open), knee: mix(2.02, 1.46, open), ankle: -0.12, yaw: 0.0, out: 0.14 },
+            Leg { hip: mix(-0.98, -0.58, open), knee: mix(1.88, 1.24, open), ankle: -0.10, yaw: 0.0, out: 0.18 },
+        ],
+        arms: [
+            Arm { swing: mix(-1.18, -0.76, open), out: 0.34, elbow: -1.58 * tuck },
+            Arm { swing: mix(-0.88, -0.48, open), out: 0.48, elbow: -1.46 * tuck },
+        ],
+        lean: mix(0.60, 0.42, open),
+        twist: -0.16 * (PI * p).sin(),
+        tilt: 0.10 * (PI * p).sin(),
+        sway: 0.04 * (PI * p).sin(),
+        head: mix(-0.55, -0.32, open),
+        rise: -0.12,
+        shift: 0.0,
+    }
+}
+
+/// Plant a hand and one foot, bring the hips over the support foot, then
+/// uncurl. The first frame exactly matches the end of the tucked roll.
+fn car_recovery(m: &Motion, progress: f32) -> Angles {
+    let p = progress.clamp(0.0, 1.0);
+    let rise = mix(-0.38, -0.14, smooth(0.12, 0.72, p));
+    let hip_y = HIP_Y + HIP_DY + rise;
+    let planted = Angles {
+        legs: [leg_to(contact_ankle_y(0.0) - hip_y, 0.22, 0.0, 0.0), leg_to(contact_ankle_y(0.0) - hip_y, -0.16, 0.0, 0.0)],
+        arms: [
+            Arm { swing: mix(-1.02, -0.38, smooth(0.18, 0.78, p)), out: 0.22, elbow: -0.30 },
+            Arm { swing: mix(-0.70, -0.20, smooth(0.18, 0.78, p)), out: 0.28, elbow: -0.42 },
+        ],
+        lean: mix(0.70, 0.28, smooth(0.12, 0.74, p)),
+        twist: -0.10 * (1.0 - p),
+        tilt: 0.08 * (1.0 - p),
+        sway: 0.035 * (1.0 - p),
+        head: mix(-0.36, -0.10, p),
+        rise,
+        shift: 0.0,
+    };
+    let down = blend(car_roll_angles(1.0), planted, smooth(0.0, 0.28, p));
+    blend(down, locomotion(m), smooth(0.48, 1.0, p))
+}
+
+fn blend_angle(a: f32, b: f32, k: f32) -> f32 {
+    let d = (b - a + PI).rem_euclid(TAU) - PI;
+    a + d * k
 }
 
 fn blend(a: Angles, b: Angles, k: f32) -> Angles {
-    let l = |x: &Leg, y: &Leg| Leg { hip: mix(x.hip, y.hip, k), knee: mix(x.knee, y.knee, k), ankle: mix(x.ankle, y.ankle, k) };
+    let k = k.clamp(0.0, 1.0);
+    let l = |x: &Leg, y: &Leg| Leg {
+        hip: mix(x.hip, y.hip, k),
+        knee: mix(x.knee, y.knee, k),
+        ankle: mix(x.ankle, y.ankle, k),
+        yaw: blend_angle(x.yaw, y.yaw, k),
+        out: mix(x.out, y.out, k),
+    };
     let r = |x: &Arm, y: &Arm| Arm { swing: mix(x.swing, y.swing, k), out: mix(x.out, y.out, k), elbow: mix(x.elbow, y.elbow, k) };
     Angles {
         legs: [l(&a.legs[0], &b.legs[0]), l(&a.legs[1], &b.legs[1])],
@@ -342,48 +633,90 @@ fn blend(a: Angles, b: Angles, k: f32) -> Angles {
         tilt: mix(a.tilt, b.tilt, k),
         sway: mix(a.sway, b.sway, k),
         head: mix(a.head, b.head, k),
+        rise: mix(a.rise, b.rise, k),
+        shift: mix(a.shift, b.shift, k),
     }
 }
 
-/// The pose for a motion. On the ground the lower sole is put on the ground
-/// (y = 0); in the air the hips stay at standing height and the tucked legs
-/// lift the feet.
+fn ground_contact(rig: &mut RigPose, margin: f32, share: f32) {
+    let lift = (margin - rig.mesh_low()) * share.clamp(0.0, 1.0);
+    if lift.is_finite() {
+        rig.translated(0.0, lift, 0.0);
+    }
+}
+
+/// Build the current motion. Walking/running use planted IK foot paths, an
+/// aircraft exit resolves into a wind-driven arch, and the car rollout has
+/// actual full-mesh ground contact followed by a distinct recovery.
 pub fn pose(m: &Motion) -> RigPose {
     let air = (m.air as f32).clamp(0.0, 1.0);
     let fall = (m.fall as f32).clamp(0.0, 1.0);
     let chute = (m.chute as f32).clamp(0.0, 1.0);
-    let mut a = blend(locomotion(m), jump(), air);
-    if fall > 0.0 {
-        a = blend(a, freefall(), fall);
+    let locomotion_pose = locomotion(m);
+    let mut a = blend(locomotion_pose, jump(m), air);
+    let mut body_tilt = 0.0;
+    let mut ground_roll = None;
+    let mut ground_recovery = false;
+
+    if let Some(car) = m.car {
+        match car.phase {
+            crate::character::CarBailoutPhase::Air => a = car_exit(),
+            crate::character::CarBailoutPhase::Roll => {
+                let p = (car.roll / std::f64::consts::TAU).clamp(0.0, 1.0) as f32;
+                // The previous airborne frame and the first roll frame are
+                // exactly the same pose. Impact contraction, bank and ground
+                // resolution arrive over 0.18 s instead of snapping a knee
+                // through a radian and dropping the entire mesh in one frame.
+                let impact = smooth(0.0, 0.18, car.t.max(0.0) as f32);
+                a = blend(car_exit(), car_roll_angles(p), impact);
+                ground_roll = Some((car.roll as f32, 0.17 * (PI * p).sin() * impact, impact));
+            }
+            crate::character::CarBailoutPhase::Stand => {
+                let p = (car.t / crate::character::CAR_STAND_TIME).clamp(0.0, 1.0) as f32;
+                a = car_recovery(m, p);
+                ground_recovery = true;
+            }
+        }
+    } else if fall + chute > 0.0001 {
+        // Blend the two aerial destinations with each other first. Sequentially
+        // blending jump -> freefall -> canopy used to leave 25% of the jump
+        // pose in a half-open parachute and made the opening look broken.
+        let total = fall + chute;
+        let canopy_share = chute / total;
+        let aerial = blend(freefall(m), under_canopy(m), canopy_share);
+        a = blend(a, aerial, total.min(1.0));
+        body_tilt = (freefall_tilt(m) * fall + crate::bailout::CANOPY_TILT as f32 * chute) / total * total.min(1.0);
     }
-    if chute > 0.0 {
-        a = blend(a, under_canopy(), chute);
-    }
+
     let mut rig = build(&a);
-    // Freefall pitches the whole body about the hips: belly to earth, head
-    // out in front. Under canopy it comes upright again.
-    let tilt = (crate::bailout::FREEFALL_TILT as f32 * fall + crate::bailout::CANOPY_TILT as f32 * chute).clamp(0.0, 1.45);
-    if tilt != 0.0 {
-        let turn = at(0.0, HIP_Y, 0.0) * rx(tilt) * at(0.0, -HIP_Y, 0.0);
-        for p in rig.parts.iter_mut() {
-            *p = turn * *p;
+    if let Some((roll, bank, impact)) = ground_roll.filter(|(roll, _, _)| roll.is_finite()) {
+        let pivot = HIP_Y + a.rise;
+        let turn = at(0.0, pivot, a.shift) * rz(bank) * rx(roll) * at(0.0, -pivot, -a.shift);
+        for part in rig.parts.iter_mut() {
+            *part = turn * *part;
+        }
+        ground_contact(&mut rig, 0.006, impact);
+        return rig;
+    }
+    if ground_recovery {
+        ground_contact(&mut rig, 0.003, 1.0);
+        return rig;
+    }
+
+    if body_tilt.abs() > 0.0001 {
+        let pivot = HIP_Y + a.rise;
+        let turn = at(0.0, pivot, a.shift) * rx(body_tilt.clamp(-0.4, 1.45)) * at(0.0, -pivot, -a.shift);
+        for part in rig.parts.iter_mut() {
+            *part = turn * *part;
         }
     }
-    // A car bailout somersaults forward about the hips, in a tight tuck.
-    let roll = m.roll as f32;
-    if roll != 0.0 && roll.is_finite() {
-        let turn = at(0.0, HIP_Y, 0.0) * rx(roll) * at(0.0, -HIP_Y, 0.0);
-        for p in rig.parts.iter_mut() {
-            *p = turn * *p;
-        }
-    }
-    // Plant the feet: lower or raise the whole figure so the lowest sole
-    // point rests on the ground, fading out as the body leaves it.
-    let lift = -rig.sole_low() * (1.0 - air);
-    if lift.is_finite() && lift != 0.0 {
-        let shift = at(0.0, lift, 0.0);
-        for p in rig.parts.iter_mut() {
-            *p = shift * *p;
+
+    // Only a genuine stance phase gets a sole correction. In particular a
+    // running flight phase is allowed to have both feet above the ground.
+    if air < 1.0 && crate::character::gait_has_stance(m.phase, m.speed) {
+        let lift = -rig.sole_low() * (1.0 - air);
+        if lift.is_finite() && lift.abs() > 0.000001 {
+            rig.translated(0.0, lift, 0.0);
         }
     }
     rig
@@ -391,7 +724,7 @@ pub fn pose(m: &Motion) -> RigPose {
 
 fn build(a: &Angles) -> RigPose {
     let mut parts = [Mat4::IDENTITY; PARTS];
-    parts[PELVIS] = at(a.sway, HIP_Y, 0.0) * ry(a.twist) * rz(a.tilt);
+    parts[PELVIS] = at(a.sway, HIP_Y + a.rise, a.shift) * ry(a.twist) * rz(a.tilt);
     // The torso turns against the hips and leans; the head stays level.
     parts[TORSO] = parts[PELVIS] * at(0.0, WAIST_DY, 0.0) * ry(-a.twist * 1.8) * rz(-a.tilt * 1.4) * rx(a.lean);
     parts[HEAD] = parts[TORSO] * at(0.0, NECK_DY, 0.0) * ry(a.twist * 0.6) * rx(-a.lean * 0.7 + a.head);
@@ -404,10 +737,19 @@ fn build(a: &Angles) -> RigPose {
     }
     for (k, side, (th, sh, ft)) in [(0usize, 1.0f32, (THIGH_L, SHIN_L, FOOT_L)), (1, -1.0, (THIGH_R, SHIN_R, FOOT_R))] {
         let leg = &a.legs[k];
-        // (the hips' tilt is undone at the thigh, so the legs hang plumb)
-        parts[th] = parts[PELVIS] * at(side * HIP_X, HIP_DY, 0.0) * rz(-a.tilt) * rx(leg.hip);
+        // Undo pelvis rotation at the hip so a planted foot does not orbit
+        // with the torso. The leg bends in the direction of travel; the foot
+        // itself still points the way the body faces during a backwards or
+        // sideways step.
+        parts[th] = parts[PELVIS] * at(side * HIP_X, HIP_DY, 0.0) * ry(-a.twist) * rz(-a.tilt + side * leg.out) * ry(leg.yaw) * rx(leg.hip);
         parts[sh] = parts[th] * at(0.0, -THIGH, 0.0) * rx(leg.knee);
-        parts[ft] = parts[sh] * at(0.0, -SHIN, 0.0) * rx(leg.ankle);
+        // Cancel the complete stepped-leg orientation before applying the
+        // desired body-facing foot pitch. Ry(yaw) and Ry(-yaw) do NOT cancel
+        // across a bent Rx hip/knee chain; treating them as neighbours makes
+        // backward and sideways feet roll onto their edges.
+        let bend = leg.hip + leg.knee;
+        let foot_rotation = rx(-bend) * ry(-leg.yaw) * rx(bend + leg.ankle);
+        parts[ft] = parts[sh] * at(0.0, -SHIN, 0.0) * foot_rotation;
     }
     RigPose { parts }
 }
@@ -855,7 +1197,7 @@ mod tests {
     use super::*;
 
     fn standing() -> Motion {
-        Motion { phase: 0.0, speed: 0.0, air: 0.0, fall: 0.0, chute: 0.0, roll: 0.0, time: 0.0 }
+        Motion { phase: 0.0, speed: 0.0, time: 0.0, ..Motion::default() }
     }
 
     /// Where a point of a part is, in the body frame.
@@ -913,11 +1255,17 @@ mod tests {
             let mut highest = f32::MIN;
             let mut ahead = (f32::MAX, f32::MIN);
             for k in 0..64 {
-                let m = Motion { phase: k as f64 * std::f64::consts::TAU / 64.0, speed, air: 0.0, fall: 0.0, chute: 0.0, roll: 0.0, time: 0.0 };
+                let m = Motion { phase: k as f64 * std::f64::consts::TAU / 64.0, speed, ..standing() };
                 let rig = pose(&m);
                 assert!(rig.is_finite());
-                // Grounded, the figure always rests on its lower sole.
-                assert!(rig.sole_low().abs() < 1e-4, "{speed} m/s, phase {k}: soles at {}", rig.sole_low());
+                if crate::character::gait_has_stance(m.phase, m.speed) {
+                    // A supporting sole is planted through heel roll and
+                    // toe-off, without forcing the swing foot down.
+                    assert!(rig.sole_low().abs() < 1e-3, "{speed} m/s, phase {k}: soles at {}", rig.sole_low());
+                } else {
+                    // A run has two genuine flight windows per cycle.
+                    assert!(rig.sole_low() > 0.015, "{speed} m/s, phase {k}: both soles should be airborne, got {}", rig.sole_low());
+                }
                 let ankle = point(&rig, FOOT_L, Vec3::ZERO);
                 lowest = lowest.min(ankle.y);
                 highest = highest.max(ankle.y);
@@ -928,9 +1276,60 @@ mod tests {
             assert!(ahead.1 - ahead.0 > 0.4, "{speed} m/s: foot travel {:.3}", ahead.1 - ahead.0);
         }
         // The arm swings against the leg: left foot forward, left hand back.
-        let rig = pose(&Motion { phase: 0.0, speed: 1.6, air: 0.0, fall: 0.0, chute: 0.0, roll: 0.0, time: 0.0 });
+        let rig = pose(&Motion { phase: 0.0, speed: 1.6, ..standing() });
         assert!(point(&rig, FOOT_L, Vec3::ZERO).z > 0.1, "left foot ahead at its strike");
         assert!(point(&rig, HAND_L, Vec3::ZERO).z < point(&rig, HAND_R, Vec3::ZERO).z, "left hand behind the right");
+    }
+
+    #[test]
+    fn stance_sweep_cancels_exact_world_travel() {
+        for speed in [1.6, 4.5, 7.0] {
+            let duty = crate::character::gait_duty(speed) as f32;
+            let stride = crate::character::stride_len(speed) as f32;
+            let travel = 2.0 * duty * stride;
+            let q0 = 0.08;
+            let q1 = 0.12;
+            let seconds = (q1 - q0) * 2.0 * stride / speed as f32;
+            let a = gait_step(q0, duty, travel, 0.2, 1.0);
+            let b = gait_step(q1, duty, travel, 0.2, 1.0);
+            let swept_in_body_frame = a.z - b.z;
+            let moved_over_ground = speed as f32 * seconds;
+            assert!((swept_in_body_frame - moved_over_ground).abs() < 1e-5, "{speed} m/s: stance sweep {swept_in_body_frame} vs body travel {moved_over_ground}");
+        }
+    }
+
+    #[test]
+    fn directional_ik_keeps_shoes_body_facing() {
+        for yaw in [0.0, PI, std::f32::consts::FRAC_PI_2, -std::f32::consts::FRAC_PI_2] {
+            let leg = leg_to(-0.58, 0.12, 0.09, yaw);
+            let angles = Angles {
+                legs: [leg, leg],
+                arms: [Arm { swing: 0.0, out: 0.12, elbow: -0.14 }; 2],
+                lean: 0.0,
+                twist: 0.0,
+                tilt: 0.0,
+                sway: 0.0,
+                head: 0.0,
+                rise: 0.0,
+                shift: 0.0,
+            };
+            let rig = build(&angles);
+            let shoe_forward = rig.parts[FOOT_L].transform_vector3(Vec3::Z).normalize();
+            let expected = Vec3::new(0.0, -0.09f32.sin(), 0.09f32.cos());
+            assert!(shoe_forward.distance(expected) < 1e-4, "yaw {yaw}: shoe axis {shoe_forward:?}, expected {expected:?}");
+        }
+    }
+
+    #[test]
+    fn backwards_and_sideways_steps_follow_the_actual_velocity() {
+        let backwards = pose(&Motion { phase: 0.0, speed: 1.6, forward: -1.6, ..standing() });
+        assert!(point(&backwards, FOOT_L, Vec3::ZERO).z < -0.1, "backwards foot strike stays behind the body");
+        assert!(point(&backwards, HAND_L, Vec3::ZERO).z > point(&backwards, HAND_R, Vec3::ZERO).z, "arms counter-swing backwards too");
+        for k in 0..32 {
+            let rig = pose(&Motion { phase: k as f64 * std::f64::consts::TAU / 32.0, speed: 1.6, side: 1.6, ..standing() });
+            assert!(rig.is_finite());
+            assert!(point(&rig, FOOT_L, Vec3::ZERO).z.abs() < 0.35, "a sidestep is not drawn as a forward walk");
+        }
     }
 
     #[test]
@@ -941,19 +1340,60 @@ mod tests {
     }
 
     #[test]
-    fn the_car_bailout_somersaults_the_tucked_body() {
-        let crown = |roll: f64| point(&pose(&Motion { air: 1.0, roll, ..standing() }), HAIR, Vec3::new(0.0, 0.301, -0.01));
-        let upright = crown(0.0);
-        let quarter = crown(std::f64::consts::FRAC_PI_2);
-        let upside_down = crown(std::f64::consts::PI);
-        assert!(upside_down.y < upright.y - 1.0, "head goes over: {upright:?} -> {upside_down:?}");
-        assert!(quarter.z > upright.z + 0.5, "and forward with the roll: {quarter:?}");
-        for k in 0..48 {
-            let rig = pose(&Motion { air: 1.0, roll: k as f64 * std::f64::consts::TAU / 48.0, ..standing() });
-            assert!(rig.is_finite(), "roll frame {k}");
-            let lowest = rig.parts.iter().map(|m| m.w_axis.y).fold(f32::MAX, f32::min);
-            assert!(lowest > 0.1, "roll frame {k}: a joint dips to {lowest:.2} m");
+    fn the_car_bailout_rolls_on_its_body_and_gets_back_up() {
+        let frame = |phase, t, roll| Motion { air: 1.0, car: Some(crate::character::CarBailout { phase, t, roll }), ..standing() };
+        let axis = |motion: Motion| {
+            let rig = pose(&motion);
+            point(&rig, HAIR, Vec3::new(0.0, 0.301, -0.01)) - point(&rig, PELVIS, Vec3::ZERO)
+        };
+        let upright = axis(frame(crate::character::CarBailoutPhase::Roll, 0.0, 0.0));
+        let quarter = axis(frame(crate::character::CarBailoutPhase::Roll, 0.2, std::f64::consts::FRAC_PI_2));
+        let upside_down = axis(frame(crate::character::CarBailoutPhase::Roll, 0.4, std::f64::consts::PI));
+        assert!(upright.y > 0.4 && upside_down.y < -0.2, "head goes over: {upright:?} -> {upside_down:?}");
+        assert!(quarter.z > upright.z + 0.4, "and forward with the roll: {quarter:?}");
+        let airborne = pose(&frame(crate::character::CarBailoutPhase::Air, 0.5, 0.0));
+        let touchdown = pose(&frame(crate::character::CarBailoutPhase::Roll, 0.0, 0.0));
+        for (a, b) in airborne.parts.iter().zip(touchdown.parts.iter()) {
+            assert!(a.to_cols_array().iter().zip(b.to_cols_array().iter()).all(|(a, b)| (a - b).abs() < 1e-5), "touchdown must continue the airborne pose");
         }
+        for k in 0..48 {
+            let p = k as f64 / 47.0;
+            let rig = pose(&frame(crate::character::CarBailoutPhase::Roll, p * crate::character::CAR_ROLL_TIME, p * std::f64::consts::TAU));
+            assert!(rig.is_finite(), "roll frame {k}");
+            if p * crate::character::CAR_ROLL_TIME >= 0.18 {
+                assert!((rig.mesh_low() - 0.006).abs() < 1e-4, "roll frame {k}: mesh contact at {}", rig.mesh_low());
+            }
+        }
+        for k in 0..24 {
+            let rig = pose(&frame(crate::character::CarBailoutPhase::Stand, k as f64 * crate::character::CAR_STAND_TIME / 23.0, 0.0));
+            assert!(rig.is_finite(), "recovery frame {k}");
+            assert!((rig.mesh_low() - 0.003).abs() < 1e-4, "recovery frame {k}: mesh contact at {}", rig.mesh_low());
+        }
+        let standing = pose(&frame(crate::character::CarBailoutPhase::Stand, crate::character::CAR_STAND_TIME, 0.0));
+        assert!(point(&standing, HAIR, Vec3::new(0.0, 0.301, -0.01)).y > 1.72, "fully upright by the end");
+    }
+
+    #[test]
+    fn aircraft_exit_develops_into_a_stable_arch() {
+        let at_age = |age| {
+            pose(&Motion {
+                air: 1.0,
+                fall: 1.0,
+                plane_exit: Some(crate::bailout::Exit::Jump),
+                fall_age: age,
+                time: 2.0,
+                ..standing()
+            })
+        };
+        let early = at_age(0.0);
+        let late = at_age(2.0);
+        let early_head = point(&early, HAIR, Vec3::new(0.0, 0.301, -0.01));
+        let late_head = point(&late, HAIR, Vec3::new(0.0, 0.301, -0.01));
+        assert!(late_head.z > early_head.z + 0.25, "the step-out develops belly-to-earth: {early_head:?} -> {late_head:?}");
+        assert!(point(&late, HAND_L, Vec3::ZERO).x > point(&early, HAND_L, Vec3::ZERO).x + 0.08, "hands spread for stability");
+        // Buffeting is deterministic and moves the limbs, not a static statue.
+        let other = pose(&Motion { air: 1.0, fall: 1.0, time: 5.0, ..standing() });
+        assert!(point(&late, HAND_L, Vec3::ZERO).distance(point(&other, HAND_L, Vec3::ZERO)) > 0.005);
     }
 
     #[test]
@@ -975,7 +1415,7 @@ mod tests {
         let root = geo::lla_to_pos(0.5, 0.1, 0.0);
         let cam = root + DVec3::new(0.0, 0.0, 8.0);
         for k in 0..24 {
-            let m = Motion { phase: k as f64 * 0.31, speed: k as f64 * 0.35, air: (k % 5) as f64 * 0.25, fall: 0.0, chute: 0.0, roll: 0.0, time: k as f64 };
+            let m = Motion { phase: k as f64 * 0.31, speed: k as f64 * 0.35, air: (k % 5) as f64 * 0.25, time: k as f64, ..standing() };
             let rig = pose(&m);
             assert!(rig.is_finite(), "{m:?}");
             let mut out = Vec::new();
