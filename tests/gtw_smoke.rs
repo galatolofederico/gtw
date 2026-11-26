@@ -60,6 +60,7 @@ fn help_lists_the_ground_flags() {
     let (ok, text) = run_with_limit(c, Duration::from_secs(30));
     assert!(ok, "--help failed: {text}");
     assert!(text.contains("--start foot|car|plane"), "usage names --start: {text}");
+    assert!(text.contains("--bailout SECONDS"), "usage names --bailout: {text}");
     assert!(text.contains("--flat"), "usage names --flat: {text}");
     assert!(text.contains("--no-save"), "usage names --no-save: {text}");
     assert!(text.contains("gtw [--version]"), "usage names the GTW binary: {text}");
@@ -126,6 +127,49 @@ fn starts_a_plane_at_an_airport_headless() {
     c.args(["--headless", "--flat", "--start", "plane", "--airport", "EZE", "--offline", "--no-save", "--hold", "2", "--mute", "--weather", "clear", "--graphics", "very-low", "--render-scale", "0.35"]);
     let (ok, text) = run_with_limit(c, Duration::from_secs(120));
     assert!(ok, "headless plane-start run failed: {text}");
+    assert!(!text.to_lowercase().contains("panicked"), "no panic: {text}");
+}
+
+#[test]
+fn bails_out_and_lands_headless() {
+    let _gpu = gpu_lock();
+    // Flat dry ground over Buenos Aires: the Cessna takes off, the script
+    // leaves it at 180 m above the sea, the reserve opens and the body lands
+    // on foot. The run quits itself once the fall is over.
+    let mut c = bin();
+    c.args([
+        "--headless",
+        "--flat",
+        "--start",
+        "plane",
+        "--aircraft",
+        "c172",
+        "--lat",
+        "-34.60",
+        "--lon",
+        "-58.45",
+        "--alt",
+        "180",
+        "--wind",
+        "0,0",
+        "--bailout",
+        "1",
+        "--no-save",
+        "--mute",
+        "--offline",
+        "--weather",
+        "clear",
+        "--graphics",
+        "very-low",
+        "--render-scale",
+        "0.35",
+    ]);
+    let (ok, text) = run_with_limit(c, Duration::from_secs(120));
+    assert!(ok, "headless bailout run failed: {text}");
+    assert!(text.contains("bailout: jumped"), "it leaves the aircraft: {text}");
+    assert!(text.contains("bailout: parachute open"), "the reserve opens: {text}");
+    assert!(text.contains("bailout: landed"), "it comes down: {text}");
+    assert!(text.contains("bailout: on foot"), "the landing returns to walk mode: {text}");
     assert!(!text.to_lowercase().contains("panicked"), "no panic: {text}");
 }
 

@@ -153,6 +153,7 @@ pub const ACTIONS: &[Action] = &[
     act("gear", KeyCode::KeyL),
     act("speedbrake", KeyCode::Slash),
     act("canopy", KeyCode::Digit6),
+    act("bailout", KeyCode::F7),
     act("reversers", KeyCode::KeyZ),
     act("boost", KeyCode::Space),
     act("engines", KeyCode::Digit1),

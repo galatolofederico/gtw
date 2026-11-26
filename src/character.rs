@@ -7,6 +7,7 @@
 //! controller runs without a GPU, a streamed world, or a network: the tests
 //! drive it over synthetic flat, step and slope worlds.
 
+use crate::bailout;
 use crate::geo;
 use crate::surface::{Surface, SurfaceHit, SurfaceWeather};
 use crate::world::{TrafficBody, WorldQuery};
@@ -132,6 +133,15 @@ pub struct Character {
     pub health: f32,
     /// The last place the body stood safely (respawn point).
     pub last_safe: DVec3,
+    /// Where the body first stood this run: the last resort when a water
+    /// landing has no dry land within reach.
+    pub home: DVec3,
+    /// The air's own motion where the body is (planet frame). It matters
+    /// while freefalling or under canopy, which drift downwind; on the
+    /// ground the body's own step ignores it.
+    pub wind: DVec3,
+    /// A bailout in progress: freefall or a canopy, until touchdown.
+    pub fall: Option<bailout::Fall>,
     /// Seconds since the last damage.
     pub since_hurt: f64,
     /// Gait phase (radians), advanced a half turn per footstep.
@@ -142,7 +152,7 @@ pub struct Character {
     pub air: f64,
     /// Landing damage is forgiven while the body has just appeared (streaming
     /// may put the ground a little below the spawn estimate).
-    spawn_grace: f64,
+    pub spawn_grace: f64,
     /// Deaths this session.
     pub respawns: u32,
 }
@@ -161,6 +171,12 @@ pub struct CharacterStep {
     pub died: bool,
     /// One surface class per footstep this step.
     pub footsteps: Vec<Surface>,
+    /// The parachute opened on this step; the reserve did it by itself.
+    pub chute_opened: bool,
+    pub auto_chute: bool,
+    /// Vertical speed at a splashdown (m/s). `Game` gets the body out of the
+    /// water: swimming is a separate feature.
+    pub water: Option<f64>,
 }
 
 /// A bump from traffic, for the HUD and (in a later phase) the sound queue.
@@ -176,12 +192,30 @@ impl Character {
     /// Standing at `pos` (feet), facing `yaw` (bearing radians).
     pub fn spawn(pos: DVec3, yaw: f64) -> Self {
         let pos = if pos.is_finite() { pos } else { geo::lla_to_pos(0.0, 0.0, 0.0) };
-        Self { pos, vel: DVec3::ZERO, yaw, grounded: false, health: MAX_HEALTH, last_safe: pos, since_hurt: REGEN_DELAY, stride_phase: 0.0, stride: 0.0, air: 0.0, spawn_grace: 2.0, respawns: 0 }
+        Self {
+            pos,
+            vel: DVec3::ZERO,
+            yaw,
+            grounded: false,
+            health: MAX_HEALTH,
+            last_safe: pos,
+            home: pos,
+            wind: DVec3::ZERO,
+            fall: None,
+            since_hurt: REGEN_DELAY,
+            stride_phase: 0.0,
+            stride: 0.0,
+            air: 0.0,
+            spawn_grace: 2.0,
+            respawns: 0,
+        }
     }
 
-    /// The eye in the planet frame.
+    /// The eye in the planet frame. Freefalling, the body is belly to earth and
+    /// the head is out in front of the hips; under canopy it is upright again.
     pub fn eye(&self) -> DVec3 {
-        self.pos + self.pos.normalize() * EYE
+        let (up, forward) = self.fall.as_ref().map_or((EYE, 0.0), |f| f.eye_offset());
+        self.pos + self.pos.normalize() * up + self.forward() * forward
     }
 
     /// The gait cycle as a continuous angle: a half turn per footstep, and
@@ -197,7 +231,6 @@ impl Character {
     }
 
     /// The forward direction as a unit vector in the planet frame.
-    #[allow(dead_code)]
     pub fn forward(&self) -> DVec3 {
         let (e, n, _) = geo::enu(self.pos);
         e * self.yaw.sin() + n * self.yaw.cos()
@@ -216,9 +249,11 @@ impl Character {
     /// Move the body to the nearest safe point around `center`, or to `center`
     /// when the world cannot be queried (tiles not in yet).
     pub fn respawn_near<W: WorldQuery>(&mut self, world: &W, center: DVec3) {
-        let p = safe_point(world, center).unwrap_or(center);
+        let p = safe_point(world, center).or_else(|| safe_point(world, self.home)).unwrap_or(center);
         self.pos = p;
         self.vel = DVec3::ZERO;
+        self.wind = DVec3::ZERO;
+        self.fall = None;
         self.last_safe = p;
         self.grounded = false;
         self.health = MAX_HEALTH;
@@ -287,6 +322,10 @@ impl Character {
 
     /// A single integration step of at most a sixtieth of a second.
     fn substep<W: WorldQuery>(&mut self, h: f64, c: &CharacterControls, world: &W, wx: &SurfaceWeather, out: &mut CharacterStep) {
+        if self.fall.is_some() && !self.grounded {
+            self.fall_substep(h, c, world, out);
+            return;
+        }
         self.since_hurt += h;
         self.spawn_grace = (self.spawn_grace - h).max(0.0);
         let up = self.pos.normalize();
@@ -438,8 +477,78 @@ impl Character {
         }
     }
 
+    /// A step while out of an aircraft: freefall, canopy, or the last few
+    /// metres to the ground. `bailout::Fall` does the air and the touchdown;
+    /// the body's health, respawn and pose stay here.
+    fn fall_substep<W: WorldQuery>(&mut self, h: f64, c: &CharacterControls, world: &W, out: &mut CharacterStep) {
+        self.since_hurt += h;
+        self.spawn_grace = (self.spawn_grace - h).max(0.0);
+        let Some(fall) = self.fall.as_mut() else { return };
+        let event = fall.step(h, &mut self.pos, &mut self.vel, c, self.wind, world);
+        let open = fall.open;
+        self.yaw = fall.heading;
+        if event.deployed {
+            out.chute_opened = true;
+            out.auto_chute = event.auto;
+        }
+
+        if let Some(impact) = event.water {
+            // There is no swimming yet: the game gets the body out of the
+            // water. The impact itself can still hurt.
+            self.fall = None;
+            self.grounded = false;
+            self.wind = DVec3::ZERO;
+            out.water = Some(impact);
+            let dmg = bailout::water_damage(impact);
+            if dmg > 0.0 {
+                if self.hurt(dmg) {
+                    out.died = true;
+                }
+                out.damage += dmg;
+            }
+            if self.health <= 0.0 {
+                let center = self.last_safe;
+                self.respawn_near(world, center);
+                out.died = true;
+                out.damage = 0.0;
+            }
+            return;
+        }
+
+        if let Some(impact) = event.landed {
+            let damage = bailout::landing_damage(impact, open);
+            self.fall = None;
+            self.grounded = true;
+            self.wind = DVec3::ZERO;
+            self.vel -= self.pos.normalize() * self.vel.dot(self.pos.normalize());
+            self.last_safe = self.pos;
+            out.landed = Some(impact);
+            if damage > 0.0 && self.spawn_grace <= 0.0 {
+                if self.hurt(damage) {
+                    out.died = true;
+                }
+                out.damage += damage;
+            }
+        }
+
+        let air = if self.grounded { 0.0 } else { 1.0 };
+        self.air += (air - self.air) * (h * 9.0).min(1.0);
+
+        if self.health <= 0.0 {
+            let center = self.last_safe;
+            self.respawn_near(world, center);
+            out.died = true;
+            out.damage = 0.0;
+        } else if self.health > 0.0 && self.health < MAX_HEALTH && self.since_hurt > REGEN_DELAY {
+            self.health = (self.health + REGEN_RATE * h as f32).min(MAX_HEALTH);
+        }
+    }
+
     /// No time passed: keep the feet on the ground under them.
     fn settle<W: WorldQuery>(&mut self, world: &W, _out: &mut CharacterStep) {
+        if self.fall.is_some() {
+            return;
+        }
         let up = self.pos.normalize();
         if let Some(hit) = world.surface_at(self.pos).filter(|h| !h.blocked()) {
             self.pos = up * (geo::R + hit.h);
@@ -890,6 +999,95 @@ mod tests {
         assert!((c.pos - origin()).dot(east) < -0.2, "still pushed clear");
         // With no traffic there is nothing to resolve.
         assert!(at_origin().hit_traffic(&[]).is_none());
+    }
+
+    #[test]
+    fn a_bailout_lands_on_its_feet_and_walks_again() {
+        let w = FlatWorld;
+        let mut c = at_origin();
+        c.pos = c.pos.normalize() * (geo::R + 380.0);
+        c.grounded = false;
+        c.spawn_grace = 0.0;
+        c.last_safe = origin();
+        c.fall = Some(crate::bailout::Fall::new(crate::bailout::Exit::Jump, 0.0));
+        let mut landed = None;
+        for _ in 0..60 * 150 {
+            let s = c.step(1.0 / 60.0, &CharacterControls::default(), &w, &SurfaceWeather::default());
+            if s.landed.is_some() {
+                landed = s.landed;
+                break;
+            }
+        }
+        assert!(landed.is_some(), "it comes down");
+        assert!(c.fall.is_none() && c.grounded, "and the fall is over");
+        assert_eq!(c.health, MAX_HEALTH, "a canopy landing is soft");
+        assert!(height(&c).abs() < 0.05, "feet on the ground: {:.3}", height(&c));
+        // Walking works straight away.
+        run(&mut c, &w, CharacterControls { forward: 1.0, ..Default::default() }, 1.0);
+        assert!(c.speed() > 3.0 && c.grounded, "walking again at {:.1} m/s", c.speed());
+    }
+
+    #[test]
+    fn pressing_jump_opens_the_parachute_once() {
+        let w = FlatWorld;
+        let mut c = at_origin();
+        c.pos = c.pos.normalize() * (geo::R + 2_000.0);
+        c.grounded = false;
+        c.fall = Some(crate::bailout::Fall::new(crate::bailout::Exit::Jump, 0.0));
+        let jump = CharacterControls { jump: true, ..Default::default() };
+        let s = c.step(1.0 / 60.0, &jump, &w, &SurfaceWeather::default());
+        assert!(s.chute_opened && !s.auto_chute, "Space pulled the ripcord");
+        assert_eq!(c.fall.as_ref().map(|f| f.phase), Some(crate::bailout::Phase::Canopy));
+        // Holding it does not change anything again.
+        let s = c.step(1.0 / 60.0, &jump, &w, &SurfaceWeather::default());
+        assert!(!s.chute_opened);
+    }
+
+    #[test]
+    fn a_water_landing_is_reported_for_the_game_to_resolve() {
+        let w = SurfaceWorld(Surface::Water);
+        let mut c = at_origin();
+        c.pos = c.pos.normalize() * (geo::R + 30.0);
+        c.grounded = false;
+        c.spawn_grace = 0.0;
+        let mut fall = crate::bailout::Fall::new(crate::bailout::Exit::Door, 0.0);
+        fall.deploy();
+        fall.open = 1.0;
+        c.fall = Some(fall);
+        let mut water = None;
+        for _ in 0..120 * 60 {
+            let s = c.step(1.0 / 60.0, &CharacterControls::default(), &w, &SurfaceWeather::default());
+            if let Some(v) = s.water {
+                water = Some(v);
+                break;
+            }
+        }
+        assert!(water.is_some(), "splashdown reported");
+        assert!(c.fall.is_none(), "the game takes the body out of the water");
+        assert!(c.health > 0.0);
+    }
+
+    #[test]
+    fn a_freefall_into_the_ground_is_fatal_and_respawns() {
+        let w = FlatWorld;
+        let mut c = at_origin();
+        c.pos = c.pos.normalize() * (geo::R + 5.0);
+        c.vel = -c.pos.normalize() * 55.0;
+        c.grounded = false;
+        c.spawn_grace = 0.0;
+        c.last_safe = origin();
+        c.fall = Some(crate::bailout::Fall::new(crate::bailout::Exit::Jump, 0.0));
+        let mut died = false;
+        for _ in 0..60 * 5 {
+            let s = c.step(1.0 / 60.0, &CharacterControls::default(), &w, &SurfaceWeather::default());
+            if s.died {
+                died = true;
+                break;
+            }
+        }
+        assert!(died, "a 55 m/s arrival is not survivable");
+        assert_eq!(c.respawns, 1);
+        assert_eq!(c.health, MAX_HEALTH);
     }
 
     #[test]

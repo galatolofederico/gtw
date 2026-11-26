@@ -152,6 +152,8 @@ pub enum Event {
     Horn(f32),
     /// a car crash: sheet metal, glass and a blow (strength)
     Crash(f32),
+    /// a parachute catching the air (strength)
+    Chute(f32),
 }
 
 /// The most nearby traffic engines that are mixed at once.
@@ -202,6 +204,9 @@ pub struct WorldAudio {
     pub traffic: Vec<Emitter>,
     /// 1 on the ground, 0 in a menu, flying or paused (the ground falls silent).
     pub live: f32,
+    /// Airspeed of the wind past the player's ears while freefalling or under
+    /// canopy (m/s); 0 on the ground and in flight.
+    pub wind: f32,
 }
 
 /// Distance gain and stereo pan for a sound at `pos`, heard at `cam` with the
@@ -1207,6 +1212,7 @@ struct Ground {
     car_squeal: Bq,
     car_mod: Slow,
     knock: Bq,
+    wind: Bq,
     slots: [TrafficSlot; MAX_TRAFFIC_VOICES],
     traffic_ph: [f32; MAX_TRAFFIC_VOICES],
     traffic_lp: [Bq; MAX_TRAFFIC_VOICES],
@@ -1223,6 +1229,7 @@ impl Ground {
             car_squeal: Bq::new(Bq::bp, 2400.0, 26.0),
             car_mod: Slow::default(),
             knock: Bq::new(Bq::ring, 1300.0, 7.0),
+            wind: Bq::new(Bq::bp, 900.0, 0.55),
             slots: [TrafficSlot::default(); MAX_TRAFFIC_VOICES],
             traffic_ph: [0.0; MAX_TRAFFIC_VOICES],
             traffic_lp: [Bq::new(Bq::lp, 340.0, 0.9); MAX_TRAFFIC_VOICES],
@@ -1237,6 +1244,10 @@ impl Ground {
             self.car_roll.bp(260.0 + 900.0 * t.bright, 0.8);
             self.car_grit.bp(900.0 + 1900.0 * t.bright, 1.5);
         }
+        // Faster air whistles higher and wider; under canopy it is a gentler
+        // rush than freefall.
+        let wv = w.wind.max(0.0);
+        self.wind.bp(400.0 + 26.0 * wv, 0.55 + 0.015 * wv);
         self.slots = [TrafficSlot::default(); MAX_TRAFFIC_VOICES];
         if w.live <= 0.001 {
             return;
@@ -1311,6 +1322,15 @@ impl Ground {
             let (a, b) = pan(y, slot.pan);
             l += a * slot.gain;
             r += b * slot.gain;
+        }
+        // Air rushing past the ears: freefall, then the gentler rush under
+        // canopy. The body's own speed sets it.
+        if w.wind > 0.5 {
+            let n = rng.f();
+            let y = self.wind.run(n) * (w.wind / 55.0).min(1.4) * 0.18;
+            let (a, b) = pan(y, rng.range(-0.2, 0.2));
+            l += a;
+            r += b;
         }
         (l, r)
     }
@@ -1856,6 +1876,16 @@ impl Synth {
                     self.push(v);
                 }
             }
+            Event::Chute(s) => {
+                let s = s.clamp(0.2, 2.0);
+                // The canopy snatching open: a cloth crack, a hard low thump
+                // and a long rustle as the cells fill.
+                let crack = Voice::new(0.55, r.range(-0.35, 0.35), Bus::Mid).noise(4200.0, 900.0, 0.8, 1.1 * s, 0.06).strike(0.7 * s).tone(68.0, 42.0, 0.35 * s, 0.15);
+                let fill = Voice::new(1.7, r.range(-0.25, 0.25), Bus::Mid).noise(1600.0, 500.0, 0.55, 0.75 * s, 0.35).pulses(55.0, 32.0, true, 0.5 * s);
+                for v in [crack, fill] {
+                    self.push(v);
+                }
+            }
             Event::Thunder { delay, near, far, power, pan } => {
                 if self.world.thunder.len() >= 12 {
                     self.world.thunder.remove(0);
@@ -2177,7 +2207,7 @@ mod tests {
         p.warn = Warn { stall: 1.0, pull_up: true, overspeed: 1.0, gear: true, ..Default::default() };
         for cabin in [0.0, 1.0] {
             p.cabin = cabin;
-            let ev = [Event::Boom(2.0), Event::Snap(2.0), Event::Bump(3.0), Event::Touch(8.0), Event::Clunk(1.0), Event::Crunch(2.0), Event::Splash(2.0), Event::Thunder { delay: 0.0, near: 100.0, far: 4000.0, power: 2.0, pan: 1.0 }, Event::Footstep { surface: Surface::Asphalt, gain: 1.0, pan: -0.5 }, Event::Scrape(2.0), Event::Horn(2.0), Event::Crash(2.0)];
+            let ev = [Event::Boom(2.0), Event::Snap(2.0), Event::Bump(3.0), Event::Touch(8.0), Event::Clunk(1.0), Event::Crunch(2.0), Event::Splash(2.0), Event::Thunder { delay: 0.0, near: 100.0, far: 4000.0, power: 2.0, pan: 1.0 }, Event::Footstep { surface: Surface::Asphalt, gain: 1.0, pan: -0.5 }, Event::Scrape(2.0), Event::Horn(2.0), Event::Crash(2.0), Event::Chute(2.0)];
             let x = render(p, &ev, 1.5);
             assert!(x.iter().all(|s| s[0].is_finite() && s[1].is_finite() && s[0].abs() <= 1.0 && s[1].abs() <= 1.0));
         }
@@ -2228,6 +2258,7 @@ mod tests {
             car: Some(CarAudio { pos: DVec3::new(2.0, 0.0, 0.0), speed: 20.0, rpm: 3000.0, load: 1.0, braking: 1.0, handbrake: true, health: 0.2, surface: Surface::Grass }),
             traffic: vec![Emitter { pos: DVec3::new(5.0, 0.0, 0.0), kind: EmitterKind::Traffic, speed: 12.0, load: 1.0 }],
             live: 0.0,
+            wind: 50.0,
         });
         let x: Vec<f32> = (0..RATE).map(|_| s.next().unwrap()).collect();
         assert!(x.iter().all(|v| *v == 0.0), "live = 0 keeps the ground out of the mix");

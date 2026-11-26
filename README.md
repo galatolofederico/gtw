@@ -61,6 +61,7 @@ cargo build --release --locked
 
 - **Ground play:** start on foot anywhere; walk, run, sprint, jump, step up kerbs, and climb or slide on slopes. Six surface classes (asphalt, concrete, gravel, grass, sand, snow/ice) change grip, speed, and footstep audio, and weather modifies them.
 - **Cars:** take any of the eight existing road vehicles while parked or moving, drive them with single-body arcade physics, drift with the handbrake, shove other cars aside in solid two-way collisions, and get out again.
+- **Bailout:** leave any flyable aircraft in flight (jump, door, or ejection seat), freefall with tracking, open and steer a ram-air canopy, and land on foot while the empty aircraft flies on and comes down clear of you. Water landings are defined without swimming yet; see [docs/bailout.md](docs/bailout.md).
 - **Flight:** the upstream aircraft, cockpits, systems, and flight model: Cessna 172RG, Robin DR400, Beechcraft A36 Bonanza, Boeing 747, Gulfstream G650, F/A-18, F-4, F-22, Concorde, SR-71, Starship, and downloadable [FlightGear aircraft](https://wiki.flightgear.org/FGAddon).
 - **World:** real elevation, OpenStreetMap roads and buildings, ESA WorldCover land cover, satellite imagery, real METAR weather, seasonal and live snow, and a satellite/road minimap.
 - **Controls:** remappable keyboard, joystick, throttle, pedals, and gamepad, with separate on-foot, car, and flight contexts in **Settings → Controls**.
@@ -121,12 +122,17 @@ All bindings can be customized in **Settings → Controls**, which has separate 
 | Speedbrake / Braking chute | `/` |
 | Thrust reversers (hold) | `Z` |
 | Canopy open / close | `6` |
+| Bail out (in flight; gamepad Y alone) | `F7` |
 | Boost / Afterburner | `Space` |
 | Auto-start / stop engine | `F4` |
 | Battery master / Magnetos / Starter | `Insert` / `I` / `O` |
 | Mixture richer / leaner | `Page Up` / `Page Down` |
 | Autopilot toggle / HDG / NAV / APR / ALT | `F5` / `7` / `8` / `9` / `0` |
 | Heading bug / Altitude preselect | `-` `=` / `;` `'` |
+
+### Bailing out
+
+Press `F7` in flight (or let go of the gamepad's Y on its own) to leave the aircraft. In freefall, `W`/`S` track forward and back, `A`/`D` turn, and `Space` opens the parachute; the reserve fires by itself at 350 m above ground. Under canopy, `A`/`D` steer, `W` speeds up, and `S` flares for a softer touchdown. `C`/`V` switches between the shoulder and eye cameras, and `R` puts you on the last safe ground if you want out of the fall.
 
 ### Everywhere
 

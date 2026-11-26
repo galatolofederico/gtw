@@ -363,6 +363,7 @@ impl Game {
             Mode::Walk => "walk",
             Mode::Drive => "drive",
             Mode::Fly => "fly",
+            Mode::Fall => "bailout",
         };
         let local = (self.utc + lon.to_degrees() / 15.0).rem_euclid(24.0);
         let el = &p.sys.elec;

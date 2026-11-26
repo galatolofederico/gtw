@@ -137,6 +137,10 @@ pub struct Motion {
     pub speed: f64,
     /// 0 on the ground .. 1 in the air (`Character::air`).
     pub air: f64,
+    /// 0 not falling .. 1 belly to earth in freefall (`bailout::Fall::pose`).
+    pub fall: f64,
+    /// 0 no canopy .. 1 hanging under a fully open one.
+    pub chute: f64,
     /// Seconds, for breathing and idle sway.
     pub time: f64,
 }
@@ -196,6 +200,7 @@ fn bump(phase: f32, c: f32, w: f32) -> f32 {
 /// Joint angles for one leg. Rotations are about +X: positive swings a
 /// hanging limb back, so a thigh forward is negative and a bent knee
 /// positive.
+#[derive(Copy, Clone)]
 struct Leg {
     hip: f32,
     knee: f32,
@@ -203,6 +208,7 @@ struct Leg {
 }
 
 /// Joint angles for one arm.
+#[derive(Copy, Clone)]
 struct Arm {
     swing: f32,
     out: f32,
@@ -293,6 +299,34 @@ fn jump() -> Angles {
     }
 }
 
+/// Belly to earth: arms out wide, knees bent and feet trailing.
+fn freefall() -> Angles {
+    let leg = Leg { hip: -0.18, knee: 0.62, ankle: -0.22 };
+    Angles {
+        legs: [leg, leg],
+        arms: [Arm { swing: -0.12, out: 1.32, elbow: -0.32 }, Arm { swing: -0.12, out: 1.32, elbow: -0.32 }],
+        lean: 0.0,
+        twist: 0.0,
+        tilt: 0.0,
+        sway: 0.0,
+        head: -0.18,
+    }
+}
+
+/// Hanging under a canopy, hands up on the risers, knees a little bent.
+fn under_canopy() -> Angles {
+    let leg = Leg { hip: -0.04, knee: 0.28, ankle: -0.12 };
+    Angles {
+        legs: [leg, leg],
+        arms: [Arm { swing: -2.45, out: 0.24, elbow: -0.16 }, Arm { swing: -2.45, out: 0.24, elbow: -0.16 }],
+        lean: 0.02,
+        twist: 0.0,
+        tilt: 0.0,
+        sway: 0.0,
+        head: 0.0,
+    }
+}
+
 fn blend(a: Angles, b: Angles, k: f32) -> Angles {
     let l = |x: &Leg, y: &Leg| Leg { hip: mix(x.hip, y.hip, k), knee: mix(x.knee, y.knee, k), ankle: mix(x.ankle, y.ankle, k) };
     let r = |x: &Arm, y: &Arm| Arm { swing: mix(x.swing, y.swing, k), out: mix(x.out, y.out, k), elbow: mix(x.elbow, y.elbow, k) };
@@ -312,8 +346,25 @@ fn blend(a: Angles, b: Angles, k: f32) -> Angles {
 /// lift the feet.
 pub fn pose(m: &Motion) -> RigPose {
     let air = (m.air as f32).clamp(0.0, 1.0);
-    let a = blend(locomotion(m), jump(), air);
+    let fall = (m.fall as f32).clamp(0.0, 1.0);
+    let chute = (m.chute as f32).clamp(0.0, 1.0);
+    let mut a = blend(locomotion(m), jump(), air);
+    if fall > 0.0 {
+        a = blend(a, freefall(), fall);
+    }
+    if chute > 0.0 {
+        a = blend(a, under_canopy(), chute);
+    }
     let mut rig = build(&a);
+    // Freefall pitches the whole body about the hips: belly to earth, head
+    // out in front. Under canopy it comes upright again.
+    let tilt = (crate::bailout::FREEFALL_TILT as f32 * fall + crate::bailout::CANOPY_TILT as f32 * chute).clamp(0.0, 1.45);
+    if tilt != 0.0 {
+        let turn = at(0.0, HIP_Y, 0.0) * rx(tilt) * at(0.0, -HIP_Y, 0.0);
+        for p in rig.parts.iter_mut() {
+            *p = turn * *p;
+        }
+    }
     // Plant the feet: lower or raise the whole figure so the lowest sole
     // point rests on the ground, fading out as the body leaves it.
     let lift = -rig.sole_low() * (1.0 - air);
@@ -792,7 +843,7 @@ mod tests {
     use super::*;
 
     fn standing() -> Motion {
-        Motion { phase: 0.0, speed: 0.0, air: 0.0, time: 0.0 }
+        Motion { phase: 0.0, speed: 0.0, air: 0.0, fall: 0.0, chute: 0.0, time: 0.0 }
     }
 
     /// Where a point of a part is, in the body frame.
@@ -850,7 +901,7 @@ mod tests {
             let mut highest = f32::MIN;
             let mut ahead = (f32::MAX, f32::MIN);
             for k in 0..64 {
-                let m = Motion { phase: k as f64 * std::f64::consts::TAU / 64.0, speed, air: 0.0, time: 0.0 };
+                let m = Motion { phase: k as f64 * std::f64::consts::TAU / 64.0, speed, air: 0.0, fall: 0.0, chute: 0.0, time: 0.0 };
                 let rig = pose(&m);
                 assert!(rig.is_finite());
                 // Grounded, the figure always rests on its lower sole.
@@ -865,7 +916,7 @@ mod tests {
             assert!(ahead.1 - ahead.0 > 0.4, "{speed} m/s: foot travel {:.3}", ahead.1 - ahead.0);
         }
         // The arm swings against the leg: left foot forward, left hand back.
-        let rig = pose(&Motion { phase: 0.0, speed: 1.6, air: 0.0, time: 0.0 });
+        let rig = pose(&Motion { phase: 0.0, speed: 1.6, air: 0.0, fall: 0.0, chute: 0.0, time: 0.0 });
         assert!(point(&rig, FOOT_L, Vec3::ZERO).z > 0.1, "left foot ahead at its strike");
         assert!(point(&rig, HAND_L, Vec3::ZERO).z < point(&rig, HAND_R, Vec3::ZERO).z, "left hand behind the right");
     }
@@ -878,11 +929,25 @@ mod tests {
     }
 
     #[test]
+    fn freefall_lies_forward_and_the_canopy_hangs_upright() {
+        let crown = |m: &Motion| point(&pose(m), HAIR, Vec3::new(0.0, 0.301, -0.01));
+        let falling = crown(&Motion { air: 1.0, fall: 1.0, ..standing() });
+        assert!(falling.z > 0.5, "head out in front: {falling:?}");
+        assert!(falling.y < 1.3, "body down from standing height: {falling:?}");
+        let hanging = crown(&Motion { air: 1.0, chute: 1.0, ..standing() });
+        assert!(hanging.y > 1.5, "upright under canopy: {hanging:?}");
+        assert!(hanging.z.abs() < 0.35, "and not tipped far: {hanging:?}");
+        // The half-open blend is finite and between the two.
+        let opening = crown(&Motion { air: 1.0, fall: 0.5, chute: 0.5, ..standing() });
+        assert!(opening.is_finite());
+    }
+
+    #[test]
     fn poses_are_finite_and_instanced() {
         let root = geo::lla_to_pos(0.5, 0.1, 0.0);
         let cam = root + DVec3::new(0.0, 0.0, 8.0);
         for k in 0..24 {
-            let m = Motion { phase: k as f64 * 0.31, speed: k as f64 * 0.35, air: (k % 5) as f64 * 0.25, time: k as f64 };
+            let m = Motion { phase: k as f64 * 0.31, speed: k as f64 * 0.35, air: (k % 5) as f64 * 0.25, fall: 0.0, chute: 0.0, time: k as f64 };
             let rig = pose(&m);
             assert!(rig.is_finite(), "{m:?}");
             let mut out = Vec::new();
