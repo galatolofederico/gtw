@@ -7,8 +7,8 @@
 //! joint, with rounded joint caps that overlap the neighbouring piece, so
 //! the figure stays closed as it bends.
 //!
-//! The figure is about 1.80 m tall (7.5 heads): hip joints at 0.92 m, knees
-//! at 0.48 m, shoulders at 1.45 m. It wears a hoodie over a tee, jeans with
+//! The figure is about 1.80 m tall (7.5 heads): hip joints at 0.97 m, knees
+//! at 0.51 m, shoulders at 1.44 m. It wears a hoodie over a tee, jeans with
 //! a belt, and sneakers.
 //!
 //! The pose is a distance-integrated gait cycle (`Character::gait_phase`),
@@ -73,21 +73,24 @@ const HAIR: usize = 15;
 // The skeleton at rest (m), body frame: +X left, +Y up, +Z forward, feet at
 // the origin.
 /// Hip centre (the pelvis pivot) above the ground, standing.
-const HIP_Y: f32 = 0.95;
+const HIP_Y: f32 = 1.0;
 /// Hip joints from the hip centre.
 const HIP_X: f32 = 0.095;
 const HIP_DY: f32 = -0.03;
 /// Waist (the torso pivot) above the hip centre.
-const WAIST_DY: f32 = 0.10;
+const WAIST_DY: f32 = 0.09;
 /// Shoulder joints and the neck base from the waist.
 const SHOULDER_X: f32 = 0.185;
 const SHOULDER_DY: f32 = 0.38;
-const NECK_DY: f32 = 0.46;
-/// Bone lengths.
+const NECK_DY: f32 = 0.44;
+/// Bone lengths. The pelvis-to-ankle measurement is about half the figure's
+/// height; the old 0.84 m legs had to lock their knees on every walking step.
 const UPPER_ARM: f32 = 0.28;
 const FOREARM: f32 = 0.25;
-const THIGH: f32 = 0.44;
-const SHIN: f32 = 0.40;
+const THIGH: f32 = 0.46;
+const SHIN: f32 = 0.44;
+/// Keep a little knee flexion even at maximum leg extension.
+const LEG_REACH: f32 = (THIGH + SHIN) * 0.99;
 /// The sole's underside below the ankle, and its heel and toe (from the
 /// ankle, along +Z).
 const SOLE_DY: f32 = -0.08;
@@ -301,17 +304,27 @@ fn contact_ankle_y(pitch: f32) -> f32 {
 fn gait_step(q: f32, duty: f32, travel: f32, lift: f32, go: f32) -> Step {
     if q < duty {
         // A planted sole travels backwards relative to the body at a steady
-        // rate. The old sine-wave thighs made this section skate both ways.
+        // rate. Heel roll and toe push-off change its height without sliding
+        // the contact point through the floor.
         let u = q / duty.max(0.01);
         let pitch = (-0.13 * (1.0 - smooth(0.0, 0.18, u)) + 0.50 * smooth(0.66, 1.0, u)) * go;
         Step { z: travel * (0.5 - u), y: contact_ankle_y(pitch), pitch, stance: true, progress: u }
     } else {
-        // Toe-off, a quick knee-led clearance, then reach for the next heel
-        // strike. Smooth travel and a non-zero arc avoid a shuffling swing.
         let u = ((q - duty) / (1.0 - duty).max(0.01)).clamp(0.0, 1.0);
-        let z = mix(-travel * 0.5, travel * 0.5, smooth(0.0, 1.0, u));
-        let pitch = mix(0.48, -0.13, smooth(0.04, 0.82, u)) * go;
-        let clearance = lift * (PI * u).sin().max(0.0).powf(0.85);
+        // A cubic recovery with the same endpoint velocity as the planted
+        // sweep. The foot continues briefly backwards after toe-off, reaches
+        // ahead of its landing point, then settles onto the next heel strike.
+        // A plain smoothstep stopped the foot dead at both contacts and made
+        // its velocity snap, which was a major source of the marionette look.
+        let swing = 1.0 - duty;
+        let endpoint = -swing / duty.max(0.01);
+        let u2 = u * u;
+        let u3 = u2 * u;
+        let ease = -2.0 * u3 + 3.0 * u2 + endpoint * u * (1.0 - u) * (1.0 - 2.0 * u);
+        let z = mix(-travel * 0.5, travel * 0.5, ease);
+        let pitch = mix(0.50, -0.13, smooth(0.04, 0.82, u)) * go;
+        // An exponent above one leaves zero vertical velocity at both ends.
+        let clearance = lift * (PI * u).sin().max(0.0).powf(1.35);
         Step { z, y: contact_ankle_y(pitch) + clearance, pitch, stance: false, progress: u }
     }
 }
@@ -320,9 +333,8 @@ fn gait_step(q: f32, duty: f32, travel: f32, lift: f32, go: f32) -> Step {
 /// world-space foot pitch, return joint rotations without hyperextending the
 /// knee. The knee bends forwards, as a human knee does.
 fn leg_to(dy: f32, dz: f32, pitch: f32, yaw: f32) -> Leg {
-    let max_reach = THIGH + SHIN;
     let raw = dy.hypot(dz).max(0.001);
-    let d = raw.clamp(0.16, max_reach);
+    let d = raw.clamp(0.16, LEG_REACH);
     let dy = dy * d / raw;
     let dz = dz * d / raw;
     let knee = ((d * d - THIGH * THIGH - SHIN * SHIN) / (2.0 * THIGH * SHIN)).clamp(-1.0, 1.0).acos();
@@ -330,6 +342,18 @@ fn leg_to(dy: f32, dz: f32, pitch: f32, yaw: f32) -> Leg {
     let knee_offset = (SHIN * knee.sin()).atan2(THIGH + SHIN * knee.cos());
     let hip = target - knee_offset;
     Leg { hip, knee, ankle: pitch - hip - knee, yaw, out: 0.0 }
+}
+
+/// Three-dimensional foot placement. `dx` is across the stepping plane and
+/// `dz` along it; `side` is +1 for the left leg and -1 for the right. Spreading
+/// the hip before flexing it lets the pelvis transfer weight while the shoes
+/// stay planted, including during sideways and backwards steps.
+fn leg_to_offset(dx: f32, dy: f32, dz: f32, pitch: f32, yaw: f32, side: f32) -> Leg {
+    let spread = dx.atan2(-dy);
+    let planar_dy = -dx.hypot(dy);
+    let mut leg = leg_to(planar_dy, dz, pitch, yaw);
+    leg.out = side * spread;
+    leg
 }
 
 fn locomotion(m: &Motion) -> Angles {
@@ -360,58 +384,76 @@ fn locomotion(m: &Motion) -> Angles {
     // `duty` of it. Sweeping by exactly that distance cancels the body's
     // world-space travel instead of merely looking plausible in isolation.
     let travel = 2.0 * duty * stride * go;
-    let lift = mix(0.11, 0.25, run) * go;
+    let lift = (mix(0.075, 0.17, run) + 0.02 * sprint) * go;
     let steps = [gait_step(q, duty, travel, lift, go), gait_step((q + 0.5).fract(), duty, travel, lift, go)];
 
-    // Root movement comes from weight transfer, not arbitrary whole-body
-    // bobbing: low during double support/compression, high over a stance foot
-    // and through each running flight arc.
+    let cycle = TAU * q;
     let breathe = (t * 1.7).sin() * (1.0 - go);
-    let shift = (t * 0.45).sin() * (1.0 - go);
-    let mut rise = -mix(0.005, 0.055, run) * go - 0.025 * sprint * go + 0.003 * breathe;
+    let idle_shift = (t * 0.45).sin() * (1.0 - go);
+    // The pelvis travels over the support area instead of staying midway
+    // between two unreachable heels. Its lateral shift peaks over the stance
+    // foot. Both shifts are subtracted from the hip-to-ankle IK vectors, so
+    // this moves the body over the feet rather than dragging the feet along.
+    let fore_aft = mix(0.08, 0.04, run) * (2.0 * cycle).cos() * go;
+    let lateral = 0.026 * cycle.sin() * go * (1.0 - 0.55 * run) + 0.012 * idle_shift;
+    let sway = fore_aft * move_x + lateral;
+    let shift = fore_aft * move_z;
+    let leg_plane = |s: Step| {
+        let dx = -lateral * yaw.cos();
+        let dz = s.z - fore_aft - lateral * yaw.sin();
+        (dx, dz)
+    };
+
+    // Weight acceptance dips the pelvis gently; the run's two flight arcs
+    // rise above it. Crucially, include the approaching swing foot as well as
+    // the stance foot in the reach constraint. Considering a foot only after
+    // touchdown caused an instantaneous 10-30 cm drop at every contact.
+    let mut rise = -mix(0.006, 0.040, run) * go - 0.020 * sprint * go + 0.003 * breathe;
     if run > 0.001 {
         if let Some(s) = steps.iter().find(|s| s.stance) {
-            rise -= 0.038 * run * (PI * s.progress).sin() * go;
+            rise -= 0.025 * run * (PI * s.progress).sin() * go;
         } else {
             let start = if q < 0.5 { duty } else { duty + 0.5 };
             let u = ((q - start) / (0.5 - duty).max(0.01)).clamp(0.0, 1.0);
-            rise += 0.105 * run * (PI * u).sin() * go;
+            rise += 0.065 * run * (PI * u).sin() * go;
         }
     }
-    rise -= 0.014 * (2.0 * TAU * q).cos() * (1.0 - run) * go;
-
-    // Lower the pelvis only as much as the most extended supporting leg
-    // requires. IK can then follow the planted target without straightening
-    // into a stiff, full-reach stick at each heel strike.
-    for s in steps.iter().filter(|s| s.stance) {
-        let needed = s.y + (0.839f32.powi(2) - s.z * s.z).max(0.02).sqrt() - (HIP_Y + HIP_DY);
+    rise -= 0.010 * (2.0 * cycle).cos() * (1.0 - run) * go;
+    for &s in &steps {
+        let (dx, dz) = leg_plane(s);
+        let horizontal = dx * dx + dz * dz;
+        let needed = s.y + (LEG_REACH * LEG_REACH - horizontal).max(0.01).sqrt() - (HIP_Y + HIP_DY);
         rise = rise.min(needed);
     }
-    rise = rise.max(-0.34);
+    rise = rise.max(-0.20);
     let hip_y = HIP_Y + HIP_DY + rise;
-    let leg = |s: Step| leg_to(s.y - hip_y, s.z, s.pitch, yaw);
-    let legs = [leg(steps[0]), leg(steps[1])];
+    let leg = |s: Step, side: f32| {
+        let (dx, dz) = leg_plane(s);
+        leg_to_offset(dx, s.y - hip_y, dz, s.pitch, yaw, side)
+    };
+    let legs = [leg(steps[0], 1.0), leg(steps[1], -1.0)];
 
-    // Arms counter-swing in the body's sagittal plane. They spread instead
-    // of swinging like a forward walk during a pure sidestep.
-    let cycle = TAU * q;
-    let amp = mix(0.34, 0.72, run) * go;
+    // Arms counter-swing, with relaxed elbows for a walk and compact, powerful
+    // arm drive for a sprint. The elbow closes as the hand comes forwards
+    // instead of bending most while it is behind the hip.
+    let amp = (mix(0.30, 0.80, run) + 0.055 * sprint) * go;
     let arm = |opposite: f32| {
         let swing = amp * cycle.cos() * opposite * move_z;
-        let elbow = -(0.14 + mix(0.16, 1.12, run) * go + 0.18 * swing.max(0.0));
-        Arm { swing, out: 0.12 + 0.04 * run * go + 0.15 * move_x.abs() * go, elbow }
+        let forward = if amp > 0.001 { (-swing).max(0.0) / amp } else { 0.0 };
+        let elbow = -(0.14 + (mix(0.20, 1.25, run) + 0.10 * sprint + mix(0.06, 0.20, run) * forward) * go);
+        Arm { swing, out: 0.11 + 0.015 * run * go + 0.15 * move_x.abs() * go, elbow }
     };
     let arms = [arm(1.0), arm(-1.0)];
     Angles {
         legs,
         arms,
-        lean: mix(0.03, 0.17, run) * go + 0.02 * sprint * go + 0.012 * breathe,
-        twist: -0.115 * cycle.cos() * go * move_z,
-        tilt: 0.034 * cycle.sin() * go * (1.0 - run) + 0.018 * shift,
-        sway: 0.018 * cycle.sin() * go + 0.012 * shift,
+        lean: (mix(0.035, 0.14, run) + 0.075 * sprint) * go * move_z + 0.012 * breathe,
+        twist: -(0.11 + 0.03 * sprint) * cycle.cos() * go * move_z,
+        tilt: 0.030 * cycle.sin() * go * (1.0 - 0.65 * run) + 0.016 * idle_shift,
+        sway,
         head: -0.018 * (t * 0.8).sin() * (1.0 - go),
         rise,
-        shift: 0.0,
+        shift,
     }
 }
 
@@ -737,18 +779,18 @@ fn build(a: &Angles) -> RigPose {
     }
     for (k, side, (th, sh, ft)) in [(0usize, 1.0f32, (THIGH_L, SHIN_L, FOOT_L)), (1, -1.0, (THIGH_R, SHIN_R, FOOT_R))] {
         let leg = &a.legs[k];
-        // Undo pelvis rotation at the hip so a planted foot does not orbit
-        // with the torso. The leg bends in the direction of travel; the foot
-        // itself still points the way the body faces during a backwards or
-        // sideways step.
-        parts[th] = parts[PELVIS] * at(side * HIP_X, HIP_DY, 0.0) * ry(-a.twist) * rz(-a.tilt + side * leg.out) * ry(leg.yaw) * rx(leg.hip);
+        // The pelvis rolls and twists over this root-aligned lower-body mount.
+        // Starting the IK chain from the already rotated pelvis made a stance
+        // foot orbit with it. The overlapping hip meshes still deform visually
+        // with the pelvis, while the joint itself can counter-rotate exactly.
+        let hips = at(a.sway, HIP_Y + a.rise, a.shift);
+        parts[th] = hips * at(side * HIP_X, HIP_DY, 0.0) * ry(leg.yaw) * rz(side * leg.out) * rx(leg.hip);
         parts[sh] = parts[th] * at(0.0, -THIGH, 0.0) * rx(leg.knee);
-        // Cancel the complete stepped-leg orientation before applying the
-        // desired body-facing foot pitch. Ry(yaw) and Ry(-yaw) do NOT cancel
-        // across a bent Rx hip/knee chain; treating them as neighbours makes
-        // backward and sideways feet roll onto their edges.
+        // Cancel the complete leg orientation before applying the desired
+        // body-facing foot pitch. This includes both out-spread and stepping
+        // yaw, in their actual (non-commuting) order.
         let bend = leg.hip + leg.knee;
-        let foot_rotation = rx(-bend) * ry(-leg.yaw) * rx(bend + leg.ankle);
+        let foot_rotation = rx(-bend) * rz(-side * leg.out) * ry(-leg.yaw) * rx(bend + leg.ankle);
         parts[ft] = parts[sh] * at(0.0, -SHIN, 0.0) * foot_rotation;
     }
     RigPose { parts }
@@ -1253,6 +1295,7 @@ mod tests {
         for speed in [1.6, 4.5, 7.0] {
             let mut lowest = f32::MAX;
             let mut highest = f32::MIN;
+            let mut highest_flight: f32 = f32::MIN;
             let mut ahead = (f32::MAX, f32::MIN);
             for k in 0..64 {
                 let m = Motion { phase: k as f64 * std::f64::consts::TAU / 64.0, speed, ..standing() };
@@ -1263,8 +1306,10 @@ mod tests {
                     // toe-off, without forcing the swing foot down.
                     assert!(rig.sole_low().abs() < 1e-3, "{speed} m/s, phase {k}: soles at {}", rig.sole_low());
                 } else {
-                    // A run has two genuine flight windows per cycle.
-                    assert!(rig.sole_low() > 0.015, "{speed} m/s, phase {k}: both soles should be airborne, got {}", rig.sole_low());
+                    // Toe-off and touchdown are continuous with the ground.
+                    // Between them both soles must clear it by a useful amount.
+                    assert!(rig.sole_low() > -1e-3, "{speed} m/s, phase {k}: a flight foot penetrates the ground: {}", rig.sole_low());
+                    highest_flight = highest_flight.max(rig.sole_low());
                 }
                 let ankle = point(&rig, FOOT_L, Vec3::ZERO);
                 lowest = lowest.min(ankle.y);
@@ -1272,6 +1317,9 @@ mod tests {
                 ahead = (ahead.0.min(ankle.z), ahead.1.max(ankle.z));
             }
             // The foot lifts through the swing and travels fore and aft.
+            if speed > 2.0 {
+                assert!(highest_flight > 0.03, "{speed} m/s: run has no genuine flight arc ({highest_flight:.3})");
+            }
             assert!(highest - lowest > 0.06, "{speed} m/s: foot lift {:.3}", highest - lowest);
             assert!(ahead.1 - ahead.0 > 0.4, "{speed} m/s: foot travel {:.3}", ahead.1 - ahead.0);
         }
@@ -1295,6 +1343,78 @@ mod tests {
             let swept_in_body_frame = a.z - b.z;
             let moved_over_ground = speed as f32 * seconds;
             assert!((swept_in_body_frame - moved_over_ground).abs() < 1e-5, "{speed} m/s: stance sweep {swept_in_body_frame} vs body travel {moved_over_ground}");
+        }
+    }
+
+    #[test]
+    fn swing_joins_stance_without_a_velocity_snap() {
+        for duty in [0.62, 0.34, 0.24] {
+            let travel = 2.0 * duty * 1.2;
+            let e = 0.0001;
+            // Both ends of the swing have the planted foot's backwards
+            // velocity, rather than stopping dead and starting again.
+            for touchdown in [false, true] {
+                let (a, b, c) = if touchdown {
+                    (gait_step(1.0 - e, duty, travel, 0.16, 1.0), gait_step(1.0, duty, travel, 0.16, 1.0), gait_step(e, duty, travel, 0.16, 1.0))
+                } else {
+                    (gait_step(duty - e, duty, travel, 0.16, 1.0), gait_step(duty, duty, travel, 0.16, 1.0), gait_step(duty + e, duty, travel, 0.16, 1.0))
+                };
+                let before = (b.z - a.z) / e;
+                let after = (c.z - b.z) / e;
+                let planted = -travel / duty;
+                assert!((before - planted).abs() < 0.03 && (after - planted).abs() < 0.03, "duty {duty}, touchdown {touchdown}: {before} / {after}, expected {planted}");
+            }
+        }
+    }
+
+    #[test]
+    fn weight_transfer_does_not_drag_planted_feet() {
+        for speed in [1.6, 4.5, 7.0] {
+            let duty = crate::character::gait_duty(speed) as f32;
+            let stride = crate::character::stride_len(speed) as f32;
+            let travel = 2.0 * duty * stride;
+            let (q0, q1) = (duty * 0.35, duty * 0.65);
+            for (forward, side) in [(speed, 0.0), (-speed, 0.0), (0.0, speed), (0.0, -speed)] {
+                let direction = Vec3::new(side as f32 / speed as f32, 0.0, forward as f32 / speed as f32);
+                let across = Vec3::new(direction.z, 0.0, -direction.x);
+                let frame = |q| {
+                    pose(&Motion { phase: q as f64 * std::f64::consts::TAU, speed, forward, side, ..standing() })
+                };
+                let (a, b) = (frame(q0), frame(q1));
+                let a0 = point(&a, FOOT_L, Vec3::ZERO);
+                let a1 = point(&b, FOOT_L, Vec3::ZERO);
+                let swept = (a0 - a1).dot(direction);
+                let wanted = travel * (q1 - q0) / duty;
+                assert!((swept - wanted).abs() < 2e-4, "{forward}/{side} m/s: planted sweep {swept}, wanted {wanted}");
+                assert!(((a0 - a1).dot(across)).abs() < 2e-4, "{forward}/{side} m/s: the stance foot was dragged sideways");
+            }
+        }
+    }
+
+    #[test]
+    fn pelvis_motion_is_compact_and_continuous() {
+        for speed in [1.6, 4.5, 7.0] {
+            let mut low = f32::MAX;
+            let mut high = f32::MIN;
+            let mut greatest_step: f32 = 0.0;
+            let mut smallest_knee = f32::MAX;
+            let mut previous: Option<f32> = None;
+            for k in 0..=256 {
+                let phase = k as f64 * std::f64::consts::TAU / 256.0;
+                let m = Motion { phase, speed, ..standing() };
+                let y = point(&pose(&m), PELVIS, Vec3::ZERO).y;
+                low = low.min(y);
+                high = high.max(y);
+                if let Some(old) = previous {
+                    greatest_step = greatest_step.max((y - old).abs());
+                }
+                previous = Some(y);
+                let a = locomotion(&m);
+                smallest_knee = smallest_knee.min(a.legs[0].knee).min(a.legs[1].knee);
+            }
+            assert!(high - low < 0.14, "{speed} m/s: pelvis bounces {:.3} m", high - low);
+            assert!(greatest_step < 0.02, "{speed} m/s: pelvis jumps {greatest_step:.3} m between frames");
+            assert!(smallest_knee > 0.08, "{speed} m/s: knee locks (minimum {smallest_knee:.3} rad)");
         }
     }
 
@@ -1401,7 +1521,7 @@ mod tests {
         let crown = |m: &Motion| point(&pose(m), HAIR, Vec3::new(0.0, 0.301, -0.01));
         let falling = crown(&Motion { air: 1.0, fall: 1.0, ..standing() });
         assert!(falling.z > 0.5, "head out in front: {falling:?}");
-        assert!(falling.y < 1.3, "body down from standing height: {falling:?}");
+        assert!(falling.y < crown(&standing()).y - 0.45, "body down from standing height: {falling:?}");
         let hanging = crown(&Motion { air: 1.0, chute: 1.0, ..standing() });
         assert!(hanging.y > 1.5, "upright under canopy: {hanging:?}");
         assert!(hanging.z.abs() < 0.35, "and not tipped far: {hanging:?}");

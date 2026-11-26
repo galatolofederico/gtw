@@ -53,10 +53,14 @@ pub fn stride_len(speed: f64) -> f64 {
 
 /// Fraction of a gait cycle spent on one foot (or both during walking's
 /// double support). Running's duty factor below 0.5 creates two flight arcs.
+/// A sprint has shorter, quicker contacts rather than simply stretching a
+/// jog's strides until the legs cannot reach the ground.
 pub(crate) fn gait_duty(speed: f64) -> f64 {
     let k = ((speed.max(0.0) - 1.9) / (4.5 - 1.9)).clamp(0.0, 1.0);
     let run = k * k * (3.0 - 2.0 * k);
-    0.62 + (0.38 - 0.62) * run
+    let sprint = ((speed.max(0.0) - 4.8) / (7.0 - 4.8)).clamp(0.0, 1.0);
+    let sprint = sprint * sprint * (3.0 - 2.0 * sprint);
+    (0.62 + (0.34 - 0.62) * run) * (1.0 - sprint) + 0.24 * sprint
 }
 
 /// Is a foot down at this point in the cycle? The left foot lands at zero
