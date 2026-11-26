@@ -119,21 +119,23 @@ fn crumple_body(p: vec3f, amt: f32) -> vec3f {
       mirror = fs.mirror;
     }
   } else {
-    // Vehicle: m = 0 paint, 0.25 headlight, 0.5 glass, 0.75 tail light, 1 trim / tyre.
+    // Vehicle: m = 0 paint, 0.25 headlight, 0.5 glass, 0.75 tail light,
+    // 0.88 chrome (rims, bumpers, handles), 1 trim / tyre.
     let paint = step(m, 0.1);
     let glass = step(0.4, m) * step(m, 0.6);
     let head = step(0.15, m) * step(m, 0.35);
     let tail = step(0.65, m) * step(m, 0.85);
+    let chrome = step(0.86, m) * step(m, 0.95);
     // The player's car puts its brake pedal in ext.z: the tail lights flare.
     let brake = clamp(in.ext.z, 0.0, 1.0);
     var albedo = mix(in.col.rgb, in.tint.rgb, paint);
     let R = reflect(V, N);
     let ndv = max(dot(-V, N), 0.0);
-    let f0 = paint * 0.05 + glass * 0.08 + head * 0.08;
-    let fres = f0 + (1.0 - f0) * pow(1.0 - ndv, 5.0) * (paint * 0.6 + glass + head * 0.5);
+    let f0 = paint * 0.05 + glass * 0.08 + head * 0.08 + chrome * 0.55;
+    let fres = f0 + (1.0 - f0) * pow(1.0 - ndv, 5.0) * (paint * 0.6 + glass + head * 0.5 + chrome);
     let Hh = normalize(G.sun_dir.xyz - V);
-    let spec = pow(max(dot(N, Hh), 0.0), 220.0) * (paint + glass) * 2.5 * sh;
-    c = shade(in.P, N, albedo * (1.0 - glass * 0.5));
+    let spec = pow(max(dot(N, Hh), 0.0), 220.0) * (paint + glass + chrome) * 2.5 * sh;
+    c = shade(in.P, N, albedo * (1.0 - glass * 0.5 - chrome * 0.5));
     c += sky_lut(normalize(R + l.upn * 0.12)) * fres + l.sun * spec * 0.3;
     // Lights come on at dusk, independent of how bright the sun still is.
     let night = 1.0 - smoothstep(-0.05, 0.12, dot(l.upn, G.sun_dir.xyz));

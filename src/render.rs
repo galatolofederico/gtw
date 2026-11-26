@@ -829,7 +829,7 @@ pub fn specialise(src: &str, kind: u32) -> String {
 /// Instanced meshes that stand on the street (traffic, the player's cars and
 /// the avatar): drawn in view after the road ribbons, not before the terrain.
 fn on_street(mesh: u32) -> bool {
-    mesh < crate::cars::N_MODELS as u32 || (crate::avatar::BASE..crate::cars::PLAYER_BASE + 2 * crate::cars::N_MODELS as u32).contains(&mesh)
+    mesh < crate::cars::N_MODELS as u32 || (crate::avatar::BASE..crate::cars::FAR_BASE + crate::cars::N_MODELS as u32).contains(&mesh)
 }
 
 /// A geometry pipeline (see the modes in `Renderer::new`).

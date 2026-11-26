@@ -8,273 +8,7 @@ use glam::Vec3;
 pub const N_MODELS: usize = 8;
 pub const CAR_LEN: [f32; N_MODELS] = [4.7, 4.0, 4.7, 5.4, 5.2, 4.4, 11.5, 7.6];
 
-#[derive(Default)]
-struct MB {
-    v: Vec<MeshVertex>,
-    i: Vec<u32>,
-}
-impl MB {
-    fn poly(&mut self, p: &[Vec3], col: [f32; 4]) {
-        let mut n = Vec3::ZERO;
-        for k in 1..p.len() - 1 {
-            n += (p[k] - p[0]).cross(p[k + 1] - p[0]);
-        }
-        let n = n.normalize_or_zero();
-        let b = self.v.len() as u32;
-        for q in p {
-            self.v.push(MeshVertex { pos: (*q).into(), nrm: n.into(), col });
-        }
-        for k in 1..p.len() as u32 - 1 {
-            self.i.extend([b, b + k, b + k + 1]);
-        }
-    }
-    fn cuboid(&mut self, lo: Vec3, hi: Vec3, col: [f32; 4]) {
-        let p = |x: bool, y: bool, z: bool| Vec3::new(if x { hi.x } else { lo.x }, if y { hi.y } else { lo.y }, if z { hi.z } else { lo.z });
-        self.poly(&[p(false, false, true), p(true, false, true), p(true, true, true), p(false, true, true)], col);
-        self.poly(&[p(true, false, false), p(false, false, false), p(false, true, false), p(true, true, false)], col);
-        self.poly(&[p(true, false, true), p(true, false, false), p(true, true, false), p(true, true, true)], col);
-        self.poly(&[p(false, false, false), p(false, false, true), p(false, true, true), p(false, true, false)], col);
-        self.poly(&[p(false, true, true), p(true, true, true), p(true, true, false), p(false, true, false)], col);
-        self.poly(&[p(false, false, false), p(true, false, false), p(true, false, true), p(false, false, true)], col);
-    }
-    /// Average normals across faces that meet at a shallow angle, so panels
-    /// read as curved sheet metal while creases stay crisp.
-    fn smooth(&mut self, cos_limit: f32) {
-        let mut map: std::collections::HashMap<[i32; 3], Vec<usize>> = std::collections::HashMap::new();
-        for (k, v) in self.v.iter().enumerate() {
-            map.entry([(v.pos[0] * 500.0).round() as i32, (v.pos[1] * 500.0).round() as i32, (v.pos[2] * 500.0).round() as i32]).or_default().push(k);
-        }
-        let orig: Vec<Vec3> = self.v.iter().map(|v| Vec3::from(v.nrm)).collect();
-        for group in map.values() {
-            for &a in group {
-                let mut n = Vec3::ZERO;
-                for &b in group {
-                    if orig[a].dot(orig[b]) > cos_limit && (self.v[a].col[3] - self.v[b].col[3]).abs() < 0.1 {
-                        n += orig[b];
-                    }
-                }
-                self.v[a].nrm = n.normalize_or_zero().into();
-            }
-        }
-    }
-}
-
-struct Spec {
-    len: f32,
-    w: f32,
-    h: f32,
-    clear: f32,
-    belt: f32,
-    hood: f32,
-    deck: f32,
-    hood_end: f32,
-    roof0: f32,
-    roof1: f32,
-    deck0: f32,
-    wheel_r: f32,
-    axles: &'static [f32],
-    inset: f32,
-    glass_to: f32,
-    bed: bool,
-    flat_front: bool,
-    cargo: bool,
-}
-
-fn lerp_knots(k: &[(f32, f32)], f: f32) -> f32 {
-    for w in k.windows(2) {
-        if f <= w[1].0 {
-            let t = ((f - w[0].0) / (w[1].0 - w[0].0).max(1e-5)).clamp(0.0, 1.0);
-            return w[0].1 + (w[1].1 - w[0].1) * t;
-        }
-    }
-    k[k.len() - 1].1
-}
-
-fn vehicle_body(s: &Spec) -> MB {
-    const PAINT: f32 = 0.0;
-    let paint = [1.0, 1.0, 1.0, PAINT];
-    let glass = [0.02, 0.03, 0.04, 0.5];
-    let trim = [0.025, 0.025, 0.028, 1.0];
-    let mut m = MB::default();
-    let top = [(0.0, s.hood - 0.14), (0.04, s.hood - 0.03), (s.hood_end, s.hood + 0.04), (s.roof0, s.h), (s.roof1, s.h - 0.02), (s.deck0, s.deck), (0.97f32.max(s.deck0), s.deck - 0.03), (1.0, s.deck - 0.1)];
-    let wide = [(0.0, s.w * 0.80), (0.035, s.w * 0.94), (0.12, s.w), (0.9, s.w), (0.97, s.w * 0.96), (1.0, s.w * 0.84)];
-    let mut fs = vec![0.0, 0.035, 0.12, s.hood_end, s.roof0, (s.roof0 + s.roof1) * 0.5, s.roof1, s.deck0, 0.9, 0.97, 1.0];
-    fs.sort_by(|a, b| a.total_cmp(b));
-    fs.dedup_by(|a, b| (*a - *b).abs() < 0.008);
-    // Half cross-section at each station, bottom to roof centre.
-    let ring = |f: f32| -> [Vec3; 5] {
-        let z = (f - 0.5) * s.len;
-        let wb = lerp_knots(&wide, f);
-        let t = lerp_knots(&top, f);
-        let cabin = f > s.hood_end + 0.001 && f < s.deck0 - 0.001;
-        let ys = (s.belt + 0.06 * (f - 0.5)).min(t - 0.05);
-        let lift = if f < 0.02 || f > 0.98 { 0.1 } else { 0.0 };
-        let (r3, r4) = if cabin { (Vec3::new(wb - s.inset, t - 0.05, z), Vec3::new((wb - s.inset) * 0.62, t, z)) } else { (Vec3::new(wb * 0.9, t - 0.01, z), Vec3::new(wb * 0.45, t + 0.015, z)) };
-        [Vec3::new(wb * 0.84, s.clear + lift, z), Vec3::new(wb, s.clear + 0.15 + lift, z), Vec3::new(wb, ys, z), r3, r4]
-    };
-    let mir = |p: Vec3| Vec3::new(-p.x, p.y, p.z);
-    for w in fs.windows(2) {
-        let (a, b) = (ring(w[0]), ring(w[1]));
-        let mid = (w[0] + w[1]) * 0.5;
-        let cabin = mid > s.hood_end && mid < s.deck0;
-        let screen = (mid > s.hood_end && mid < s.roof0) || (mid > s.roof1 && mid < s.deck0);
-        let bed = s.bed && mid > s.deck0;
-        for j in 0..4 {
-            let col = match j {
-                0 => trim,
-                2 if cabin && mid < s.glass_to => glass,
-                3 if screen && mid < s.glass_to.max(s.roof0) => glass,
-                3 if bed => trim,
-                _ => paint,
-            };
-            m.poly(&[a[j], b[j], b[j + 1], a[j + 1]], col);
-            m.poly(&[mir(a[j + 1]), mir(b[j + 1]), mir(b[j]), mir(a[j])], col);
-        }
-        let col = if screen && mid < s.glass_to.max(s.roof0) { glass } else if bed { trim } else { paint };
-        m.poly(&[a[4], b[4], mir(b[4]), mir(a[4])], col);
-        m.poly(&[mir(a[0]), mir(b[0]), b[0], a[0]], trim);
-    }
-    // Nose and tail.
-    for (f, dir) in [(0.0f32, -1.0f32), (1.0, 1.0)] {
-        let r = ring(f);
-        let mut loop_: Vec<Vec3> = r.to_vec();
-        loop_.extend(r.iter().rev().map(|p| mir(*p)));
-        if dir > 0.0 {
-            loop_.reverse();
-        }
-        m.poly(&loop_, paint);
-        let z = r[0].z + dir * 0.012;
-        let (y0, y1) = (r[2].y - 0.2, r[2].y - 0.04);
-        let q = |x0: f32, x1: f32, ya: f32, yb: f32, col: [f32; 4], m: &mut MB| {
-            let p = [Vec3::new(x0, ya, z), Vec3::new(x1, ya, z), Vec3::new(x1, yb, z), Vec3::new(x0, yb, z)];
-            m.poly(&if dir < 0.0 { [p[1], p[0], p[3], p[2]] } else { p }, col);
-        };
-        let wx = r[1].x;
-        if dir < 0.0 {
-            q(wx * 0.42, wx * 0.86, y0, y1, [0.9, 0.9, 0.82, 0.25], &mut m);
-            q(-wx * 0.86, -wx * 0.42, y0, y1, [0.9, 0.9, 0.82, 0.25], &mut m);
-            q(-wx * 0.36, wx * 0.36, s.clear + 0.22, y1 - 0.03, trim, &mut m);
-            if s.flat_front {
-                q(-wx * 0.9, wx * 0.9, s.belt + 0.08, s.h - 0.3, glass, &mut m);
-            }
-        } else {
-            q(wx * 0.5, wx * 0.9, y0, y1, [0.45, 0.01, 0.01, 0.75], &mut m);
-            q(-wx * 0.9, -wx * 0.5, y0, y1, [0.45, 0.01, 0.01, 0.75], &mut m);
-            if s.flat_front {
-                q(-wx * 0.8, wx * 0.8, s.belt + 0.1, s.h - 0.35, glass, &mut m);
-            }
-        }
-        q(-wx * 0.96, wx * 0.96, s.clear + 0.1, s.clear + 0.3, trim, &mut m);
-    }
-    m.smooth(0.82);
-    // The dark arches over the wheels belong to the body.
-    add_arches(s, &mut m);
-    // Door mirrors.
-    if !s.flat_front {
-        let z = (s.roof0 - 0.5) * s.len - 0.1;
-        for side in [-1.0f32, 1.0] {
-            let x = side * (s.w + 0.07);
-            m.cuboid(Vec3::new(x - 0.07, s.belt + 0.02, z - 0.05), Vec3::new(x + 0.07, s.belt + 0.14, z + 0.05), trim);
-        }
-    }
-    if s.cargo {
-        let (z0, z1) = ((s.deck0 + 0.015 - 0.5) * s.len, 0.495 * s.len);
-        m.cuboid(Vec3::new(-s.w - 0.05, s.deck - 0.05, z0), Vec3::new(s.w + 0.05, s.deck + 2.1, z1), [0.62, 0.62, 0.6, 1.0]);
-    }
-    m
-}
-
-/// The dark arch over each wheel, part of the body.
-fn add_arches(s: &Spec, m: &mut MB) {
-    const N: usize = 12;
-    for &af in s.axles {
-        let z = (af - 0.5) * s.len;
-        let wb = lerp_knots(&wide_knots(s.w), af);
-        let pt = |k: usize, x: f32, r: f32| {
-            let a = k as f32 / N as f32 * std::f32::consts::TAU;
-            Vec3::new(x, s.wheel_r + a.sin() * r, z + a.cos() * r)
-        };
-        for side in [-1.0f32, 1.0] {
-            let xa = side * (wb + 0.006);
-            let arch = s.wheel_r * 1.24;
-            for k in 0..N / 2 {
-                let tri = [Vec3::new(xa, s.wheel_r, z), pt(k, xa, arch), pt(k + 1, xa, arch)];
-                m.poly(&if side > 0.0 { tri } else { [tri[0], tri[2], tri[1]] }, [0.008, 0.008, 0.008, 1.0]);
-            }
-        }
-    }
-}
-
-/// The wheels, appended after the body has been smoothed.
-fn add_wheels(s: &Spec, m: &mut MB) {
-    let tyre = [0.012, 0.012, 0.013, 1.0];
-    for &af in s.axles {
-        let z = (af - 0.5) * s.len;
-        let wb = lerp_knots(&wide_knots(s.w), af);
-        for side in [-1.0f32, 1.0] {
-            let (x0, x1) = (side * (wb - 0.2), side * (wb + 0.025));
-            const N: usize = 12;
-            let pt = |k: usize, x: f32, r: f32| {
-                let a = k as f32 / N as f32 * std::f32::consts::TAU;
-                Vec3::new(x, s.wheel_r + a.sin() * r, z + a.cos() * r)
-            };
-            for k in 0..N {
-                let (a, b) = (k, (k + 1) % N);
-                let quad = [pt(a, x0, s.wheel_r), pt(b, x0, s.wheel_r), pt(b, x1, s.wheel_r), pt(a, x1, s.wheel_r)];
-                m.poly(&if side > 0.0 { quad } else { [quad[1], quad[0], quad[3], quad[2]] }, tyre);
-                let hub = s.wheel_r * 0.62;
-                let ring = [pt(a, x1, s.wheel_r), pt(b, x1, s.wheel_r), pt(b, x1, hub), pt(a, x1, hub)];
-                m.poly(&if side > 0.0 { ring } else { [ring[1], ring[0], ring[3], ring[2]] }, tyre);
-                let disc = [Vec3::new(x1 - side * 0.02, s.wheel_r, z), pt(a, x1, hub), pt(b, x1, hub)];
-                m.poly(&if side > 0.0 { [disc[0], disc[1], disc[2]] } else { [disc[0], disc[2], disc[1]] }, [0.33, 0.34, 0.35, 1.0]);
-            }
-        }
-    }
-}
-
-/// The body's width knots as `vehicle_body` reads them (half-width fractions).
-fn wide_knots(w: f32) -> [(f32, f32); 6] {
-    [(0.0, w * 0.80), (0.035, w * 0.94), (0.12, w), (0.9, w), (0.97, w * 0.96), (1.0, w * 0.84)]
-}
-
-/// A traffic model: body and wheels in one mesh, as it has always been.
-fn vehicle(s: &Spec) -> (Vec<MeshVertex>, Vec<u32>) {
-    let mut m = vehicle_body(s);
-    add_wheels(s, &mut m);
-    (m.v, m.i)
-}
-
-/// One wheel centred on its axle, its axis along x, for the player car's
-/// separately drawn wheels.
-fn wheel_mesh(s: &Spec) -> (Vec<MeshVertex>, Vec<u32>) {
-    let tyre = [0.012, 0.012, 0.013, 1.0];
-    let hub_col = [0.33, 0.34, 0.35, 1.0];
-    let mut m = MB::default();
-    const N: usize = 14;
-    let hw = 0.1125;
-    let hub = s.wheel_r * 0.62;
-    // The origin is the axle: the wheel is spun about it, so its rim is
-    // centred here rather than a wheel radius above it.
-    let pt = |k: usize, x: f32, r: f32| {
-        let a = k as f32 / N as f32 * std::f32::consts::TAU;
-        Vec3::new(x, a.sin() * r, a.cos() * r)
-    };
-    for k in 0..N {
-        let (a, b) = (k, (k + 1) % N);
-        // Tread, both sidewalls, and a hub disc on each face.
-        let tread = [pt(a, -hw, s.wheel_r), pt(b, -hw, s.wheel_r), pt(b, hw, s.wheel_r), pt(a, hw, s.wheel_r)];
-        m.poly(&tread, tyre);
-        for side in [-1.0f32, 1.0] {
-            let x = side * hw;
-            let wall = [pt(a, x, s.wheel_r), pt(b, x, s.wheel_r), pt(b, x, hub), pt(a, x, hub)];
-            m.poly(&if side > 0.0 { wall } else { [wall[1], wall[0], wall[3], wall[2]] }, tyre);
-            let centre = Vec3::new(x - side * 0.015, 0.0, 0.0);
-            let disc = [centre, pt(a, x - side * 0.015, hub), pt(b, x - side * 0.015, hub)];
-            m.poly(&if side > 0.0 { disc } else { [disc[0], disc[2], disc[1]] }, hub_col);
-        }
-    }
-    (m.v, m.i)
-}
+use crate::carmesh::{self, MB};
 
 /// A player car's meshes and the local positions of its four wheels.
 pub struct PlayerModel {
@@ -303,60 +37,43 @@ impl PlayerModel {
     }
 }
 
-/// The eight player cars: a body mesh without wheels, one wheel mesh, and the
-/// four wheel positions. The traffic meshes (`build_models`) are unchanged.
+fn wheel_spots(s: &carmesh::Spec) -> [[f32; 3]; 4] {
+    let (front, rear) = (s.axles[0], *s.axles.last().unwrap());
+    let (f, r) = (s.wheel_x(front), s.wheel_x(rear));
+    let wz = |af: f32| (af - 0.5) * s.len;
+    let (zf, zr) = (wz(front), wz(rear));
+    [[-f, s.wheel_r, zf], [f, s.wheel_r, zf], [-r, s.wheel_r, zr], [r, s.wheel_r, zr]]
+}
+
+/// The eight player cars: a body mesh without wheels, one wheel mesh (a rim
+/// on both faces, as it is mounted on either side), and the four wheel
+/// positions. The traffic meshes (`build_models`) are the same bodies with
+/// their wheels built in.
 pub fn player_models() -> Vec<PlayerModel> {
-    specs()
+    carmesh::specs()
         .iter()
         .map(|s| {
-            let front = s.axles[0];
-            let rear = *s.axles.last().unwrap();
-            let wx = |af: f32| lerp_knots(&wide_knots(s.w), af) - 0.0875;
-            let wz = |af: f32| (af - 0.5) * s.len;
-            let (r, f) = (wx(rear), wx(front));
-            let (zr, zf) = (wz(rear), wz(front));
-            let b = vehicle_body(s);
-            PlayerModel {
-                body: (b.v, b.i),
-                wheel: wheel_mesh(s),
-                wheels: [[-f, s.wheel_r, zf], [f, s.wheel_r, zf], [-r, s.wheel_r, zr], [r, s.wheel_r, zr]],
-                wheel_r: s.wheel_r,
-                len: s.len,
-                width: 2.0 * (s.w + 0.05),
-            }
+            let b = carmesh::body(s, false);
+            let w = carmesh::wheel(s, [true, true], false);
+            PlayerModel { body: (b.v, b.i), wheel: (w.v, w.i), wheels: wheel_spots(s), wheel_r: s.wheel_r, len: s.len, width: 2.0 * (s.w + 0.05) }
         })
         .collect()
 }
 
 /// The geometry of one player car model, for the physics and the wheels.
 pub fn player_geom(model: u8) -> CarGeom {
-    let s = &specs()[model.min(N_MODELS as u8 - 1) as usize];
-    let front = s.axles[0];
-    let rear = *s.axles.last().unwrap();
-    let wx = |af: f32| lerp_knots(&wide_knots(s.w), af) - 0.0875;
-    let wz = |af: f32| (af - 0.5) * s.len;
-    let (r, f) = (wx(rear), wx(front));
-    let (zr, zf) = (wz(rear), wz(front));
-    CarGeom { wheels: [[-f, s.wheel_r, zf], [f, s.wheel_r, zf], [-r, s.wheel_r, zr], [r, s.wheel_r, zr]], half: [(s.w + 0.05) as f64, s.len as f64 * 0.5] }
-}
-
-/// The eight models' body dimensions, in `CAR_LEN` order.
-fn specs() -> [Spec; N_MODELS] {
-    let base = Spec { len: 4.7, w: 0.91, h: 1.43, clear: 0.2, belt: 0.92, hood: 0.86, deck: 0.95, hood_end: 0.3, roof0: 0.41, roof1: 0.68, deck0: 0.82, wheel_r: 0.33, axles: &[0.185, 0.8], inset: 0.2, glass_to: 2.0, bed: false, flat_front: false, cargo: false };
-    [
-        Spec { ..base },
-        Spec { len: 4.0, w: 0.88, h: 1.47, belt: 0.94, hood: 0.88, deck: 1.0, hood_end: 0.26, roof0: 0.38, roof1: 0.8, deck0: 0.96, axles: &[0.2, 0.82], ..base },
-        Spec { w: 0.96, h: 1.74, clear: 0.27, belt: 1.08, hood: 1.02, deck: 1.14, hood_end: 0.27, roof0: 0.37, roof1: 0.9, deck0: 0.985, wheel_r: 0.38, inset: 0.16, ..base },
-        Spec { len: 5.4, w: 0.98, h: 1.8, clear: 0.3, belt: 1.12, hood: 1.08, deck: 1.16, hood_end: 0.27, roof0: 0.35, roof1: 0.55, deck0: 0.6, wheel_r: 0.4, axles: &[0.17, 0.78], inset: 0.14, bed: true, ..base },
-        Spec { len: 5.2, w: 0.98, h: 2.0, clear: 0.24, belt: 1.12, hood: 1.05, deck: 1.96, hood_end: 0.1, roof0: 0.2, roof1: 0.98, deck0: 0.99, wheel_r: 0.36, axles: &[0.17, 0.78], inset: 0.1, glass_to: 0.4, ..base },
-        Spec { len: 4.4, w: 0.96, h: 1.2, clear: 0.13, belt: 0.8, hood: 0.72, deck: 0.92, hood_end: 0.36, roof0: 0.48, roof1: 0.62, deck0: 0.9, wheel_r: 0.34, axles: &[0.19, 0.8], inset: 0.26, ..base },
-        Spec { len: 11.5, w: 1.26, h: 3.1, clear: 0.34, belt: 1.5, hood: 1.5, deck: 3.05, hood_end: 0.006, roof0: 0.02, roof1: 0.985, deck0: 0.995, wheel_r: 0.5, axles: &[0.16, 0.74, 0.8], inset: 0.06, flat_front: true, ..base },
-        Spec { len: 7.6, w: 1.12, h: 2.5, clear: 0.4, belt: 1.5, hood: 1.42, deck: 1.05, hood_end: 0.05, roof0: 0.1, roof1: 0.25, deck0: 0.27, wheel_r: 0.46, axles: &[0.12, 0.75, 0.82], inset: 0.08, cargo: true, ..base },
-    ]
+    let s = &carmesh::specs()[model.min(N_MODELS as u8 - 1) as usize];
+    CarGeom { wheels: wheel_spots(s), half: [(s.w + 0.05) as f64, s.len as f64 * 0.5] }
 }
 
 pub fn build_models() -> Vec<(Vec<MeshVertex>, Vec<u32>)> {
-    specs().iter().map(vehicle).collect()
+    carmesh::specs().iter().map(|s| carmesh::traffic(s, false)).map(|m| (m.v, m.i)).collect()
+}
+
+/// The traffic models with fewer stations, plain wheels and no small parts,
+/// for cars beyond `FAR_LOD` metres.
+pub fn build_far_models() -> Vec<(Vec<MeshVertex>, Vec<u32>)> {
+    carmesh::specs().iter().map(|s| carmesh::traffic(s, true)).map(|m| (m.v, m.i)).collect()
 }
 
 /// A lumpy boulder for terrain debris.
@@ -396,6 +113,15 @@ pub const N_REBAR: u32 = 2;
 /// The player car meshes follow the avatar in the instanced-solid library:
 /// each model's body then its wheel, in model order.
 pub const PLAYER_BASE: u32 = crate::avatar::BASE + crate::avatar::PARTS as u32;
+/// The far traffic models follow the player cars.
+pub const FAR_BASE: u32 = PLAYER_BASE + 2 * N_MODELS as u32;
+/// Beyond this a traffic or parked car is drawn with its far model.
+pub const FAR_LOD: f64 = 90.0;
+/// The mesh id of a traffic model, near or far.
+pub fn traffic_mesh(model: u8, d2: f64) -> u32 {
+    let m = model.min(N_MODELS as u8 - 1) as u32;
+    if d2 > FAR_LOD * FAR_LOD { FAR_BASE + m } else { m }
+}
 /// The mesh id of a player car body.
 pub fn player_body_mesh(model: u8) -> u32 {
     PLAYER_BASE + model.min(N_MODELS as u8 - 1) as u32 * 2
@@ -803,6 +529,37 @@ mod tests {
             let hi = v.iter().map(|p| p.pos[2]).fold(f32::MIN, f32::max);
             let lo = v.iter().map(|p| p.pos[2]).fold(f32::MAX, f32::min);
             assert!((hi - lo - CAR_LEN[i]).abs() < 0.3, "model {i} is {:.1} m long", hi - lo);
+        }
+    }
+
+    #[test]
+    fn far_models_are_lighter_and_the_same_size() {
+        let (near, far) = (build_models(), build_far_models());
+        assert_eq!(far.len(), N_MODELS);
+        for (i, ((nv, ni), (fv, fi))) in near.iter().zip(far.iter()).enumerate() {
+            assert!(fi.iter().all(|k| (*k as usize) < fv.len()), "model {i}");
+            assert!(fv.iter().all(|v| v.pos.iter().chain(v.nrm.iter()).all(|f| f.is_finite())), "model {i}");
+            assert!(fi.len() * 3 < ni.len(), "model {i}: far {} vs near {} triangles", fi.len() / 3, ni.len() / 3);
+            let span = |v: &[MeshVertex], a: usize| v.iter().map(|p| p.pos[a]).fold(f32::MIN, f32::max) - v.iter().map(|p| p.pos[a]).fold(f32::MAX, f32::min);
+            for a in 0..3 {
+                assert!((span(nv, a) - span(fv, a)).abs() < 0.12, "model {i} axis {a}");
+            }
+        }
+        assert_eq!(traffic_mesh(3, 10.0), 3);
+        assert_eq!(traffic_mesh(3, (FAR_LOD * 2.0).powi(2)), FAR_BASE + 3);
+    }
+
+    #[test]
+    fn wheels_sit_inside_their_arches() {
+        for (i, s) in crate::carmesh::specs().iter().enumerate() {
+            for &af in s.axles {
+                // The tyre's outer face stays inside the body side, and the
+                // top of the tyre below the top of the arch.
+                let outer = s.wheel_x(af) + s.tyre_w * 0.5;
+                assert!(outer < s.half_width(af), "model {i}: tyre sticks out");
+                assert!(outer > s.half_width(af) - 0.05, "model {i}: tyre tucked too deep");
+            }
+            assert!(s.windows.windows(2).all(|w| w[0].1 < w[1].0), "model {i}: windows overlap");
         }
     }
 
