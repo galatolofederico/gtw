@@ -60,6 +60,13 @@ pub fn player_models() -> Vec<PlayerModel> {
         .collect()
 }
 
+/// The right-hand head and tail lamps of a model, in the body frame (x
+/// right, y up, z back); the left ones mirror them.
+pub fn lamps(model: u8) -> [[f32; 3]; 2] {
+    static LAMPS: std::sync::LazyLock<Vec<[[f32; 3]; 2]>> = std::sync::LazyLock::new(|| carmesh::specs().iter().map(|s| s.lamps()).collect());
+    LAMPS[model.min(N_MODELS as u8 - 1) as usize]
+}
+
 /// The geometry of one player car model, for the physics and the wheels.
 pub fn player_geom(model: u8) -> CarGeom {
     let s = &carmesh::specs()[model.min(N_MODELS as u8 - 1) as usize];

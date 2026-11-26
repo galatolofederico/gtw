@@ -2518,8 +2518,11 @@ fn spot_light(P: vec3f, N: vec3f) -> vec3f {
     let s = G.spot[i];
     if (s.w <= 0.0) { continue; }
     let d = s.xyz - P;
-    let r2 = max(dot(d, d), 100.0);
-    let l = d * inverseSqrt(r2);
+    // The falloff stops growing inside 10 m; the direction is the true one
+    // (a car's lamps light the road from a few metres off).
+    let dd = max(dot(d, d), 1e-4);
+    let r2 = max(dd, 100.0);
+    let l = d * inverseSqrt(dd);
     let ca = dot(-l, dir);
     if (ca <= cmin) { continue; }
     let x = (ca - cmin) / (1.0 - cmin);

@@ -356,6 +356,12 @@ impl Spec {
         }
     }
 
+    /// The right-hand head and tail lamps, on the nose and the tail, in the
+    /// body frame (the left ones mirror them).
+    pub fn lamps(&self) -> [[f32; 3]; 2] {
+        [[self.half_width(0.0) * 0.74, self.lamp_y, -self.len * 0.5 - 0.02], [self.half_width(1.0) * 0.76, self.tail_y, self.len * 0.5 + 0.02]]
+    }
+
     /// The outward x of a wheel's centre: its tyre flush with the body side.
     pub fn wheel_x(&self, af: f32) -> f32 {
         self.half_width(af) - self.tyre_w * 0.5 - 0.012

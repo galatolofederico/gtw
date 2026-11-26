@@ -226,6 +226,7 @@ pub const CAR_ACTIONS: &[Action] = &[
     act("car_handbrake", KeyCode::ShiftLeft),
     act("car_enter_exit", KeyCode::KeyE),
     act("car_horn", KeyCode::KeyB),
+    act("car_lights", KeyCode::KeyL),
 ];
 
 /// Actions available in every context (camera, HUD, pause, screenshots…).

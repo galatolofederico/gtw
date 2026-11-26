@@ -1612,6 +1612,9 @@ struct Game {
     carjack_step: u8,
     /// the eight player car models' wheel positions and sizes
     car_geom: Vec<cars::CarGeom>,
+    /// The driven car's headlights switched by hand (`car_lights`); `None`
+    /// follows the dusk, as the traffic's do.
+    car_lights: Option<bool>,
     /// a menu start asked for on foot rather than in the air
     start_on_foot: bool,
     /// the bindings context the settings screen is editing
@@ -2142,6 +2145,7 @@ impl Game {
             carjack: args.carjack,
             carjack_step: 0,
             car_geom,
+            car_lights: None,
             start_on_foot: false,
             bind_ctx: bind::Context::Flight,
             start_mode: want,
@@ -2401,6 +2405,21 @@ impl Game {
     /// Whether a moving car is close enough to flag down.
     fn traffic_in_reach(&self, radius: f64) -> bool {
         self.world.nearest_traffic_car(self.character.pos, radius).is_some()
+    }
+
+    /// Whether the driven car's headlights are on: as switched, or else from
+    /// dusk to dawn (when `inst.wgsl` lights the traffic's lamps).
+    fn car_lights_on(&self) -> bool {
+        let at = self.vehicle.as_ref().map_or(self.character.pos, |v| v.pos);
+        self.car_lights.unwrap_or_else(|| geo::enu(at).2.dot(self.sun_dir()) < 0.04)
+    }
+
+    /// Switch the driven car's headlights, and say so on the HUD.
+    fn toggle_car_lights(&mut self) {
+        let on = !self.car_lights_on();
+        self.car_lights = Some(on);
+        self.status = if on { t!("ground.lights_on") } else { t!("ground.lights_off") }.into();
+        self.status_until = self.real + 1.5;
     }
 
     /// Sound the car's horn, and say so on the HUD.
@@ -4391,7 +4410,7 @@ impl Game {
             // jumps, Y gets in and R3 swaps the camera. In a car (padmap::
             // CAR_LAYOUT) the left stick steers, A accelerates, X brakes and
             // reverses, RB is the handbrake, Y gets out, R3 swaps the view and
-            // L3 sounds the horn.
+            // L3 sounds the horn and LB switches the headlights.
             use padmap::PadBtn;
             if self.mode == Mode::Drive {
                 self.pad_car_throttle = down.contains(&PadBtn::A);
@@ -4407,6 +4426,9 @@ impl Game {
                 }
                 if pressed.contains(&PadBtn::L3.gilrs()) {
                     self.honk();
+                }
+                if pressed.contains(&PadBtn::LB.gilrs()) {
+                    self.toggle_car_lights();
                 }
             } else {
                 self.pad_car_throttle = false;
@@ -5483,6 +5505,7 @@ impl Game {
             KeyCode::KeyR if self.arcade || self.crashed => self.respawn_here(),
             KeyCode::KeyR => self.arcade_only(t!("game.respawning_in_flight")),
             KeyCode::KeyB if self.mode == Mode::Drive => self.honk(),
+            KeyCode::KeyL if self.mode == Mode::Drive => self.toggle_car_lights(),
             KeyCode::KeyC if self.mode.ground() => self.toggle_ground_view(),
             KeyCode::KeyC => self.next_view(),
             KeyCode::F6 if self.mode == Mode::Fly && !self.crashed => self.toggle_tail_view(),
@@ -7804,9 +7827,16 @@ impl Game {
             self.n_cars = insts.len();
             // The player's car: the one being driven, or the one left behind.
             if car_drawn(self.mode) {
+                let driven = self.mode == Mode::Drive && self.vehicle.is_some();
+                let lit = driven && self.car_lights_on();
                 if let Some(v) = self.vehicle.as_ref().or(self.last_car.as_ref()) {
-                    if let Some(g) = self.car_geom.get(v.model as usize) {
-                        car_instances(cam, v, g, &mut insts);
+                    if let Some(geom) = self.car_geom.get(v.model as usize) {
+                        car_instances(cam, v, geom, lit, &mut insts);
+                    }
+                    if driven {
+                        // The car's beams take over the landing lights' (no aircraft is flown).
+                        g.spot = [[0.0; 4]; 3];
+                        car_lights(cam, v, lit, &mut g, &mut air_lights);
                     }
                 }
             }
@@ -8415,7 +8445,7 @@ impl Game {
                         ("LS".into(), t!("gamepad.steer")),
                         (spec("car_handbrake"), t!("action.car_handbrake")),
                     ],
-                    vec![(spec("car_enter_exit"), t!("ground.leave_car")), (spec("car_horn"), t!("action.car_horn")), (spec("camera"), t!("ground.camera"))],
+                    vec![(spec("car_enter_exit"), t!("ground.leave_car")), (spec("car_horn"), t!("action.car_horn")), (spec("car_lights"), t!("action.car_lights")), (spec("camera"), t!("ground.camera"))],
                 ]
             } else {
                 [
@@ -8428,6 +8458,7 @@ impl Game {
                         (key_of("car_handbrake"), t!("action.car_handbrake")),
                         (key_of("car_enter_exit"), t!("ground.leave_car")),
                         (key_of("car_horn"), t!("action.car_horn")),
+                        (key_of("car_lights"), t!("action.car_lights")),
                         (key_of("camera"), t!("ground.camera")),
                     ],
                 ]
@@ -10189,23 +10220,13 @@ fn inst_rows(m: Mat4) -> [[f32; 4]; 3] {
 /// The player car's body and four wheels, seen from `cam`. The body carries
 /// the damage amount in `ext.w` (negative), which `inst.wgsl` uses to crumple
 /// the panels; the wheels steer and spin.
-fn car_instances(cam: DVec3, v: &vehicle::Vehicle, geom: &cars::CarGeom, out: &mut Vec<(u32, Inst)>) {
-    if !cam.is_finite() || !v.pos.is_finite() {
-        return;
-    }
-    let up = v.pos.normalize();
-    let (e, n, _) = geo::enu(v.pos);
-    let (sin, cos) = v.yaw.sin_cos();
-    let fwd = e * sin + n * cos;
-    let right = fwd.cross(up).normalize_or_zero();
-    if right.length_squared() < 0.5 {
-        return;
-    }
-    let basis = Mat3::from_cols(right.as_vec3(), up.as_vec3(), (-fwd).as_vec3());
-    let rot = basis * Mat3::from_rotation_x(v.pitch) * Mat3::from_rotation_z(v.roll);
-    let o = (v.pos - cam).as_vec3();
+/// `lit`: its headlights are on (`ext.x` 1, else -1: `inst.wgsl` lights the
+/// lenses by that rather than by the dusk, as for the traffic).
+fn car_instances(cam: DVec3, v: &vehicle::Vehicle, geom: &cars::CarGeom, lit: bool, out: &mut Vec<(u32, Inst)>) {
+    let Some((rot, o)) = car_frame(cam, v) else { return };
     let body = Mat4::from_cols(rot.x_axis.extend(0.0), rot.y_axis.extend(0.0), rot.z_axis.extend(0.0), o.extend(1.0));
-    out.push((cars::player_body_mesh(v.model), Inst { m: inst_rows(body), tint: [v.colour[0], v.colour[1], v.colour[2], 0.0], ext: [0.0, 1.0, v.brake.clamp(0.0, 1.0), -v.damage.crumple] }));
+    let lamps = if lit { 1.0 } else { -1.0 };
+    out.push((cars::player_body_mesh(v.model), Inst { m: inst_rows(body), tint: [v.colour[0], v.colour[1], v.colour[2], 0.0], ext: [lamps, 1.0, v.brake.clamp(0.0, 1.0), -v.damage.crumple] }));
     for (i, w) in geom.wheels.iter().enumerate() {
         let local = Vec3::from_array(*w);
         let steer = if i < 2 { -v.steer as f32 * 0.42 } else { 0.0 };
@@ -10213,6 +10234,65 @@ fn car_instances(cam: DVec3, v: &vehicle::Vehicle, geom: &cars::CarGeom, out: &m
         let wp = rot * local;
         let m = Mat4::from_cols(wheel_rot.x_axis.extend(0.0), wheel_rot.y_axis.extend(0.0), wheel_rot.z_axis.extend(0.0), (o + wp).extend(1.0));
         out.push((cars::player_wheel_mesh(v.model), Inst { m: inst_rows(m), tint: [v.colour[0], v.colour[1], v.colour[2], 0.0], ext: [0.0, 1.0, 0.0, 0.0] }));
+    }
+}
+
+/// The player car's body frame (x right, y up, z back, pitched and rolled
+/// with the car) and its position relative to `cam`.
+fn car_frame(cam: DVec3, v: &vehicle::Vehicle) -> Option<(Mat3, Vec3)> {
+    if !cam.is_finite() || !v.pos.is_finite() {
+        return None;
+    }
+    let up = v.pos.normalize();
+    let (e, n, _) = geo::enu(v.pos);
+    let (sin, cos) = v.yaw.sin_cos();
+    let fwd = e * sin + n * cos;
+    let right = fwd.cross(up).normalize_or_zero();
+    if right.length_squared() < 0.5 {
+        return None;
+    }
+    let basis = Mat3::from_cols(right.as_vec3(), up.as_vec3(), (-fwd).as_vec3());
+    Some((basis * Mat3::from_rotation_x(v.pitch) * Mat3::from_rotation_z(v.roll), (v.pos - cam).as_vec3()))
+}
+
+/// Dipped headlights: a real lamp is about 2e4 cd in its hot spot, but low
+/// over the road its light grazes the ground and would hardly show against
+/// the game's bright moonlight (`own_lights` multiplies the landing lights
+/// by 60 for the same reason), so each is set to 1e5 cd (Globals units: cd /
+/// 1e4 / pi), times that 60.
+const CAR_BEAM: f32 = 1.0e5 / 1.0e4 / std::f32::consts::PI * 60.0;
+
+/// The driven car's lamps. With the headlights on, the two beams light the
+/// road ahead (Globals `spot`, common.wgsl `spot_light`), aimed a little
+/// down as dipped beams are, and each lamp shows its glow (lights.wgsl); the
+/// tail lamps glow brighter under braking, and on the brake alone with the
+/// headlights off.
+fn car_lights(cam: DVec3, v: &vehicle::Vehicle, lit: bool, g: &mut render::Globals, out: &mut Vec<airfield::Light>) {
+    let Some((rot, o)) = car_frame(cam, v) else { return };
+    let [head, tail] = cars::lamps(v.model);
+    let fwd = (rot * Vec3::NEG_Z).normalize();
+    let up = (rot * Vec3::Y).normalize();
+    let brake = v.brake.clamp(0.0, 1.0) as f32;
+    let mut push = |at: [f32; 3], inten: f32, col: [u8; 3], dir: Vec3, spread: f32, out: &mut Vec<airfield::Light>| {
+        for sx in [-1.0f32, 1.0] {
+            if out.len() < render::MAX_DYN_LIGHTS {
+                let p = o + rot * Vec3::new(sx * at[0], at[1], at[2]);
+                out.push(airfield::Light { pos: p.into(), inten, dir: dir.into(), spread, col: [col[0], col[1], col[2], 3], fx: [0, 0, 255, 0] });
+            }
+        }
+    };
+    if lit {
+        for (i, sx) in [-1.0f32, 1.0].into_iter().enumerate() {
+            let p = o + rot * Vec3::new(sx * head[0], head[1], head[2]);
+            g.spot[i] = [p.x, p.y, p.z, CAR_BEAM];
+        }
+        let dir = (fwd - up * 0.035).normalize();
+        g.spot[2] = [dir.x, dir.y, dir.z, 22f32.to_radians().cos()];
+        push(head, 60.0, airfield::L_WHITE, fwd, 0.3, out);
+    }
+    let tail_glow = if lit { 12.0 } else { 0.0 } + 40.0 * brake;
+    if tail_glow > 0.0 {
+        push(tail, tail_glow, [255, 20, 12], -fwd, -0.2, out);
     }
 }
 
@@ -10319,11 +10399,35 @@ mod cli_tests {
         v.pitch = -0.03;
         let g = cars::player_geom(0);
         let mut out = Vec::new();
-        car_instances(pos + DVec3::new(0.0, 0.0, 20.0), &v, &g, &mut out);
+        car_instances(pos + DVec3::new(0.0, 0.0, 20.0), &v, &g, true, &mut out);
         assert_eq!(out.len(), 5, "the body and four wheels");
         assert_eq!(out[0].0, cars::player_body_mesh(0));
         assert!((out[0].1.ext[3] + 0.4).abs() < 1e-6, "the body carries the crumple");
         assert!((out[0].1.ext[2] - 0.75).abs() < 1e-6, "and the brake light level");
+        assert_eq!(out[0].1.ext[0], 1.0, "and its headlights");
+        let mut dark = Vec::new();
+        car_instances(pos + DVec3::new(0.0, 0.0, 20.0), &v, &g, false, &mut dark);
+        assert_eq!(dark[0].1.ext[0], -1.0);
+        // On, the beams sit on the nose and point ahead of it; off, there are none.
+        let cam = pos + DVec3::new(0.0, 0.0, 20.0);
+        let mut glob: render::Globals = bytemuck::Zeroable::zeroed();
+        let mut lights = Vec::new();
+        car_lights(cam, &v, true, &mut glob, &mut lights);
+        let (rot, o) = car_frame(cam, &v).unwrap();
+        let ahead = rot * Vec3::NEG_Z;
+        for i in 0..2 {
+            let at = Vec3::new(glob.spot[i][0], glob.spot[i][1], glob.spot[i][2]);
+            assert!(glob.spot[i][3] > 0.0);
+            assert!((at - o).dot(ahead) > 2.0, "lamp {i} on the nose");
+        }
+        let dir = Vec3::new(glob.spot[2][0], glob.spot[2][1], glob.spot[2][2]);
+        assert!(dir.dot(ahead) > 0.99 && dir.dot(rot * Vec3::Y) < 0.0, "dipped, ahead");
+        assert!(lights.len() >= 4, "head and tail glows");
+        let mut off: render::Globals = bytemuck::Zeroable::zeroed();
+        let mut none = Vec::new();
+        v.brake = 0.0;
+        car_lights(cam, &v, false, &mut off, &mut none);
+        assert!(off.spot.iter().all(|s| s[3] == 0.0) && none.is_empty());
         assert!(out[1..].iter().all(|(id, i)| *id == cars::player_wheel_mesh(0) && i.ext[3] == 0.0));
         assert!(out.iter().all(|(_, i)| i.m.iter().flatten().all(|f| f.is_finite())));
     }

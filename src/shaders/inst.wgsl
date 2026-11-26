@@ -137,10 +137,12 @@ fn crumple_body(p: vec3f, amt: f32) -> vec3f {
     let spec = pow(max(dot(N, Hh), 0.0), 220.0) * (paint + glass + chrome) * 2.5 * sh;
     c = shade(in.P, N, albedo * (1.0 - glass * 0.5 - chrome * 0.5));
     c += sky_lut(normalize(R + l.upn * 0.12)) * fres + l.sun * spec * 0.3;
-    // Lights come on at dusk, independent of how bright the sun still is.
-    let night = 1.0 - smoothstep(-0.05, 0.12, dot(l.upn, G.sun_dir.xyz));
+    // Lights come on at dusk, independent of how bright the sun still is;
+    // the player's car switches its own (ext.x: 1 on, -1 off, 0 traffic).
+    let dusk = 1.0 - smoothstep(-0.05, 0.12, dot(l.upn, G.sun_dir.xyz));
+    let night = select(dusk, step(0.0, in.ext.x), abs(in.ext.x) > 0.5);
     c += head * vec3f(1.0, 0.95, 0.8) * (0.012 * G.sun_dir.w + 2.2 * night);
-    c += tail * vec3f(1.0, 0.04, 0.02) * (0.06 * G.sun_dir.w + 1.4 * night * (1.0 + 3.0 * brake));
+    c += tail * vec3f(1.0, 0.04, 0.02) * (0.06 * G.sun_dir.w + 1.4 * (night + 3.0 * brake * max(night, dusk)));
     c += tail * vec3f(1.0, 0.03, 0.02) * brake * 0.25 * sh;
   }
   return GOut(vec4f(c, 1.0), vec4f(Nout, -mirror), amb_share(c));

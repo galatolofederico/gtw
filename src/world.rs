@@ -339,6 +339,29 @@ pub fn crater_profile(d: f64) -> f64 {
 const CAR_HEAD: f32 = 60.0;
 const CAR_TAIL: f32 = 12.0;
 
+/// After dark the moving traffic's lamps glow out to here (lights.wgsl), on
+/// top of the lenses `inst.wgsl` lights; past it the lit lenses alone.
+const CAR_GLOW_FAR: f64 = 450.0;
+
+/// The glows of a moving car's head and tail lamps, `o` its position from
+/// the camera and `fade` (clamped to 0..1) how far in from `CAR_GLOW_FAR`.
+fn car_glows(o: DVec3, fwd: glam::Vec3, up: glam::Vec3, model: u8, fade: f32, fr: Option<&Frustum>, out: &mut Vec<crate::airfield::Light>) {
+    let k = fade.clamp(0.0, 1.0);
+    if k <= 0.0 || out.len() + 4 > crate::render::MAX_DYN_LIGHTS - 1024 || !fr.map(|f| f.sphere(o, 8.0)).unwrap_or(true) {
+        return;
+    }
+    let right = fwd.cross(up).normalize_or_zero();
+    let base = o.as_vec3();
+    let [head, tail] = cars::lamps(model);
+    for (at, inten, col, dir) in [(head, CAR_HEAD, crate::airfield::L_WHITE, fwd), (tail, CAR_TAIL, [255, 20, 12], -fwd)] {
+        for sx in [-1.0f32, 1.0] {
+            // Body frame: x right, y up, z back.
+            let p = base + right * sx * at[0] + up * at[1] - fwd * at[2];
+            out.push(crate::airfield::Light { pos: p.into(), inten: inten * k, dir: dir.into(), spread: -0.2, col: [col[0], col[1], col[2], 3], fx: [0, 0, 255, 0] });
+        }
+    }
+}
+
 const LOD_MID: f32 = buildings::BFAR[1];
 const LOD_FINE: f32 = 700.0;
 
@@ -1443,6 +1466,8 @@ impl World {
                     push(pos, fwd, up, c.model, c.col, out);
                     if let Some(photo) = lit {
                         self.photo_car_light(photo, &mut streets, b, i, c, pos, fwd, cam, lights);
+                    } else if sun < 0.04 && d2 < CAR_GLOW_FAR * CAR_GLOW_FAR {
+                        car_glows(pos - cam, fwd, up, c.model, (CAR_GLOW_FAR - d2.sqrt()) as f32 / 80.0, fr, lights);
                     }
                 }
             }

@@ -207,11 +207,11 @@ pub fn foot_rows() -> Vec<(String, &'static str)> {
 
 /// The pad in a car: the left stick steers, A accelerates, X brakes and
 /// reverses, Y gets out (as it gets in on foot), and a button each for the
-/// handbrake, the camera and the horn. Shown in Settings › Controls › In a car; the flying and on-foot
+/// handbrake, the camera, the horn and the headlights. Shown in Settings › Controls › In a car; the flying and on-foot
 /// layouts are unchanged.
 pub const CAR_LAYOUT: &[(&str, Chord)] = {
     use PadBtn::*;
-    &[("car_throttle", b(A)), ("car_brake", b(X)), ("car_handbrake", b(RB)), ("car_enter_exit", b(Y)), ("camera", b(R3)), ("car_horn", b(L3))]
+    &[("car_throttle", b(A)), ("car_brake", b(X)), ("car_handbrake", b(RB)), ("car_enter_exit", b(Y)), ("camera", b(R3)), ("car_horn", b(L3)), ("car_lights", b(LB))]
 };
 
 /// What the pad does in a car, as the controls list shows it: (input, does).
