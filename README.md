@@ -1,6 +1,6 @@
 <div align="center">
 
-# GTW — Grand Theft World
+# GTW — Go To Wherever
 
 ### An open-world sandbox on the real Earth: walk, drive, fly, and fight
 
@@ -18,9 +18,9 @@ Spawn anywhere on the planet, cross surface-aware terrain on foot, take a parked
 
 <div align="center">
 
-[![GTW — Grand Theft World trailer](docs/media/trailer.jpg)](https://youtu.be/bpeJLpqGnRM)
+[![GTW — Go To Wherever trailer](docs/media/trailer.jpg)](https://www.youtube.com/watch?v=erKL1zDbxv0)
 
-[Watch the trailer on YouTube](https://youtu.be/bpeJLpqGnRM) (49 s, 1080p)
+[Watch the trailer on YouTube](https://www.youtube.com/watch?v=erKL1zDbxv0) (45 s, 1080p)
 
 </div>
 

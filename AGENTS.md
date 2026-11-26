@@ -1,6 +1,6 @@
 # Agent instructions for GTW
 
-These instructions apply throughout this repository. GTW (Grand Theft World) is a fork of FableFlight: an open-world sandbox on the real Earth where the player walks, drives, flies, and fights. Keep the upstream aircraft rules below for every flight change.
+These instructions apply throughout this repository. GTW (Go To Wherever) is a fork of FableFlight: an open-world sandbox on the real Earth where the player walks, drives, flies, and fights. Keep the upstream aircraft rules below for every flight change.
 
 ## Project scope
 
